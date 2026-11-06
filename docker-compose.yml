@@ -1,0 +1,60 @@
+services:
+  dbharbor:
+    build: .
+    container_name: dbharbor
+    ports:
+      - "8787:8787"
+    volumes:
+      - dbharbor_data:/app/data
+    environment:
+      - DBHARBOR_PORT=8787
+      - DBHARBOR_DATA_DIR=/app/data
+      - DBHARBOR_ADMIN_USER=admin
+      - DBHARBOR_ADMIN_PASS=admin123
+    restart: unless-stopped
+
+  # Optional local database lab: docker compose --profile dev-dbs up -d
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    profiles: ["dev-dbs"]
+    ports:
+      - "9000:9000"
+      - "8123:8123"
+    environment:
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=clickhouse123
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+
+  mysql:
+    image: mysql:8.4
+    profiles: ["dev-dbs"]
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=mysql123
+      - MYSQL_DATABASE=sample_db
+
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["dev-dbs"]
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres123
+      - POSTGRES_DB=sample_db
+
+  redis:
+    image: redis:7.4-alpine
+    profiles: ["dev-dbs"]
+    ports:
+      - "6379:6379"
+
+  mongodb:
+    image: mongo:7.0
+    profiles: ["dev-dbs"]
+    ports:
+      - "27017:27017"
+
+volumes:
+  dbharbor_data:

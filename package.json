@@ -1,0 +1,23 @@
+{
+  "name": "dbharbor",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "description": "Cross-platform multi-database web management workbench (Relational, OLAP, Key-Value, Document)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Willh92/DBHarbor.git"
+  },
+  "type": "module",
+  "scripts": {
+    "setup": "node scripts/setup-toolchain.mjs --install-fe",
+    "toolchain": "node scripts/setup-toolchain.mjs",
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs",
+    "build:all": "node scripts/build.mjs --all",
+    "test": "node scripts/test.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

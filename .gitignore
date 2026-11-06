@@ -1,0 +1,43 @@
+# Local isolated toolchains
+.toolchain/
+
+# Runtime data & secrets
+data/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+*.db3
+*.s3db
+*.duckdb
+*.duckdb.wal
+*.ddb
+.secret.key
+.master.key
+ui_prefs.json
+
+# Build & release artifacts
+/dist/
+/release-assets/
+/stage/
+*.old
+*.tsbuildinfo
+backend/dbharbor
+backend/dbharbor.exe
+backend/dbharbor-desktop
+backend/dbharbor-desktop.exe
+backend/webdist/dist/*
+!backend/webdist/dist/.gitkeep
+
+# Frontend dependencies & build
+node_modules/
+frontend/node_modules/
+/frontend/dist/
+
+# Logs & OS files
+*.log
+.DS_Store
+Thumbs.db
+.env.local

@@ -1,0 +1,502 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+}
+
+html[data-theme='dark'] {
+  color-scheme: dark;
+  background: #0d1017;
+}
+
+html[data-theme='light'] {
+  color-scheme: light;
+  background: #ffffff;
+}
+
+.sidebar-item-row:hover {
+  background: rgba(22, 119, 255, 0.08);
+}
+
+.dbharbor-row-inspect-btn:hover {
+  opacity: 1 !important;
+  color: #1677ff !important;
+  background: rgba(22, 119, 255, 0.12);
+}
+
+/* Main workspace & SQL result flex-constrained Ant Design Tabs */
+.workbench-main-tabs.ant-tabs,
+.sql-results-tabs.ant-tabs {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.workbench-main-tabs > .ant-tabs-nav {
+  margin-bottom: 0 !important;
+  padding: 6px 8px 0 8px;
+  flex-shrink: 0;
+}
+
+.sql-results-tabs > .ant-tabs-nav {
+  margin-bottom: 6px !important;
+  flex-shrink: 0;
+}
+
+.workbench-main-tabs > .ant-tabs-content-holder,
+.sql-results-tabs > .ant-tabs-content-holder {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workbench-main-tabs > .ant-tabs-content-holder > .ant-tabs-content,
+.sql-results-tabs > .ant-tabs-content-holder > .ant-tabs-content {
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.workbench-main-tabs > .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane,
+.sql-results-tabs > .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane {
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Viewport-adaptive Modals & Drawers: never clip top, bottom, or sides at any window size or DPI */
+.ant-modal-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  overflow: hidden;
+}
+
+.ant-modal {
+  top: 0 !important;
+  padding-bottom: 0 !important;
+  margin: 0 auto !important;
+  max-width: calc(100vw - 24px) !important;
+}
+
+.ant-modal-content {
+  max-height: calc(100vh - 24px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ant-modal-header {
+  flex-shrink: 0;
+  padding-right: 28px;
+}
+
+.ant-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.ant-modal-footer {
+  flex-shrink: 0;
+}
+
+.ant-drawer-left .ant-drawer-content-wrapper,
+.ant-drawer-right .ant-drawer-content-wrapper {
+  max-width: calc(100vw - 24px) !important;
+}
+
+.ant-notification-notice-wrapper {
+  max-width: calc(100vw - 24px);
+}
+
+.ant-card-head-wrapper {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+/* Automatically tighten vertical spacing inside modals & workspace on short / HiDPI windows */
+@media (max-height: 740px) {
+  .ant-modal-content {
+    padding: 14px 18px !important;
+  }
+
+  .ant-modal-header {
+    margin-bottom: 8px !important;
+  }
+
+  .ant-modal-footer {
+    margin-top: 10px !important;
+  }
+
+  .ant-modal-body .ant-form-item {
+    margin-bottom: 10px;
+  }
+
+  .ant-modal-body .ant-upload-wrapper .ant-upload-drag .ant-upload {
+    padding: 10px 8px;
+  }
+
+  .ant-modal-body .ant-upload-wrapper .ant-upload-drag p.ant-upload-drag-icon {
+    margin-bottom: 4px;
+  }
+}
+
+@media (max-height: 680px) {
+  .workbench-top-header {
+    height: 40px !important;
+    padding: 0 10px !important;
+  }
+
+  .workbench-bottom-footer {
+    height: 22px !important;
+    padding: 0 10px !important;
+  }
+
+  .workbench-main-tabs > .ant-tabs-nav {
+    padding: 3px 6px 0 6px !important;
+  }
+
+  .dbharbor-context-navbar {
+    padding: 4px 10px !important;
+    margin-bottom: 6px !important;
+  }
+
+  .dbharbor-kpi-row {
+    margin-bottom: 8px !important;
+  }
+
+  .dbharbor-kpi-row .ant-card-body {
+    padding: 6px 10px !important;
+  }
+
+  .dbharbor-kpi-row .ant-statistic-title {
+    margin-bottom: 0 !important;
+    font-size: 11px !important;
+  }
+
+  .dbharbor-kpi-row .ant-statistic-content {
+    font-size: 16px !important;
+  }
+}
+
+/* Responsive top header, table footer & bottom footer adaptation on narrow windows */
+@media (max-width: 960px) {
+  .table-footer-tip {
+    display: none !important;
+  }
+}
+
+@media (max-width: 860px) {
+  .workbench-header-tag-extra,
+  .workbench-footer-extra {
+    display: none !important;
+  }
+}
+
+@media (max-width: 680px) {
+  .workbench-footer-mode {
+    display: none !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .workbench-btn-label {
+    display: none !important;
+  }
+
+  .workbench-top-header {
+    padding: 0 8px !important;
+  }
+
+  .workbench-bottom-footer {
+    padding: 0 8px !important;
+  }
+}
+
+@media (max-width: 520px) {
+  .workbench-version-badge,
+  .workbench-footer-repo-text {
+    display: none !important;
+  }
+}
+
+/* Redis Browser adaptive split layout: side-by-side on desktop, scrollable stack on narrow windows */
+.dbharbor-redis-split {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.dbharbor-redis-left {
+  width: 34%;
+  min-width: 220px;
+  max-width: 380px;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding-right: 12px;
+  border-right: 1px solid rgba(128, 128, 128, 0.18);
+}
+
+.dbharbor-redis-right {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+@media (max-width: 720px) {
+  .dbharbor-redis-split {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .dbharbor-redis-left {
+    width: 100%;
+    max-width: none;
+    height: auto;
+    max-height: 42vh;
+    padding-right: 0;
+    padding-bottom: 10px;
+    border-right: none;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.18);
+    flex-shrink: 0;
+  }
+
+  .dbharbor-redis-right {
+    height: auto;
+    overflow-y: visible;
+    flex-shrink: 0;
+  }
+}
+
+/* Prevent table headers from ever stacking characters vertically */
+.ant-table-thead > tr > th,
+.ant-table-thead > tr > td {
+  white-space: nowrap;
+}
+
+/* Interactive column width & splitter drag acceleration (especially inside Win32 Edge WebView2) */
+body.dbharbor-is-dragging,
+body.dbharbor-is-dragging * {
+  user-select: none !important;
+}
+
+body.dbharbor-is-dragging .ant-table-tbody,
+body.dbharbor-is-dragging .sidebar-item-row,
+body.dbharbor-is-dragging iframe {
+  pointer-events: none !important;
+}
+
+.dbharbor-resizable-table-wrap col,
+.dbharbor-resizable-table-wrap table {
+  transition: none !important;
+}
+
+.dbharbor-col-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  z-index: 4;
+  user-select: none;
+  touch-action: none;
+}
+
+.dbharbor-col-resizer::after {
+  content: '';
+  position: absolute;
+  top: 20%;
+  bottom: 20%;
+  right: 2px;
+  width: 2px;
+  border-radius: 1px;
+  background: rgba(128, 128, 128, 0.28);
+  transition: background 0.12s ease, top 0.12s ease, bottom 0.12s ease;
+}
+
+.dbharbor-col-resizer:hover::after,
+.dbharbor-col-resizer.is-dragging::after {
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #1677ff;
+}
+
+/* Sidebar vertical splitter handle */
+.dbharbor-sidebar-splitter {
+  width: 6px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  border-right: 1px solid rgba(128, 128, 128, 0.18);
+  position: relative;
+  user-select: none;
+  touch-action: none;
+  z-index: 10;
+}
+
+.dbharbor-sidebar-splitter::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+
+.dbharbor-sidebar-splitter:hover::after,
+.dbharbor-sidebar-splitter.is-dragging::after {
+  background: #1677ff;
+}
+
+/* SQL Console horizontal editor/results splitter handle */
+.dbharbor-row-splitter {
+  height: 6px;
+  flex-shrink: 0;
+  cursor: row-resize;
+  position: relative;
+  user-select: none;
+}
+
+.dbharbor-row-splitter::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 2px;
+  transform: translateX(-50%);
+  width: 42px;
+  height: 2px;
+  border-radius: 1px;
+  background: rgba(128, 128, 128, 0.32);
+  transition: background 0.15s ease, width 0.15s ease;
+}
+
+.dbharbor-row-splitter:hover::after,
+.dbharbor-row-splitter.is-dragging::after {
+  width: 72px;
+  background: #1677ff;
+}
+
+/* Keep horizontal & vertical scrollbars clearly visible and dark-mode aware across all surfaces */
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.34);
+  border-radius: 5px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.56);
+}
+
+html[data-theme='dark'] *::-webkit-scrollbar-track,
+html[data-theme='dark'] *::-webkit-scrollbar-corner {
+  background: #141414;
+}
+
+html[data-theme='dark'] *::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+html[data-theme='dark'] *::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.38);
+}
+
+/* Navicat-style full-height data grid: pins horizontal scrollbar to bottom and renders clean blank filler rows */
+.dbharbor-full-height-grid .ant-table-body {
+  height: var(--dbharbor-grid-body-h, auto) !important;
+  min-height: var(--dbharbor-grid-body-h, 0px) !important;
+  max-height: var(--dbharbor-grid-body-h, none) !important;
+  overflow-y: auto !important;
+  overflow-x: auto !important;
+}
+
+.dbharbor-filler-row > td.ant-table-cell {
+  height: 31px;
+  padding-top: 2px !important;
+  padding-bottom: 2px !important;
+  user-select: none;
+}
+
+.dbharbor-filler-row-writable {
+  cursor: cell;
+}
+
+.dbharbor-filler-row-writable:hover > td.ant-table-cell {
+  background: rgba(22, 119, 255, 0.045) !important;
+}
+
+.dbharbor-filler-row .ant-table-selection-column .ant-checkbox-wrapper {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Safe-area bottom padding on touch mobile devices */
+.workbench-bottom-footer {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@media (max-width: 640px) {
+  .ant-modal-wrap {
+    padding: 6px;
+  }
+
+  .ant-modal {
+    max-width: calc(100vw - 12px) !important;
+  }
+
+  .ant-modal-content {
+    max-height: calc(100dvh - 12px);
+    padding: 12px 14px !important;
+  }
+
+  .ant-drawer-bottom > .ant-drawer-content-wrapper {
+    max-width: 100vw !important;
+    border-top-left-radius: 12px;
+    border-top-right-radius: 12px;
+    overflow: hidden;
+  }
+
+  .dbharbor-mobile-table .ant-table-cell {
+    padding: 5px 6px !important;
+    font-size: 12px;
+  }
+}

@@ -1,0 +1,21 @@
+# ==============================================================================
+# DBHarbor — Caddy v2 Reverse Proxy (Automatic HTTPS)
+# ==============================================================================
+
+db.example.com {
+    request_body {
+        max_size 512MB
+    }
+
+    # Option A: Reverse proxy via Unix Domain Socket (zero exposed TCP ports)
+    reverse_proxy unix//run/dbharbor/dbharbor.sock {
+        flush_interval -1
+        header_up X-Real-IP {remote_host}
+    }
+
+    # Option B: Reverse proxy via Local TCP (uncomment if using -host 127.0.0.1 -port 8787)
+    # reverse_proxy 127.0.0.1:8787 {
+    #     flush_interval -1
+    #     header_up X-Real-IP {remote_host}
+    # }
+}

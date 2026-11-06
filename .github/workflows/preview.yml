@@ -1,0 +1,289 @@
+name: Preview
+
+on:
+  push:
+    branches:
+      - preview
+      - next
+      - dev
+    paths-ignore:
+      - "**.md"
+      - ".gitignore"
+  workflow_dispatch:
+    inputs:
+      publish_ghcr:
+        description: "Build and push multi-arch ':preview' Docker image to GHCR"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: preview-channel-${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  CGO_ENABLED: "0"
+  GOPROXY: "https://proxy.golang.org,direct"
+
+jobs:
+  publish-preview:
+    name: Build & Publish Rolling Preview Pre-Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Go 1.24
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache-dependency-path: backend/go.sum
+
+      - name: Validate service script & run Go test suite
+        run: |
+          bash -n scripts/install-service.sh
+          if LC_ALL=C grep -q $'\r' scripts/install-service.sh; then
+            echo "Error: scripts/install-service.sh contains CRLF line endings" >&2
+            exit 1
+          fi
+          go -C backend test -v ./...
+
+      - name: Compute Preview build version
+        id: meta
+        run: |
+          PKG_VER="$(node -p "require('./package.json').version")"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          DATE_UTC="$(date -u +%Y%m%d)"
+          PREVIEW_VER="${PKG_VER}-preview.${DATE_UTC}.${SHORT_SHA}"
+          echo "version=${PREVIEW_VER}" >> "${GITHUB_OUTPUT}"
+          echo "Computed preview version: ${PREVIEW_VER}"
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Cross-compile all 6 platforms (Preview Channel)
+        env:
+          DBHARBOR_BUILD_VERSION: ${{ steps.meta.outputs.version }}
+          DBHARBOR_BUILD_CHANNEL: "preview"
+        run: node scripts/build.mjs --all
+
+      - name: Assemble Preview release assets, macOS .app.zip & platform bundles
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+
+          for bin in dist/dbharbor-*; do
+            if [[ -f "${bin}" ]]; then
+              cp "${bin}" release-assets/
+            fi
+          done
+          chmod +x release-assets/dbharbor-linux-* release-assets/dbharbor-darwin-* \
+                   release-assets/dbharbor-desktop-linux-* release-assets/dbharbor-desktop-darwin-*
+
+          for arch in amd64 arm64; do
+            APP_NAME="DBHarbor-darwin-${arch}.app"
+            chmod +x "dist/${APP_NAME}/Contents/MacOS/dbharbor-desktop"
+            (cd dist && zip -r -y -q "../release-assets/${APP_NAME}.zip" "${APP_NAME}")
+          done
+
+          COMMON_DOCS=(LICENSE README.md README.zh-CN.md README.zh-TW.md README.ja.md CHANGELOG.md CHANGELOG.zh-CN.md CHANGELOG.zh-TW.md CHANGELOG.ja.md)
+
+          for target in windows-amd64 windows-arm64 linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+            OS="${target%-*}"
+            ARCH="${target#*-}"
+            STAGE_NAME="dbharbor-bundle-preview-${OS}-${ARCH}"
+            STAGE_DIR="stage/${STAGE_NAME}"
+            rm -rf "${STAGE_DIR}"
+            mkdir -p "${STAGE_DIR}"
+
+            cp -r deploy "${STAGE_DIR}/deploy"
+            for doc in "${COMMON_DOCS[@]}"; do
+              [[ -f "${doc}" ]] && cp "${doc}" "${STAGE_DIR}/"
+            done
+
+            if [[ "${OS}" == "windows" ]]; then
+              cp "dist/dbharbor-${OS}-${ARCH}.exe" "${STAGE_DIR}/"
+              cp "dist/dbharbor-desktop-${OS}-${ARCH}.exe" "${STAGE_DIR}/"
+              cp dist/install-service.ps1 "${STAGE_DIR}/"
+              (cd stage && zip -r -q "../release-assets/${STAGE_NAME}.zip" "${STAGE_NAME}")
+            elif [[ "${OS}" == "darwin" ]]; then
+              cp "dist/dbharbor-${OS}-${ARCH}" "${STAGE_DIR}/"
+              cp "dist/dbharbor-desktop-${OS}-${ARCH}" "${STAGE_DIR}/"
+              cp -r "dist/DBHarbor-darwin-${ARCH}.app" "${STAGE_DIR}/"
+              cp dist/install-service.sh "${STAGE_DIR}/"
+              chmod +x "${STAGE_DIR}/dbharbor-${OS}-${ARCH}" \
+                       "${STAGE_DIR}/dbharbor-desktop-${OS}-${ARCH}" \
+                       "${STAGE_DIR}/DBHarbor-darwin-${ARCH}.app/Contents/MacOS/dbharbor-desktop" \
+                       "${STAGE_DIR}/install-service.sh"
+              tar -C stage -czf "release-assets/${STAGE_NAME}.tar.gz" "${STAGE_NAME}"
+            else
+              cp "dist/dbharbor-${OS}-${ARCH}" "${STAGE_DIR}/"
+              cp "dist/dbharbor-desktop-${OS}-${ARCH}" "${STAGE_DIR}/"
+              cp dist/install-service.sh "${STAGE_DIR}/"
+              chmod +x "${STAGE_DIR}/dbharbor-${OS}-${ARCH}" \
+                       "${STAGE_DIR}/dbharbor-desktop-${OS}-${ARCH}" \
+                       "${STAGE_DIR}/install-service.sh"
+              tar -C stage -czf "release-assets/${STAGE_NAME}.tar.gz" "${STAGE_NAME}"
+            fi
+          done
+
+          cp dist/install-service.sh dist/install-service.ps1 dist/LICENSE release-assets/
+          chmod +x release-assets/install-service.sh
+          (cd release-assets && sha256sum * > SHA256SUMS.txt)
+          ls -lh release-assets/
+
+      - name: Generate Rolling Preview Notes
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const { execFileSync } = require("child_process");
+            const version = process.env.VERSION;
+            const branch = process.env.BRANCH;
+            const sha = process.env.SHA || "";
+            const repo = process.env.REPO;
+
+            let commits = "";
+            try {
+              commits = execFileSync(
+                "git",
+                ["log", "-n", "15", "--pretty=format:- `%h` %s (%ad)", "--date=short"],
+                { encoding: "utf8" }
+              ).trim();
+            } catch {}
+
+            const notes = [
+              "> **Rolling Preview Build (`v" + version + "`)**",
+              "> Automatically built from branch `" + branch + "` (`" + sha.slice(0, 7) + "`) at `" + new Date().toISOString() + "`.",
+              "> Select **Preview** under **Update Channel** inside DBHarbor to track Preview updates automatically.",
+              "",
+              "### Recent Commits",
+              commits || "- Built from `" + sha.slice(0, 7) + "`",
+              "",
+              "---",
+              "### Editions Included",
+              "- **Desktop GUI Edition (Pure Local Mode, No Account System)**: `dbharbor-desktop-<os>-<arch>` & macOS `DBHarbor-darwin-<arch>.app.zip`",
+              "- **Web Server Edition (TCP / Unix Domain Socket + 2FA Security)**: `dbharbor-<os>-<arch>`",
+              "- **Full Platform Bundles**: `dbharbor-bundle-preview-<os>-<arch>.{zip,tar.gz}`",
+              "",
+              "Source: https://github.com/" + repo + "/commit/" + sha,
+              ""
+            ].join("\n");
+            fs.writeFileSync("PREVIEW_NOTES.md", notes, "utf8");
+          '
+
+      - name: Upload workflow Preview artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbharbor-preview-v${{ steps.meta.outputs.version }}-assets
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Update rolling 'preview' Git tag & refresh GitHub Pre-Release
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f preview "${GITHUB_SHA}"
+          git push origin refs/tags/preview --force
+
+      - name: Publish Rolling GitHub Pre-Release (preview)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: preview
+          target_commitish: ${{ github.sha }}
+          name: DBHarbor Preview (v${{ steps.meta.outputs.version }})
+          body_path: PREVIEW_NOTES.md
+          draft: false
+          prerelease: true
+          make_latest: "false"
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/dbharbor-windows-amd64.exe
+            release-assets/dbharbor-windows-arm64.exe
+            release-assets/dbharbor-linux-amd64
+            release-assets/dbharbor-linux-arm64
+            release-assets/dbharbor-desktop-windows-amd64.exe
+            release-assets/dbharbor-desktop-windows-arm64.exe
+            release-assets/dbharbor-desktop-linux-amd64
+            release-assets/dbharbor-desktop-linux-arm64
+            release-assets/dbharbor-darwin-amd64
+            release-assets/dbharbor-darwin-arm64
+            release-assets/dbharbor-desktop-darwin-amd64
+            release-assets/dbharbor-desktop-darwin-arm64
+            release-assets/DBHarbor-darwin-amd64.app.zip
+            release-assets/DBHarbor-darwin-arm64.app.zip
+            release-assets/dbharbor-bundle-*
+            release-assets/install-service.sh
+            release-assets/install-service.ps1
+            release-assets/LICENSE
+            release-assets/SHA256SUMS.txt
+
+  docker-preview:
+    name: Publish Multi-Arch Preview Docker Image (:preview)
+    needs: publish-preview
+    if: github.event_name == 'push' || inputs.publish_ghcr == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compute GHCR Preview tags
+        id: docker_tags
+        env:
+          VERSION: ${{ needs.publish-preview.outputs.version }}
+        run: |
+          IMAGE="$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          SAFE_VER="$(echo "${VERSION}" | tr -c 'a-zA-Z0-9._-' '-')"
+          echo "tags=${IMAGE}:preview,${IMAGE}:${SAFE_VER}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push linux/amd64 & linux/arm64 Preview images
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ needs.publish-preview.outputs.version }}
+            CHANNEL=preview
+            GIT_COMMIT=${{ github.sha }}
+          tags: ${{ steps.docker_tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

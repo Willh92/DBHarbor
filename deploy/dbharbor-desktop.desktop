@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=DBHarbor
+GenericName=Multi-Database Desktop Workbench
+Comment=Pure local multi-database management client (14 SQL, OLAP, KV & Document engines)
+Exec=/usr/local/bin/dbharbor-desktop %U
+Icon=dbharbor
+Terminal=false
+Categories=Development;Database;
+StartupNotify=true
+StartupWMClass=DBHarbor
