@@ -13,9 +13,13 @@
   # Default install under SYSTEM with data at C:\ProgramData\DBHarbor\data
   powershell -ExecutionPolicy Bypass -File .\scripts\install-service.ps1 -Action Install -Port 8787
 
-  # Least-privilege install under NT AUTHORITY\LocalService + custom Windows permission group
+  # Least-privilege install under NT AUTHORITY\LocalService + custom initial admin account
   powershell -ExecutionPolicy Bypass -File .\scripts\install-service.ps1 -Action Install `
-    -ServiceAccount "NT AUTHORITY\LocalService" -PermissionGroup "Administrators" -Port 8787
+    -ServiceAccount "NT AUTHORITY\LocalService" -PermissionGroup "Administrators" `
+    -AdminUser "ops_admin" -AdminPass "ChangeMe!2026" -Port 8787
+
+  # Upgrade binary online from GitHub Releases and restart service
+  powershell -ExecutionPolicy Bypass -File .\scripts\install-service.ps1 -Action Upgrade
 
   # Manage service lifecycle
   powershell -ExecutionPolicy Bypass -File .\scripts\install-service.ps1 -Action Status
@@ -24,12 +28,22 @@
 #>
 
 param(
-  [ValidateSet("Install", "Uninstall", "Start", "Stop", "Restart", "Status")]
+  [ValidateSet("Install", "Upgrade", "Uninstall", "Start", "Stop", "Restart", "Status")]
   [string]$Action = "Install",
   [string]$BinaryPath = "",
+  [string]$InstallDir = "",
+  [switch]$Download,
+  [string]$Version = "",
+  [ValidateSet("release", "preview")]
+  [string]$Channel = "release",
+  [string]$Mirror = "",
+  [string]$Repo = "Willh92/DBHarbor",
+  [switch]$NoVerify,
   [string]$HostAddr = "0.0.0.0",
   [int]$Port = 8787,
   [string]$DataDir = "",
+  [string]$AdminUser = $env:DBHARBOR_ADMIN_USER,
+  [string]$AdminPass = $env:DBHARBOR_ADMIN_PASS,
   [string]$ServiceAccount = "SYSTEM",
   [string]$ServicePassword = "",
   [string]$PermissionGroup = "Administrators"
@@ -38,29 +52,134 @@ param(
 $ErrorActionPreference = "Stop"
 $TaskName = "DBHarborServer"
 
+if ($AdminUser -and ($AdminUser -notmatch '^[a-zA-Z0-9._@-]{2,64}$')) {
+  throw "Invalid -AdminUser '$AdminUser': must be 2-64 characters using letters, numbers, '.', '_', '-', or '@'."
+}
+if ($AdminPass -and ($AdminPass.Length -lt 6)) {
+  throw "Invalid -AdminPass: initial admin password must be at least 6 characters."
+}
+
 $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-if (-not $DataDir) {
-  $ProgramDataRoot = if ($env:ProgramData) { $env:ProgramData } else { "C:\ProgramData" }
-  $DataDir = Join-Path $ProgramDataRoot "DBHarbor\data"
+if ($InstallDir) {
+  $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
+  if (-not $DataDir) {
+    $DataDir = Join-Path $InstallDir "data"
+  }
+} else {
+  $InstallDir = Join-Path $env:ProgramFiles "DBHarbor"
+  if (-not $DataDir) {
+    $ProgramDataRoot = if ($env:ProgramData) { $env:ProgramData } else { "C:\ProgramData" }
+    $DataDir = Join-Path $ProgramDataRoot "DBHarbor\data"
+  }
+}
+$DataDir = [System.IO.Path]::GetFullPath($DataDir)
+
+function Get-ReleaseBaseUrl {
+  param([string]$Ref)
+  $rawBase = if ($Ref -eq "latest") {
+    "https://github.com/$Repo/releases/latest/download"
+  } else {
+    "https://github.com/$Repo/releases/download/$Ref"
+  }
+  if ($Mirror) {
+    return ($Mirror.TrimEnd('/') + "/" + $rawBase)
+  }
+  return $rawBase
+}
+
+function Download-ReleaseBinary {
+  param([string]$AssetName)
+  $pinned = $false
+  $primary = "latest"
+  if ($Version) {
+    if ($Version -eq "latest") {
+      $primary = "latest"
+    } elseif ($Version -eq "preview") {
+      $primary = "preview"
+      $pinned = $true
+    } else {
+      $cleanVer = $Version.TrimStart('v', 'V')
+      $primary = "v$cleanVer"
+      $pinned = $true
+    }
+  } elseif ($Channel -eq "preview") {
+    $primary = "preview"
+    $pinned = $true
+  }
+
+  $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("dbharbor-dl-" + [Guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+  $dlBin = Join-Path $tmpDir $AssetName
+  $dlSum = Join-Path $tmpDir "SHA256SUMS.txt"
+
+  $baseUrl = Get-ReleaseBaseUrl -Ref $primary
+  Write-Host "[DBHarbor] Downloading $AssetName from GitHub Releases ($Repo @ $primary)..." -ForegroundColor Cyan
+  try {
+    & curl.exe -fL --retry 3 --connect-timeout 15 -o $dlBin "$baseUrl/$AssetName"
+    if ($LASTEXITCODE -ne 0) { throw "HTTP download failed" }
+  } catch {
+    if (($primary -eq "latest") -and (-not $pinned)) {
+      Write-Host "[DBHarbor] No stable 'latest' release found; falling back to rolling 'preview' release..." -ForegroundColor Yellow
+      $primary = "preview"
+      $baseUrl = Get-ReleaseBaseUrl -Ref "preview"
+      & curl.exe -fL --retry 3 --connect-timeout 15 -o $dlBin "$baseUrl/$AssetName"
+      if ($LASTEXITCODE -ne 0) {
+        throw "Failed to download $AssetName from $baseUrl/$AssetName"
+      }
+    } else {
+      throw "Failed to download $AssetName from $baseUrl/$AssetName"
+    }
+  }
+
+  if (-not $NoVerify) {
+    & curl.exe -fsSL --retry 3 --connect-timeout 15 -o $dlSum "$baseUrl/SHA256SUMS.txt" 2>$null
+    if (($LASTEXITCODE -eq 0) -and (Test-Path $dlSum)) {
+      $expected = $null
+      foreach ($line in (Get-Content $dlSum)) {
+        if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([Regex]::Escape($AssetName))\s*$") {
+          $expected = $Matches[1].ToLowerInvariant()
+          break
+        }
+      }
+      if ($expected) {
+        $actual = (Get-FileHash -Path $dlBin -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) {
+          Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+          throw "SHA-256 mismatch for $AssetName! Expected $expected, got $actual"
+        }
+        Write-Host "[DBHarbor] Verified SHA-256 checksum ($actual)" -ForegroundColor Green
+      }
+    }
+  }
+  return $dlBin
 }
 
 function Resolve-DBHarborBinary {
-  if ($BinaryPath -and (Test-Path $BinaryPath)) {
+  if ($BinaryPath) {
+    if (-not (Test-Path $BinaryPath)) {
+      throw "Specified binary not found: $BinaryPath"
+    }
     return (Resolve-Path $BinaryPath).Path
   }
+  $AssetName = "dbharbor-windows-$Arch.exe"
+  if ($Download -or $Version -or ($Action -eq "Upgrade")) {
+    return (Download-ReleaseBinary -AssetName $AssetName)
+  }
   $Candidates = @(
-    (Join-Path $ScriptDir "dbharbor-windows-$Arch.exe"),
-    (Join-Path $ScriptDir "..\dist\dbharbor-windows-$Arch.exe"),
+    (Join-Path $ScriptDir $AssetName),
+    (Join-Path $ScriptDir "..\dist\$AssetName"),
     (Join-Path $ScriptDir "dbharbor.exe")
   )
   foreach ($c in $Candidates) {
     if (Test-Path $c) {
+      Write-Host "[DBHarbor] Using local binary: $c" -ForegroundColor Cyan
       return (Resolve-Path $c).Path
     }
   }
-  throw "Could not find dbharbor-windows-$Arch.exe. Run 'npm run build' first or specify -BinaryPath."
+  Write-Host "[DBHarbor] No local binary ($AssetName) found; auto-downloading from GitHub Releases..." -ForegroundColor Cyan
+  return (Download-ReleaseBinary -AssetName $AssetName)
 }
 
 function Set-DataDirPermissions {
@@ -80,19 +199,73 @@ function Set-DataDirPermissions {
   }
 }
 
+function Initialize-AdminStore {
+  param(
+    [string]$Executable,
+    [string]$TargetDataDir
+  )
+  if ((-not $AdminUser) -and (-not $AdminPass)) {
+    return
+  }
+  $DbFile = Join-Path $TargetDataDir "dbharbor.db"
+  if ((Test-Path $DbFile) -and ((Get-Item $DbFile).Length -gt 0)) {
+    Write-Host "[DBHarbor] Existing database detected at $DbFile; -AdminUser / -AdminPass only applies when initializing a fresh data directory." -ForegroundColor Yellow
+    return
+  }
+
+  $EffUser = if ($AdminUser) { $AdminUser } else { "admin" }
+  $EffPass = if ($AdminPass) { $AdminPass } else { "admin123" }
+  $PrevUser = $env:DBHARBOR_ADMIN_USER
+  $PrevPass = $env:DBHARBOR_ADMIN_PASS
+  try {
+    $env:DBHARBOR_ADMIN_USER = $EffUser
+    $env:DBHARBOR_ADMIN_PASS = $EffPass
+
+    $HelpOut = (& $Executable -h 2>&1 | Out-String)
+    if ($HelpOut -match "init-only") {
+      & $Executable -data-dir $TargetDataDir -init-only | Out-Null
+      if ($LASTEXITCODE -ne 0) {
+        throw "Failed to initialize admin store with -init-only"
+      }
+    } else {
+      $Proc = Start-Process -FilePath $Executable -ArgumentList @("-host", "127.0.0.1", "-port", "0", "-data-dir", "`"$TargetDataDir`"") -WindowStyle Hidden -PassThru
+      try {
+        for ($i = 0; $i -lt 20; $i++) {
+          if ((Test-Path $DbFile) -and ((Get-Item $DbFile).Length -gt 0)) {
+            break
+          }
+          Start-Sleep -Milliseconds 500
+        }
+      } finally {
+        if (-not $Proc.HasExited) {
+          Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue
+        }
+      }
+    }
+    Write-Host "[DBHarbor] Initialized administrator account ($EffUser) in $TargetDataDir" -ForegroundColor Green
+  } finally {
+    $env:DBHARBOR_ADMIN_USER = $PrevUser
+    $env:DBHARBOR_ADMIN_PASS = $PrevPass
+  }
+}
+
 switch ($Action) {
   "Install" {
     $SrcBin = Resolve-DBHarborBinary
-    $InstallDir = Join-Path $env:ProgramFiles "DBHarbor"
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
-
-    Set-DataDirPermissions -TargetDir $DataDir -Account $ServiceAccount -Group $PermissionGroup
 
     $DestBin = Join-Path $InstallDir "dbharbor.exe"
     if ($SrcBin -ne $DestBin) {
       Copy-Item -Force $SrcBin $DestBin
     }
+
+    Initialize-AdminStore -Executable $DestBin -TargetDataDir $DataDir
+
+    if ($ServiceAccount -and ($ServiceAccount -ne "SYSTEM") -and ($ServiceAccount -ne "NT AUTHORITY\SYSTEM")) {
+      & icacls $InstallDir /grant "${ServiceAccount}:(OI)(CI)RX" | Out-Null
+    }
+    Set-DataDirPermissions -TargetDir $DataDir -Account $ServiceAccount -Group $PermissionGroup
 
     $ArgsStr = "-host $HostAddr -port $Port -data-dir `"$DataDir`""
     $TaskAction = New-ScheduledTaskAction -Execute $DestBin -Argument $ArgsStr -WorkingDirectory $InstallDir
@@ -121,6 +294,27 @@ switch ($Action) {
     Write-Host "  Data Dir : $DataDir"
     Write-Host "  Role/ACL : Account=$ServiceAccount, Group=$PermissionGroup"
     Write-Host "  Listen   : http://${HostAddr}:${Port}"
+  }
+  "Upgrade" {
+    $ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    $DestBin = Join-Path $InstallDir "dbharbor.exe"
+    if ($ExistingTask -and (-not $PSBoundParameters.ContainsKey("InstallDir"))) {
+      $TaskExe = $ExistingTask.Actions[0].Execute
+      if ($TaskExe) { $DestBin = $TaskExe }
+    }
+    $SrcBin = Resolve-DBHarborBinary
+    if ($ExistingTask) {
+      Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+      Start-Sleep -Seconds 1
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $DestBin) | Out-Null
+    Copy-Item -Force $SrcBin $DestBin
+    if ($ExistingTask) {
+      Start-ScheduledTask -TaskName $TaskName
+      Write-Host "[DBHarbor] Upgraded & restarted '$TaskName' ($DestBin)" -ForegroundColor Green
+    } else {
+      Write-Host "[DBHarbor] Upgraded binary at $DestBin" -ForegroundColor Green
+    }
   }
   "Uninstall" {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue

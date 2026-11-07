@@ -83,31 +83,42 @@ DBHarbor はカレントディレクトリを汚染せず、各 OS の標準ア�
 
 ---
 
-## 自動起動サービス登録と実行ロール・権限グループ設定
+## 自動起動サービス登録・オンライン更新・初期管理者設定
+
+`scripts/` および `dist/` 同梱のサービス管理スクリプトは、ローカルバイナリが無い場合の **GitHub Releases からの自動ダウンロード＆`SHA256SUMS.txt` 検証**、インストール先指定（`--install-dir` / `-InstallDir`）、**初回デプロイ時の管理者アカウント初期化**（`--admin-user` / `--admin-pass` — 初期化後に一時認証情報を自動消去）、および **ワンコマンドオンライン更新**（`upgrade`）に対応しています。
 
 ### 1. Linux (`systemd` / `OpenRC`)
 
 ```bash
 chmod +x ./dist/install-service.sh
 
-# Unix ドメインソケット待受 + 実行ユーザー・グループおよび Nginx グループ (www-data / nginx) 権限付与
+# Unix ドメインソケット待受 + 実行ロール・Nginx グループ権限 (www-data / nginx)・初期管理者アカウント設定
 sudo ./dist/install-service.sh install \
   --user dbharbor \
   --group dbharbor \
+  --data-dir /var/lib/dbharbor \
   --socket-group www-data \
   --supplementary-groups www-data \
   --unix-socket /run/dbharbor/dbharbor.sock \
-  --unix-socket-perm 0660
+  --unix-socket-perm 0660 \
+  --admin-user ops_admin \
+  --admin-pass 'StrongPass!2026'
 
 # ローカル TCP 待受
 sudo ./dist/install-service.sh install --user dbharbor --group dbharbor --host 127.0.0.1 --port 8787
+
+# GitHub Releases から最新版へオンライン更新＆再起動
+sudo ./dist/install-service.sh upgrade
 ```
 
 ### 2. macOS (`launchd`)
 
 ```bash
 chmod +x ./dist/install-service.sh
-sudo ./dist/install-service.sh install --host 127.0.0.1 --port 8787 --user _www --group _www
+sudo ./dist/install-service.sh install \
+  --host 127.0.0.1 --port 8787 \
+  --user _www --group _www \
+  --admin-user ops_admin --admin-pass 'StrongPass!2026'
 # または非 root ユーザーサービス:
 ./dist/install-service.sh install --user-mode --port 8787
 ```
@@ -119,7 +130,12 @@ powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 `
   -Action Install `
   -ServiceAccount "NT AUTHORITY\LocalService" `
   -PermissionGroup "Administrators" `
+  -AdminUser "ops_admin" `
+  -AdminPass "StrongPass!2026" `
   -HostAddr "127.0.0.1" -Port 8787
+
+# オンライン更新＆サービス再起動
+powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 -Action Upgrade
 ```
 
 ---

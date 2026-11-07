@@ -170,3 +170,35 @@ func TestPrepareListenerUnixDomainSocketHTTP(t *testing.T) {
 		t.Fatalf("expected cleanup() to remove unix socket file %s", sockPath)
 	}
 }
+
+func TestLoadAdminBootstrapAndInitOnlyFlags(t *testing.T) {
+	tmpData := t.TempDir()
+	t.Setenv("DBHARBOR_ADMIN_USER", "envadmin")
+	t.Setenv("DBHARBOR_ADMIN_PASS", "envpass123")
+
+	cfgEnv, err := Load([]string{"-data-dir", tmpData, "-init-only"})
+	if err != nil {
+		t.Fatalf("Load env bootstrap failed: %v", err)
+	}
+	if !cfgEnv.InitOnly {
+		t.Fatal("expected InitOnly to be true")
+	}
+	if cfgEnv.AdminUser != "envadmin" || cfgEnv.AdminPass != "envpass123" {
+		t.Fatalf("unexpected env admin credentials: user=%q pass=%q", cfgEnv.AdminUser, cfgEnv.AdminPass)
+	}
+
+	cfgFlag, err := Load([]string{
+		"-data-dir", tmpData,
+		"-admin-user", "ops_root",
+		"-admin-pass", "Strong#Pass99",
+	})
+	if err != nil {
+		t.Fatalf("Load CLI bootstrap failed: %v", err)
+	}
+	if cfgFlag.InitOnly {
+		t.Fatal("expected InitOnly to default to false")
+	}
+	if cfgFlag.AdminUser != "ops_root" || cfgFlag.AdminPass != "Strong#Pass99" {
+		t.Fatalf("unexpected CLI admin credentials: user=%q pass=%q", cfgFlag.AdminUser, cfgFlag.AdminPass)
+	}
+}

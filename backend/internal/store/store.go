@@ -391,8 +391,15 @@ func (s *Store) ensureAdmin(username, password string) error {
 	if count > 0 {
 		return nil
 	}
+	username = strings.TrimSpace(username)
 	if username == "" {
 		username = "admin"
+	}
+	if !validUsernameRe.MatchString(username) {
+		return errors.New("admin username must be 2-64 characters using letters, numbers, '.', '_', '-', or '@'")
+	}
+	if password != "" && password != "admin123" && len(password) < 6 {
+		return errors.New("initial admin password must be at least 6 characters")
 	}
 	isCustomPass := password != "" && password != "admin123"
 	if password == "" {

@@ -16,12 +16,14 @@
 # ==============================================================================
 
 set -eu
+umask 022
 
 SERVICE_NAME="dbharbor"
 MACOS_LABEL="io.dbharbor.server"
 
 ACTION="install"
 BIN_SRC=""
+INSTALL_DIR=""
 HOST_ADDR="0.0.0.0"
 PORT="8787"
 UNIX_SOCKET=""
@@ -33,6 +35,27 @@ SVC_USER=""
 SVC_GROUP=""
 SUPP_GROUPS=""
 USER_MODE="0"
+ADMIN_USER="${DBHARBOR_ADMIN_USER:-}"
+ADMIN_PASS="${DBHARBOR_ADMIN_PASS:-}"
+GITHUB_REPO="${DBHARBOR_REPO:-Willh92/DBHarbor}"
+RELEASE_VERSION="${DBHARBOR_VERSION:-}"
+RELEASE_CHANNEL="${DBHARBOR_CHANNEL:-release}"
+GITHUB_MIRROR="${DBHARBOR_MIRROR:-}"
+FORCE_DOWNLOAD="0"
+SKIP_VERIFY="0"
+RESOLVED_BIN_PATH=""
+TMP_DOWNLOAD_DIR=""
+BOOTSTRAP_ENV_FILE=""
+
+cleanup_tmp() {
+  if [ -n "$TMP_DOWNLOAD_DIR" ] && [ -d "$TMP_DOWNLOAD_DIR" ]; then
+    rm -rf "$TMP_DOWNLOAD_DIR" 2>/dev/null || true
+  fi
+  if [ -n "$BOOTSTRAP_ENV_FILE" ] && [ -f "$BOOTSTRAP_ENV_FILE" ]; then
+    rm -f "$BOOTSTRAP_ENV_FILE" 2>/dev/null || true
+  fi
+}
+trap 'cleanup_tmp' EXIT INT TERM
 
 log_info() {
   printf "\033[1;34m[DBHarbor]\033[0m %s\n" "$*"
@@ -58,7 +81,8 @@ Usage:
   install-service.sh [command] [options]
 
 Commands:
-  install      Install binary, register auto-start service, and start immediately (default)
+  install      Install binary (local or auto-downloaded from GitHub Releases), register service, and start (default)
+  upgrade      Download latest/specified release binary from GitHub, verify SHA-256, and restart service
   uninstall    Stop and remove the auto-start service registration (preserves data directory)
   start        Start the DBHarbor service
   stop         Stop the DBHarbor service
@@ -67,7 +91,14 @@ Commands:
   logs         Tail service runtime logs
 
 Options:
-  --bin <path>                    Path to compiled DBHarbor binary (auto-detected if omitted)
+  --bin <path>                    Path to local DBHarbor binary (skips GitHub download)
+  --install-dir <dir>             Target installation directory for binary (and ./data when --data-dir is omitted)
+  --download                      Force downloading binary from GitHub Releases even if a local binary exists
+  --version <tag>                 GitHub Release version to download (default: latest; e.g. v1.0.0 or preview)
+  --channel <release|preview>     Release channel when --version is omitted (default: release)
+  --mirror <url>                  GitHub download mirror prefix (e.g. https://ghfast.top)
+  --repo <owner/repo>             GitHub repository for release downloads (default: Willh92/DBHarbor)
+  --no-verify                     Skip SHA256SUMS.txt verification when downloading from GitHub
   --host <addr>                   Listen host address (default: 0.0.0.0)
   --port <port>                   Listen HTTP port (default: 8787)
   --unix-socket <path>            Listen on Unix domain socket instead of TCP (e.g. /run/dbharbor/dbharbor.sock)
@@ -78,6 +109,8 @@ Options:
   --user <username>               Service execution user / role (Linux default: dbharbor; optional on macOS)
   --group <groupname>             Primary permission group for service & data dir (Linux default: same as --user)
   --supplementary-groups <g1,g2>  Comma-separated supplementary groups for systemd service (e.g. www-data,docker)
+  --admin-user <username>         Initial admin username when bootstrapping a fresh data directory (default: admin)
+  --admin-pass <password>         Initial admin password when bootstrapping a fresh data directory (min 6 chars)
   --user-mode                     Install as current non-root user service (systemd --user / LaunchAgents)
   -h, --help                      Show this help message
 EOF
@@ -85,7 +118,7 @@ EOF
 
 if [ "$#" -gt 0 ]; then
   case "$1" in
-    install|uninstall|start|stop|restart|status|logs)
+    install|upgrade|uninstall|start|stop|restart|status|logs)
       ACTION="$1"
       shift
       ;;
@@ -102,45 +135,153 @@ while [ "$#" -gt 0 ]; do
       BIN_SRC="$2"
       shift 2
       ;;
+    --bin=*)
+      BIN_SRC="${1#*=}"
+      shift 1
+      ;;
+    --install-dir)
+      INSTALL_DIR="$2"
+      shift 2
+      ;;
+    --install-dir=*)
+      INSTALL_DIR="${1#*=}"
+      shift 1
+      ;;
+    --download)
+      FORCE_DOWNLOAD="1"
+      shift 1
+      ;;
+    --version)
+      RELEASE_VERSION="$2"
+      shift 2
+      ;;
+    --version=*)
+      RELEASE_VERSION="${1#*=}"
+      shift 1
+      ;;
+    --channel)
+      RELEASE_CHANNEL="$2"
+      shift 2
+      ;;
+    --channel=*)
+      RELEASE_CHANNEL="${1#*=}"
+      shift 1
+      ;;
+    --mirror)
+      GITHUB_MIRROR="$2"
+      shift 2
+      ;;
+    --mirror=*)
+      GITHUB_MIRROR="${1#*=}"
+      shift 1
+      ;;
+    --repo)
+      GITHUB_REPO="$2"
+      shift 2
+      ;;
+    --repo=*)
+      GITHUB_REPO="${1#*=}"
+      shift 1
+      ;;
+    --no-verify)
+      SKIP_VERIFY="1"
+      shift 1
+      ;;
     --host)
       HOST_ADDR="$2"
       shift 2
+      ;;
+    --host=*)
+      HOST_ADDR="${1#*=}"
+      shift 1
       ;;
     --port)
       PORT="$2"
       shift 2
       ;;
+    --port=*)
+      PORT="${1#*=}"
+      shift 1
+      ;;
     --unix-socket)
       UNIX_SOCKET="$2"
       shift 2
+      ;;
+    --unix-socket=*)
+      UNIX_SOCKET="${1#*=}"
+      shift 1
       ;;
     --unix-socket-perm)
       UNIX_SOCKET_PERM="$2"
       shift 2
       ;;
+    --unix-socket-perm=*)
+      UNIX_SOCKET_PERM="${1#*=}"
+      shift 1
+      ;;
     --socket-group)
       SOCKET_GROUP="$2"
       shift 2
+      ;;
+    --socket-group=*)
+      SOCKET_GROUP="${1#*=}"
+      shift 1
       ;;
     --data-dir)
       DATA_DIR="$2"
       shift 2
       ;;
+    --data-dir=*)
+      DATA_DIR="${1#*=}"
+      shift 1
+      ;;
     --data-dir-mode)
       DATA_DIR_MODE="$2"
       shift 2
+      ;;
+    --data-dir-mode=*)
+      DATA_DIR_MODE="${1#*=}"
+      shift 1
       ;;
     --user)
       SVC_USER="$2"
       shift 2
       ;;
+    --user=*)
+      SVC_USER="${1#*=}"
+      shift 1
+      ;;
     --group)
       SVC_GROUP="$2"
       shift 2
       ;;
+    --group=*)
+      SVC_GROUP="${1#*=}"
+      shift 1
+      ;;
     --supplementary-groups)
       SUPP_GROUPS="$2"
       shift 2
+      ;;
+    --supplementary-groups=*)
+      SUPP_GROUPS="${1#*=}"
+      shift 1
+      ;;
+    --admin-user)
+      ADMIN_USER="$2"
+      shift 2
+      ;;
+    --admin-user=*)
+      ADMIN_USER="${1#*=}"
+      shift 1
+      ;;
+    --admin-pass)
+      ADMIN_PASS="$2"
+      shift 2
+      ;;
+    --admin-pass=*)
+      ADMIN_PASS="${1#*=}"
+      shift 1
       ;;
     --user-mode)
       USER_MODE="1"
@@ -194,36 +335,382 @@ if [ "$TARGET_OS" = "linux" ] && [ "$IS_ROOT" = "0" ] && [ "$USER_MODE" = "0" ];
   exit 1
 fi
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if [ -f "$0" ]; then
+  SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || pwd)"
+else
+  SCRIPT_DIR="$(pwd)"
+fi
 
-detect_binary() {
+normalize_dir_path() {
+  RAW_P="$1"
+  case "$RAW_P" in
+    /) printf "/" ;;
+    /*) printf "%s" "${RAW_P%/}" ;;
+    *)
+      if [ -d "$RAW_P" ]; then
+        (CDPATH= cd -- "$RAW_P" && pwd)
+      else
+        CLEAN_REL="${RAW_P#./}"
+        printf "%s/%s" "$(pwd)" "${CLEAN_REL%/}"
+      fi
+      ;;
+  esac
+}
+
+is_standard_bin_dir() {
+  case "$1" in
+    /bin|/sbin|/usr/bin|/usr/sbin|/usr/local/bin|/usr/local/sbin|*/.local/bin|*/bin|*/sbin)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+copy_binary_safe() {
+  SRC_BIN="$1"
+  DST_BIN="$2"
+  DST_DIR="$(dirname "$DST_BIN")"
+  mkdir -p "$DST_DIR"
+  chmod 0755 "$DST_DIR" 2>/dev/null || true
+  SRC_ABS="$(CDPATH= cd -- "$(dirname "$SRC_BIN")" && pwd)/$(basename "$SRC_BIN")"
+  DST_ABS="$(CDPATH= cd -- "$DST_DIR" && pwd)/$(basename "$DST_BIN")"
+  if [ "$SRC_ABS" != "$DST_ABS" ]; then
+    TMP_DST="${DST_BIN}.new.$$"
+    cp -f "$SRC_BIN" "$TMP_DST"
+    chmod 0755 "$TMP_DST"
+    mv -f "$TMP_DST" "$DST_BIN"
+  else
+    chmod 0755 "$DST_BIN"
+  fi
+}
+
+build_release_base_url() {
+  REL_REF="$1"
+  if [ "$REL_REF" = "latest" ]; then
+    RAW_BASE="https://github.com/${GITHUB_REPO}/releases/latest/download"
+  else
+    RAW_BASE="https://github.com/${GITHUB_REPO}/releases/download/${REL_REF}"
+  fi
+  if [ -n "$GITHUB_MIRROR" ]; then
+    printf "%s/%s" "${GITHUB_MIRROR%/}" "$RAW_BASE"
+  else
+    printf "%s" "$RAW_BASE"
+  fi
+}
+
+fetch_url() {
+  DL_URL="$1"
+  DL_DEST="$2"
+  DL_QUIET="$3"
+  if command -v curl >/dev/null 2>&1; then
+    if [ "$DL_QUIET" = "1" ]; then
+      curl -fsSL --retry 3 --connect-timeout 15 -o "$DL_DEST" "$DL_URL"
+    else
+      curl -fL --progress-bar --retry 3 --connect-timeout 15 -o "$DL_DEST" "$DL_URL"
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if [ "$DL_QUIET" = "1" ]; then
+      wget -q --tries=3 --timeout=15 -O "$DL_DEST" "$DL_URL"
+    else
+      wget --tries=3 --timeout=15 -O "$DL_DEST" "$DL_URL"
+    fi
+  else
+    log_err "Neither 'curl' nor 'wget' is installed. Install curl/wget or pass a local binary via --bin <path>."
+    exit 1
+  fi
+}
+
+compute_sha256() {
+  FILE_TO_HASH="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$FILE_TO_HASH" | awk '{print tolower($1)}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$FILE_TO_HASH" | awk '{print tolower($1)}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$FILE_TO_HASH" | awk '{print tolower($NF)}'
+  else
+    printf ""
+  fi
+}
+
+download_release_binary() {
+  ASSET_NAME="$1"
+  PINNED="0"
+  if [ -n "$RELEASE_VERSION" ]; then
+    case "$RELEASE_VERSION" in
+      latest)
+        PRIMARY_TARGET="latest"
+        ;;
+      preview)
+        PRIMARY_TARGET="preview"
+        PINNED="1"
+        ;;
+      v*|V*)
+        PRIMARY_TARGET="v${RELEASE_VERSION#[vV]}"
+        PINNED="1"
+        ;;
+      *)
+        PRIMARY_TARGET="v${RELEASE_VERSION}"
+        PINNED="1"
+        ;;
+    esac
+  else
+    case "$RELEASE_CHANNEL" in
+      preview)
+        PRIMARY_TARGET="preview"
+        PINNED="1"
+        ;;
+      release|"")
+        PRIMARY_TARGET="latest"
+        ;;
+      *)
+        log_err "Invalid --channel '${RELEASE_CHANNEL}' (expected 'release' or 'preview')"
+        exit 1
+        ;;
+    esac
+  fi
+
+  TMP_DOWNLOAD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dbharbor-dl.XXXXXX")"
+  BASE_URL="$(build_release_base_url "$PRIMARY_TARGET")"
+  BIN_URL="${BASE_URL}/${ASSET_NAME}"
+  SUM_URL="${BASE_URL}/SHA256SUMS.txt"
+  DL_BIN="${TMP_DOWNLOAD_DIR}/${ASSET_NAME}"
+  DL_SUM="${TMP_DOWNLOAD_DIR}/SHA256SUMS.txt"
+
+  log_info "Downloading ${ASSET_NAME} from GitHub Releases (${GITHUB_REPO} @ ${PRIMARY_TARGET})..."
+  if ! fetch_url "$BIN_URL" "$DL_BIN" "0"; then
+    if [ "$PRIMARY_TARGET" = "latest" ] && [ "$PINNED" = "0" ]; then
+      log_warn "No stable 'latest' release found; falling back to rolling 'preview' release..."
+      PRIMARY_TARGET="preview"
+      BASE_URL="$(build_release_base_url "preview")"
+      BIN_URL="${BASE_URL}/${ASSET_NAME}"
+      SUM_URL="${BASE_URL}/SHA256SUMS.txt"
+      if ! fetch_url "$BIN_URL" "$DL_BIN" "0"; then
+        log_err "Failed to download ${ASSET_NAME} from ${BIN_URL}"
+        exit 1
+      fi
+    else
+      log_err "Failed to download ${ASSET_NAME} from ${BIN_URL}"
+      exit 1
+    fi
+  fi
+
+  if [ ! -s "$DL_BIN" ]; then
+    log_err "Downloaded binary is empty: ${DL_BIN}"
+    exit 1
+  fi
+
+  if [ "$SKIP_VERIFY" != "1" ]; then
+    if fetch_url "$SUM_URL" "$DL_SUM" "1" && [ -s "$DL_SUM" ]; then
+      EXPECTED_SHA="$(awk -v f="$ASSET_NAME" '$2 == f || $2 == ("*" f) { print tolower($1); exit }' "$DL_SUM")"
+      if [ -n "$EXPECTED_SHA" ]; then
+        ACTUAL_SHA="$(compute_sha256 "$DL_BIN")"
+        if [ -n "$ACTUAL_SHA" ]; then
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            log_err "SHA-256 mismatch for ${ASSET_NAME}! Expected ${EXPECTED_SHA}, got ${ACTUAL_SHA}"
+            exit 1
+          fi
+          log_ok "Verified SHA-256 checksum (${ACTUAL_SHA})"
+        else
+          log_warn "No SHA-256 utility (sha256sum/shasum/openssl) found; skipping checksum verification."
+        fi
+      else
+        log_warn "Entry for ${ASSET_NAME} not found in SHA256SUMS.txt; skipping checksum verification."
+      fi
+    else
+      log_warn "Could not fetch SHA256SUMS.txt; skipping checksum verification."
+    fi
+  fi
+
+  chmod 0755 "$DL_BIN"
+  RESOLVED_BIN_PATH="$DL_BIN"
+}
+
+resolve_source_binary() {
   if [ -n "$BIN_SRC" ]; then
     if [ ! -f "$BIN_SRC" ]; then
       log_err "Specified binary not found: $BIN_SRC"
       exit 1
     fi
-    printf "%s" "$BIN_SRC"
+    RESOLVED_BIN_PATH="$BIN_SRC"
     return
   fi
 
   CANDIDATE_NAME="dbharbor-${TARGET_OS}-${TARGET_ARCH}"
+  if [ "$FORCE_DOWNLOAD" = "1" ] || [ -n "$RELEASE_VERSION" ] || [ "$ACTION" = "upgrade" ]; then
+    download_release_binary "$CANDIDATE_NAME"
+    return
+  fi
+
   for cand in \
     "${SCRIPT_DIR}/${CANDIDATE_NAME}" \
     "${SCRIPT_DIR}/dbharbor" \
     "${SCRIPT_DIR}/../dist/${CANDIDATE_NAME}" \
     "./${CANDIDATE_NAME}" \
-    "./dist/${CANDIDATE_NAME}" \
-    "/usr/local/bin/dbharbor"
+    "./dist/${CANDIDATE_NAME}"
   do
-    if [ -f "$cand" ]; then
-      printf "%s" "$cand"
+    if [ -n "$cand" ] && [ -f "$cand" ]; then
+      log_info "Using local binary: ${cand}"
+      RESOLVED_BIN_PATH="$cand"
       return
     fi
   done
 
-  log_err "Could not auto-detect binary (${CANDIDATE_NAME}). Build first with 'npm run build' or pass --bin <path>."
-  exit 1
+  log_info "No local binary (${CANDIDATE_NAME}) found; auto-downloading from GitHub Releases..."
+  download_release_binary "$CANDIDATE_NAME"
 }
+
+extract_systemd_exec_bin() {
+  U_FILE="$1"
+  if [ -f "$U_FILE" ]; then
+    sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' "$U_FILE" | head -n 1
+  fi
+}
+
+validate_admin_bootstrap() {
+  NL='
+'
+  CR="$(printf '\r')"
+  if [ -n "$ADMIN_USER" ]; then
+    case "$ADMIN_USER" in
+      *"$NL"*|*"$CR"*)
+        log_err "Invalid --admin-user: control characters are not allowed."
+        exit 1
+        ;;
+    esac
+    if ! printf "%s\n" "$ADMIN_USER" | grep -Eq '^[a-zA-Z0-9._@-]{2,64}$'; then
+      log_err "Invalid --admin-user '${ADMIN_USER}': must be 2-64 characters using letters, numbers, '.', '_', '-', or '@'."
+      exit 1
+    fi
+  fi
+  if [ -n "$ADMIN_PASS" ]; then
+    case "$ADMIN_PASS" in
+      *"$NL"*|*"$CR"*)
+        log_err "Invalid --admin-pass: newline characters are not allowed."
+        exit 1
+        ;;
+    esac
+    if [ "${#ADMIN_PASS}" -lt 6 ]; then
+      log_err "Invalid --admin-pass: initial admin password must be at least 6 characters."
+      exit 1
+    fi
+  fi
+}
+
+systemd_escape_dq() {
+  printf "%s" "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+sh_escape_sq() {
+  printf "%s" "$1" | sed "s/'/'\\\\''/g"
+}
+
+prepare_systemd_bootstrap_env() {
+  ENV_PATH="$1"
+  OWNER_SPEC="$2"
+  rm -f "$ENV_PATH" 2>/dev/null || true
+  if [ -z "$ADMIN_USER" ] && [ -z "$ADMIN_PASS" ]; then
+    return 1
+  fi
+  if [ -s "${DATA_DIR}/dbharbor.db" ]; then
+    log_warn "Existing database detected at ${DATA_DIR}/dbharbor.db; --admin-user / --admin-pass only applies when initializing a fresh data directory."
+    return 1
+  fi
+  BOOTSTRAP_ENV_FILE="$ENV_PATH"
+  OLD_UMASK="$(umask)"
+  umask 077
+  {
+    [ -n "$ADMIN_USER" ] && printf 'DBHARBOR_ADMIN_USER="%s"\n' "$(systemd_escape_dq "$ADMIN_USER")"
+    [ -n "$ADMIN_PASS" ] && printf 'DBHARBOR_ADMIN_PASS="%s"\n' "$(systemd_escape_dq "$ADMIN_PASS")"
+  } > "$ENV_PATH"
+  umask "$OLD_UMASK"
+  chmod 0600 "$ENV_PATH"
+  if [ -n "$OWNER_SPEC" ]; then
+    chown "$OWNER_SPEC" "$ENV_PATH" 2>/dev/null || true
+  fi
+  return 0
+}
+
+prepare_openrc_bootstrap_env() {
+  ENV_PATH="$1"
+  OWNER_SPEC="$2"
+  rm -f "$ENV_PATH" 2>/dev/null || true
+  if [ -z "$ADMIN_USER" ] && [ -z "$ADMIN_PASS" ]; then
+    return 1
+  fi
+  if [ -s "${DATA_DIR}/dbharbor.db" ]; then
+    log_warn "Existing database detected at ${DATA_DIR}/dbharbor.db; --admin-user / --admin-pass only applies when initializing a fresh data directory."
+    return 1
+  fi
+  BOOTSTRAP_ENV_FILE="$ENV_PATH"
+  OLD_UMASK="$(umask)"
+  umask 077
+  {
+    [ -n "$ADMIN_USER" ] && printf "export DBHARBOR_ADMIN_USER='%s'\n" "$(sh_escape_sq "$ADMIN_USER")"
+    [ -n "$ADMIN_PASS" ] && printf "export DBHARBOR_ADMIN_PASS='%s'\n" "$(sh_escape_sq "$ADMIN_PASS")"
+  } > "$ENV_PATH"
+  umask "$OLD_UMASK"
+  chmod 0600 "$ENV_PATH"
+  if [ -n "$OWNER_SPEC" ]; then
+    chown "$OWNER_SPEC" "$ENV_PATH" 2>/dev/null || true
+  fi
+  return 0
+}
+
+finalize_bootstrap_env() {
+  ENV_PATH="$1"
+  [ ! -f "$ENV_PATH" ] && return 0
+  WAIT_I=0
+  while [ "$WAIT_I" -lt 10 ]; do
+    if [ -s "${DATA_DIR}/dbharbor.db" ]; then
+      break
+    fi
+    sleep 1
+    WAIT_I=$((WAIT_I + 1))
+  done
+  rm -f "$ENV_PATH" 2>/dev/null || true
+  BOOTSTRAP_ENV_FILE=""
+  if [ -s "${DATA_DIR}/dbharbor.db" ]; then
+    log_ok "Initialized administrator account (${ADMIN_USER:-admin}) and wiped temporary bootstrap credentials."
+  else
+    log_warn "Removed temporary bootstrap file before ${DATA_DIR}/dbharbor.db appeared; inspect service logs if login fails."
+  fi
+}
+
+bootstrap_direct_admin_store() {
+  BIN_EXE="$1"
+  TARGET_DATA="$2"
+  if [ -z "$ADMIN_USER" ] && [ -z "$ADMIN_PASS" ]; then
+    return 0
+  fi
+  if [ -s "${TARGET_DATA}/dbharbor.db" ]; then
+    log_warn "Existing database detected at ${TARGET_DATA}/dbharbor.db; --admin-user / --admin-pass only applies when initializing a fresh data directory."
+    return 0
+  fi
+  EFF_USER="${ADMIN_USER:-admin}"
+  EFF_PASS="${ADMIN_PASS:-admin123}"
+  if "$BIN_EXE" -h 2>&1 | grep -q "init-only"; then
+    DBHARBOR_ADMIN_USER="$EFF_USER" DBHARBOR_ADMIN_PASS="$EFF_PASS" "$BIN_EXE" -data-dir "$TARGET_DATA" -init-only >/dev/null
+  else
+    DBHARBOR_ADMIN_USER="$EFF_USER" DBHARBOR_ADMIN_PASS="$EFF_PASS" "$BIN_EXE" -host 127.0.0.1 -port 0 -data-dir "$TARGET_DATA" >/dev/null 2>&1 &
+    BOOT_PID=$!
+    WAIT_I=0
+    while [ "$WAIT_I" -lt 10 ]; do
+      if [ -s "${TARGET_DATA}/dbharbor.db" ]; then
+        break
+      fi
+      sleep 1
+      WAIT_I=$((WAIT_I + 1))
+    done
+    kill "$BOOT_PID" 2>/dev/null || true
+    wait "$BOOT_PID" 2>/dev/null || true
+  fi
+  log_ok "Initialized administrator account (${EFF_USER}) in ${TARGET_DATA}"
+}
+
+validate_admin_bootstrap
 
 ensure_linux_role_and_group() {
   TARGET_U="$1"
@@ -277,19 +764,37 @@ run_linux() {
   fi
 
   if [ "$USER_MODE" = "1" ]; then
-    INSTALL_BIN="${HOME}/.local/bin/dbharbor"
-    [ -z "$DATA_DIR" ] && DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/dbharbor"
+    if [ -n "$INSTALL_DIR" ]; then
+      INSTALL_DIR="$(normalize_dir_path "$INSTALL_DIR")"
+      INSTALL_BIN="${INSTALL_DIR}/dbharbor"
+      if [ -z "$DATA_DIR" ]; then
+        if is_standard_bin_dir "$INSTALL_DIR"; then
+          DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/dbharbor"
+        else
+          DATA_DIR="${INSTALL_DIR}/data"
+        fi
+      fi
+    else
+      INSTALL_BIN="${HOME}/.local/bin/dbharbor"
+      [ -z "$DATA_DIR" ] && DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/dbharbor"
+    fi
+    DATA_DIR="$(normalize_dir_path "$DATA_DIR")"
     UNIT_DIR="${HOME}/.config/systemd/user"
     UNIT_FILE="${UNIT_DIR}/${SERVICE_NAME}.service"
 
     case "$ACTION" in
       install)
-        SRC="$(detect_binary)"
-        mkdir -p "$(dirname "$INSTALL_BIN")" "$DATA_DIR" "$UNIT_DIR"
+        resolve_source_binary
+        mkdir -p "$DATA_DIR" "$UNIT_DIR"
         [ -n "$UNIX_SOCKET" ] && mkdir -p "$(dirname "$UNIX_SOCKET")"
         chmod "$DATA_DIR_MODE" "$DATA_DIR" 2>/dev/null || true
-        cp -f "$SRC" "$INSTALL_BIN"
-        chmod 0755 "$INSTALL_BIN"
+        copy_binary_safe "$RESOLVED_BIN_PATH" "$INSTALL_BIN"
+
+        INIT_ENV_FILE="${DATA_DIR}/.dbharbor-init.env"
+        HAS_BOOT_ENV="0"
+        if prepare_systemd_bootstrap_env "$INIT_ENV_FILE" ""; then
+          HAS_BOOT_ENV="1"
+        fi
 
         cat > "$UNIT_FILE" <<EOF
 [Unit]
@@ -299,6 +804,7 @@ After=network-online.target
 
 [Service]
 Type=simple
+EnvironmentFile=-${INIT_ENV_FILE}
 ExecStart=${INSTALL_BIN} ${LISTEN_ARGS} -data-dir ${DATA_DIR}
 WorkingDirectory=${DATA_DIR}
 Restart=on-failure
@@ -309,11 +815,29 @@ LimitNOFILE=65535
 WantedBy=default.target
 EOF
         systemctl --user daemon-reload
-        systemctl --user enable --now "${SERVICE_NAME}.service"
+        systemctl --user enable "${SERVICE_NAME}.service"
+        systemctl --user restart "${SERVICE_NAME}.service"
+        [ "$HAS_BOOT_ENV" = "1" ] && finalize_bootstrap_env "$INIT_ENV_FILE"
         log_ok "Installed & started user systemd service: ${SERVICE_NAME}.service"
+        log_info "Binary   : ${INSTALL_BIN}"
         log_info "Listen   : ${LISTEN_DISPLAY}"
         log_info "Data Dir : ${DATA_DIR}"
         log_info "Tip: Run 'sudo loginctl enable-linger $(whoami)' to keep user service running before login."
+        ;;
+      upgrade)
+        if [ -z "$INSTALL_DIR" ] && [ -f "$UNIT_FILE" ]; then
+          EXISTING_BIN="$(extract_systemd_exec_bin "$UNIT_FILE")"
+          [ -n "$EXISTING_BIN" ] && INSTALL_BIN="$EXISTING_BIN"
+        fi
+        resolve_source_binary
+        copy_binary_safe "$RESOLVED_BIN_PATH" "$INSTALL_BIN"
+        if [ -f "$UNIT_FILE" ]; then
+          systemctl --user daemon-reload
+          systemctl --user restart "${SERVICE_NAME}.service"
+          log_ok "Upgraded & restarted user service (${INSTALL_BIN}): $("$INSTALL_BIN" -version 2>/dev/null || printf "OK")"
+        else
+          log_ok "Upgraded binary at ${INSTALL_BIN} (service unit not yet registered; run 'install' to register)."
+        fi
         ;;
       uninstall)
         systemctl --user disable --now "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
@@ -332,29 +856,45 @@ EOF
   fi
 
   # System-wide Linux mode (root)
-  INSTALL_BIN="/usr/local/bin/dbharbor"
-  [ -z "$DATA_DIR" ] && DATA_DIR="/var/lib/dbharbor"
+  if [ -n "$INSTALL_DIR" ]; then
+    INSTALL_DIR="$(normalize_dir_path "$INSTALL_DIR")"
+    INSTALL_BIN="${INSTALL_DIR}/dbharbor"
+    if [ -z "$DATA_DIR" ]; then
+      if is_standard_bin_dir "$INSTALL_DIR"; then
+        DATA_DIR="/var/lib/dbharbor"
+      else
+        DATA_DIR="${INSTALL_DIR}/data"
+      fi
+    fi
+  else
+    INSTALL_BIN="/usr/local/bin/dbharbor"
+    [ -z "$DATA_DIR" ] && DATA_DIR="/var/lib/dbharbor"
+  fi
+  DATA_DIR="$(normalize_dir_path "$DATA_DIR")"
 
   if [ "$HAS_SYSTEMD" = "1" ]; then
     UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
     case "$ACTION" in
       install)
-        SRC="$(detect_binary)"
+        resolve_source_binary
         ensure_linux_role_and_group "$SVC_USER" "$SVC_GROUP"
 
-        mkdir -p /usr/local/bin "$DATA_DIR"
+        mkdir -p "$DATA_DIR"
         if [ -n "$UNIX_SOCKET" ]; then
           SOCK_PARENT="$(dirname "$UNIX_SOCKET")"
           mkdir -p "$SOCK_PARENT"
           chown "${SVC_USER}:${SOCKET_GROUP:-$SVC_GROUP}" "$SOCK_PARENT" 2>/dev/null || true
           chmod 0755 "$SOCK_PARENT" 2>/dev/null || true
         fi
-        if [ "$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")" != "$INSTALL_BIN" ]; then
-          cp -f "$SRC" "$INSTALL_BIN"
-        fi
-        chmod 0755 "$INSTALL_BIN"
+        copy_binary_safe "$RESOLVED_BIN_PATH" "$INSTALL_BIN"
         chown -R "${SVC_USER}:${SVC_GROUP}" "$DATA_DIR"
         chmod "$DATA_DIR_MODE" "$DATA_DIR"
+
+        INIT_ENV_FILE="${DATA_DIR}/.dbharbor-init.env"
+        HAS_BOOT_ENV="0"
+        if prepare_systemd_bootstrap_env "$INIT_ENV_FILE" "${SVC_USER}:${SVC_GROUP}"; then
+          HAS_BOOT_ENV="1"
+        fi
 
         SUPP_LINE=""
         if [ -n "$SUPP_GROUPS" ]; then
@@ -380,6 +920,7 @@ ${SUPP_LINE}
 RuntimeDirectory=${SERVICE_NAME}
 RuntimeDirectoryMode=0755
 WorkingDirectory=${DATA_DIR}
+EnvironmentFile=-${INIT_ENV_FILE}
 ExecStart=${INSTALL_BIN} ${LISTEN_ARGS} -data-dir ${DATA_DIR}
 Restart=on-failure
 RestartSec=5
@@ -392,12 +933,29 @@ WantedBy=multi-user.target
 EOF
         chmod 0644 "$UNIT_FILE"
         systemctl daemon-reload
-        systemctl enable --now "${SERVICE_NAME}.service"
-        log_ok "DBHarbor systemd service installed and enabled at boot!"
+        systemctl enable "${SERVICE_NAME}.service"
+        systemctl restart "${SERVICE_NAME}.service"
+        [ "$HAS_BOOT_ENV" = "1" ] && finalize_bootstrap_env "$INIT_ENV_FILE"
+        log_ok "DBHarbor systemd service installed and started!"
         log_info "Binary   : ${INSTALL_BIN}"
         log_info "Role     : User=${SVC_USER}, Group=${SVC_GROUP}${SUPP_GROUPS:+ (Supplementary=${SUPP_GROUPS})}"
         log_info "Data Dir : ${DATA_DIR} (mode ${DATA_DIR_MODE})"
         log_info "Listen   : ${LISTEN_DISPLAY}"
+        ;;
+      upgrade)
+        if [ -z "$INSTALL_DIR" ] && [ -f "$UNIT_FILE" ]; then
+          EXISTING_BIN="$(extract_systemd_exec_bin "$UNIT_FILE")"
+          [ -n "$EXISTING_BIN" ] && INSTALL_BIN="$EXISTING_BIN"
+        fi
+        resolve_source_binary
+        copy_binary_safe "$RESOLVED_BIN_PATH" "$INSTALL_BIN"
+        if [ -f "$UNIT_FILE" ]; then
+          systemctl daemon-reload
+          systemctl restart "${SERVICE_NAME}.service"
+          log_ok "Upgraded & restarted ${SERVICE_NAME}.service (${INSTALL_BIN}): $("$INSTALL_BIN" -version 2>/dev/null || printf "OK")"
+        else
+          log_ok "Upgraded binary at ${INSTALL_BIN} (service unit not yet registered; run 'install' to register)."
+        fi
         ;;
       uninstall)
         systemctl disable --now "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
@@ -417,15 +975,20 @@ EOF
     LOG_FILE="/var/log/dbharbor.log"
     case "$ACTION" in
       install)
-        SRC="$(detect_binary)"
+        resolve_source_binary
         ensure_linux_role_and_group "$SVC_USER" "$SVC_GROUP"
-        mkdir -p /usr/local/bin "$DATA_DIR"
-        cp -f "$SRC" "$INSTALL_BIN"
-        chmod 0755 "$INSTALL_BIN"
+        mkdir -p "$DATA_DIR"
+        copy_binary_safe "$RESOLVED_BIN_PATH" "$INSTALL_BIN"
         chown -R "${SVC_USER}:${SVC_GROUP}" "$DATA_DIR"
         chmod "$DATA_DIR_MODE" "$DATA_DIR"
         touch "$LOG_FILE"
         chown "${SVC_USER}:${SVC_GROUP}" "$LOG_FILE" 2>/dev/null || true
+
+        INIT_ENV_FILE="${DATA_DIR}/.dbharbor-init.env"
+        HAS_BOOT_ENV="0"
+        if prepare_openrc_bootstrap_env "$INIT_ENV_FILE" "${SVC_USER}:${SVC_GROUP}"; then
+          HAS_BOOT_ENV="1"
+        fi
 
         cat > "$INIT_SCRIPT" <<EOF
 #!/sbin/openrc-run
@@ -439,6 +1002,10 @@ pidfile="/run/${SERVICE_NAME}.pid"
 output_log="${LOG_FILE}"
 error_log="${LOG_FILE}"
 
+if [ -f "${INIT_ENV_FILE}" ]; then
+  . "${INIT_ENV_FILE}"
+fi
+
 depend() {
   need net
 }
@@ -446,9 +1013,24 @@ EOF
         chmod 0755 "$INIT_SCRIPT"
         rc-update add "$SERVICE_NAME" default
         rc-service "$SERVICE_NAME" restart || rc-service "$SERVICE_NAME" start
+        [ "$HAS_BOOT_ENV" = "1" ] && finalize_bootstrap_env "$INIT_ENV_FILE"
         log_ok "DBHarbor OpenRC service installed and started!"
         log_info "Role     : ${SVC_USER}:${SVC_GROUP}"
         log_info "Listen   : ${LISTEN_DISPLAY}"
+        ;;
+      upgrade)
+        if [ -z "$INSTALL_DIR" ] && [ -f "$INIT_SCRIPT" ]; then
+          EXISTING_BIN="$(sed -n 's/^command="\([^"]*\)".*/\1/p' "$INIT_SCRIPT" | head -n 1)"
+          [ -n "$EXISTING_BIN" ] && INSTALL_BIN="$EXISTING_BIN"
+        fi
+        resolve_source_binary
+        copy_binary_safe "$RESOLVED_BIN_PATH" "$INSTALL_BIN"
+        if [ -f "$INIT_SCRIPT" ]; then
+          rc-service "$SERVICE_NAME" restart || rc-service "$SERVICE_NAME" start
+          log_ok "Upgraded & restarted OpenRC service (${INSTALL_BIN})"
+        else
+          log_ok "Upgraded binary at ${INSTALL_BIN}"
+        fi
         ;;
       uninstall)
         rc-service "$SERVICE_NAME" stop >/dev/null 2>&1 || true
@@ -474,18 +1056,43 @@ EOF
 # ==============================================================================
 run_macos() {
   if [ "$USER_MODE" = "1" ]; then
-    INSTALL_BIN="${HOME}/.local/bin/dbharbor"
-    [ -z "$DATA_DIR" ] && DATA_DIR="${HOME}/Library/Application Support/DBHarbor/data"
+    if [ -n "$INSTALL_DIR" ]; then
+      INSTALL_DIR="$(normalize_dir_path "$INSTALL_DIR")"
+      INSTALL_BIN="${INSTALL_DIR}/dbharbor"
+      if [ -z "$DATA_DIR" ]; then
+        if is_standard_bin_dir "$INSTALL_DIR"; then
+          DATA_DIR="${HOME}/Library/Application Support/DBHarbor/data"
+        else
+          DATA_DIR="${INSTALL_DIR}/data"
+        fi
+      fi
+    else
+      INSTALL_BIN="${HOME}/.local/bin/dbharbor"
+      [ -z "$DATA_DIR" ] && DATA_DIR="${HOME}/Library/Application Support/DBHarbor/data"
+    fi
     LOG_DIR="${HOME}/Library/Logs/DBHarbor"
     PLIST_DIR="${HOME}/Library/LaunchAgents"
     DOMAIN_TARGET="gui/$(id -u)"
   else
-    INSTALL_BIN="/usr/local/bin/dbharbor"
-    [ -z "$DATA_DIR" ] && DATA_DIR="/Library/Application Support/DBHarbor/data"
+    if [ -n "$INSTALL_DIR" ]; then
+      INSTALL_DIR="$(normalize_dir_path "$INSTALL_DIR")"
+      INSTALL_BIN="${INSTALL_DIR}/dbharbor"
+      if [ -z "$DATA_DIR" ]; then
+        if is_standard_bin_dir "$INSTALL_DIR"; then
+          DATA_DIR="/Library/Application Support/DBHarbor/data"
+        else
+          DATA_DIR="${INSTALL_DIR}/data"
+        fi
+      fi
+    else
+      INSTALL_BIN="/usr/local/bin/dbharbor"
+      [ -z "$DATA_DIR" ] && DATA_DIR="/Library/Application Support/DBHarbor/data"
+    fi
     LOG_DIR="/var/log/dbharbor"
     PLIST_DIR="/Library/LaunchDaemons"
     DOMAIN_TARGET="system"
   fi
+  DATA_DIR="$(normalize_dir_path "$DATA_DIR")"
 
   PLIST_FILE="${PLIST_DIR}/${MACOS_LABEL}.plist"
   OUT_LOG="${LOG_DIR}/dbharbor.log"
@@ -493,14 +1100,12 @@ run_macos() {
 
   case "$ACTION" in
     install)
-      SRC="$(detect_binary)"
-      mkdir -p "$(dirname "$INSTALL_BIN")" "$DATA_DIR" "$LOG_DIR" "$PLIST_DIR"
-      if [ "$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")" != "$INSTALL_BIN" ]; then
-        cp -f "$SRC" "$INSTALL_BIN"
-      fi
-      chmod 0755 "$INSTALL_BIN"
-      chmod "$DATA_DIR_MODE" "$DATA_DIR" 2>/dev/null || true
+      resolve_source_binary
+      mkdir -p "$DATA_DIR" "$LOG_DIR" "$PLIST_DIR"
+      copy_binary_safe "$RESOLVED_BIN_PATH" "$INSTALL_BIN"
       xattr -d com.apple.quarantine "$INSTALL_BIN" >/dev/null 2>&1 || true
+      bootstrap_direct_admin_store "$INSTALL_BIN" "$DATA_DIR"
+      chmod "$DATA_DIR_MODE" "$DATA_DIR" 2>/dev/null || true
 
       ROLE_PLIST_KEYS=""
       if [ "$USER_MODE" = "0" ]; then
@@ -587,6 +1192,17 @@ EOF
       log_info "Data Dir : ${DATA_DIR}"
       log_info "Logs     : ${OUT_LOG}"
       log_info "Listen   : ${MAC_LISTEN_DISPLAY}"
+      ;;
+    upgrade)
+      resolve_source_binary
+      copy_binary_safe "$RESOLVED_BIN_PATH" "$INSTALL_BIN"
+      xattr -d com.apple.quarantine "$INSTALL_BIN" >/dev/null 2>&1 || true
+      if [ -f "$PLIST_FILE" ]; then
+        launchctl kickstart -k "${DOMAIN_TARGET}/${MACOS_LABEL}" >/dev/null 2>&1 || true
+        log_ok "Upgraded & restarted ${MACOS_LABEL} (${INSTALL_BIN})"
+      else
+        log_ok "Upgraded binary at ${INSTALL_BIN}"
+      fi
       ;;
     uninstall)
       launchctl bootout "${DOMAIN_TARGET}/${MACOS_LABEL}" >/dev/null 2>&1 || launchctl unload -w "$PLIST_FILE" >/dev/null 2>&1 || true

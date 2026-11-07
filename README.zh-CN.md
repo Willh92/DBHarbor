@@ -80,8 +80,9 @@ DBHarbor **绝不会把运行时数据散落在程序启动目录**（除非显�
 | `-unix-socket-perm` | `DBHARBOR_UNIX_SOCKET_PERM` | `0660` | Unix 套接字文件的八进制权限掩码 |
 | `-unix-socket-group` | `DBHARBOR_UNIX_SOCKET_GROUP` | *(空)* | Unix 套接字所属权限组名称或 GID（如 `www-data`、`nginx`） |
 | `-data-dir` | `DBHARBOR_DATA_DIR` | *(系统标准目录)* | 自定义内部数据库与加密密钥目录 |
-| `-admin-user` | `DBHARBOR_ADMIN_USER` | `admin` | 首次初始化管理员用户名 |
-| `-admin-pass` | `DBHARBOR_ADMIN_PASS` | `admin123` | 首次初始化管理员密码 |
+| `-admin-user` | `DBHARBOR_ADMIN_USER` | `admin` | 首次初始化管理员用户名（仅在用户库为空时生效） |
+| `-admin-pass` | `DBHARBOR_ADMIN_PASS` | `admin123` | 首次初始化管理员密码（自定义密码至少 6 位，仅首次初始化生效） |
+| `-init-only` | — | `false` | 仅在 `-data-dir` 初始化加密主密钥与初始管理员账号后立即退出 |
 | `-idle-ttl` | — | `30` | 空闲数据库连接池自动回收超时（分钟） |
 | `-open` | — | `false` | 启动后自动打开默认浏览器 |
 | `-version` | — | `false` | 输出版本号、提交哈希与平台架构信息 |
@@ -106,21 +107,23 @@ DBHarbor **绝不会把运行时数据散落在程序启动目录**（除非显�
 
 ---
 
-## 开机自启动服务安装及角色 / 权限组配置
+## 开机自启动服务安装、在线拉取升级与初始管理员配置
 
-`scripts/` 与构建产物 `dist/` 下内置全平台开机自启动及角色权限配置脚本：
+`scripts/` 与构建产物 `dist/` 下内置全平台开机自启动服务管理脚本，支持**无本地二进制时自动从 GitHub Releases 下载对应架构程序并校验 `SHA256SUMS.txt`**、自定义安装目录（`--install-dir` / `-InstallDir`）、**首次部署初始化管理员账号密码**（`--admin-user` / `--admin-pass`，初始化完成后自动擦除临时凭据，不在进程参数中暴露密码）以及**一键在线升级**（`upgrade`）：
 
 ### 1. Linux (`systemd` 系统服务 / 用户服务 & `OpenRC`)
 
 ```bash
 chmod +x ./dist/install-service.sh
 
-# 方式 A：标准 TCP 模式 + 自定义服务运行账号与主权限组（默认自动创建系统用户 dbharbor:dbharbor）
+# 方式 A：标准 TCP 模式 + 首次初始化管理员账号密码（默认安装至 /usr/local/bin/dbharbor，也可通过 --install-dir /opt/dbharbor 自定义）
 sudo ./dist/install-service.sh install \
   --user dbharbor \
   --group dbharbor \
   --data-dir /var/lib/dbharbor \
   --data-dir-mode 0750 \
+  --admin-user ops_admin \
+  --admin-pass 'StrongPass!2026' \
   --host 127.0.0.1 --port 8787
 
 # 方式 B：Unix Domain Socket 模式 + 授权 Nginx 所在组 (www-data 或 nginx) 访问套接字
@@ -130,10 +133,15 @@ sudo ./dist/install-service.sh install \
   --socket-group www-data \
   --supplementary-groups www-data \
   --unix-socket /run/dbharbor/dbharbor.sock \
-  --unix-socket-perm 0660
+  --unix-socket-perm 0660 \
+  --admin-user ops_admin \
+  --admin-pass 'StrongPass!2026'
 
 # 方式 C：非 root 普通用户级自启服务 (systemd --user)
 ./dist/install-service.sh install --user-mode --port 8787
+
+# 一键从 GitHub Releases 在线升级至最新版并平滑重启服务（国内服务器可附加 --mirror https://ghfast.top）
+sudo ./dist/install-service.sh upgrade
 
 # 常用运维管理命令
 sudo ./dist/install-service.sh status     # 查看状态
@@ -147,25 +155,34 @@ sudo ./dist/install-service.sh uninstall  # 卸载服务（保留数据目录）
 ```bash
 chmod +x ./dist/install-service.sh
 
-# 系统级后台守护服务（支持通过 --user / --group 指定运行角色与权限组）
-sudo ./dist/install-service.sh install --host 127.0.0.1 --port 8787 --user _www --group _www
+# 系统级后台守护服务（支持通过 --user / --group 指定运行角色，--admin-user / --admin-pass 初始化管理员）
+sudo ./dist/install-service.sh install \
+  --host 127.0.0.1 --port 8787 \
+  --user _www --group _www \
+  --admin-user ops_admin --admin-pass 'StrongPass!2026'
 
 # 当前登录用户级自启代理 (~/Library/LaunchAgents/io.dbharbor.server.plist)
 ./dist/install-service.sh install --user-mode --port 8787
+
+# 在线升级并重启服务
+sudo ./dist/install-service.sh upgrade
 ```
 
 ### 3. Windows (开机自启服务计划任务 + `icacls` 数据目录权限加固)
 
 ```powershell
-# 以管理员运行 PowerShell：安装至 C:\Program Files\DBHarbor，数据存放于 C:\ProgramData\DBHarbor\data
-# 支持指定服务启动角色 (-ServiceAccount) 与目录访问权限组 (-PermissionGroup)
+# 以管理员运行 PowerShell：安装至指定或默认目录（C:\Program Files\DBHarbor，数据存放于 C:\ProgramData\DBHarbor\data）
+# 支持无本地二进制自动从 GitHub 下载、指定服务角色 (-ServiceAccount)、权限组 (-PermissionGroup) 及初始管理员 (-AdminUser / -AdminPass)
 powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 `
   -Action Install `
   -ServiceAccount "NT AUTHORITY\LocalService" `
   -PermissionGroup "Administrators" `
+  -AdminUser "ops_admin" `
+  -AdminPass "StrongPass!2026" `
   -HostAddr "127.0.0.1" -Port 8787
 
-# 状态查看 / 重启 / 卸载
+# 一键在线升级 / 状态查看 / 重启 / 卸载
+powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 -Action Upgrade
 powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 -Action Status
 powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 -Action Restart
 powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 -Action Uninstall

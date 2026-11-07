@@ -46,6 +46,11 @@ func main() {
 	}
 	defer st.Close()
 
+	if cfg.InitOnly {
+		fmt.Printf("[DBHarbor] Initialized data directory and administrator store at %s\n", cfg.DataDir)
+		return
+	}
+
 	pm := pool.NewManager(st, cfg.IdleConnTTL)
 	defer pm.CloseAll()
 

@@ -81,8 +81,9 @@ DBHarbor **never** writes runtime state into the current startup directory unles
 | `-unix-socket-perm` | `DBHARBOR_UNIX_SOCKET_PERM` | `0660` | Octal file mode applied to the Unix Domain Socket |
 | `-unix-socket-group` | `DBHARBOR_UNIX_SOCKET_GROUP` | *(empty)* | POSIX group name or GID assigned to the Unix Domain Socket (e.g. `www-data`, `nginx`) |
 | `-data-dir` | `DBHARBOR_DATA_DIR` | *(OS standard)* | Custom directory for SQLite metadata store & encryption key |
-| `-admin-user` | `DBHARBOR_ADMIN_USER` | `admin` | Initial admin username on first bootstrap |
-| `-admin-pass` | `DBHARBOR_ADMIN_PASS` | `admin123` | Initial admin password on first bootstrap |
+| `-admin-user` | `DBHARBOR_ADMIN_USER` | `admin` | Initial admin username on first bootstrap (only when users table is empty) |
+| `-admin-pass` | `DBHARBOR_ADMIN_PASS` | `admin123` | Initial admin password on first bootstrap (min 6 chars when customized) |
+| `-init-only` | — | `false` | Initialize encryption vault & initial admin account in `-data-dir`, then exit |
 | `-idle-ttl` | — | `30` | Idle database connection pool eviction timeout (minutes) |
 | `-open` | — | `false` | Open system browser automatically on TCP startup |
 | `-version` | — | `false` | Print version, commit, and platform info |
@@ -107,21 +108,24 @@ DBHarbor **never** writes runtime state into the current startup directory unles
 
 ---
 
-## Auto-Start Service Installation & Role / Group Configuration
+## Auto-Start Service Installation, Online Upgrade & Initial Admin Bootstrap
 
-Cross-platform service managers are provided in `scripts/` (and bundled into `dist/`):
+Cross-platform service managers are provided in `scripts/` (and bundled into `dist/`). They support **automatic GitHub Releases binary download with `SHA256SUMS.txt` verification** when no local binary is present (`--download`, `--version`, `--mirror`), custom installation directories (`--install-dir` / `-InstallDir`), **secure initial administrator account bootstrap** (`--admin-user` / `--admin-pass` and `-AdminUser` / `-AdminPass` — wiped immediately after first-run initialization without leaking credentials in process arguments), and **one-command online upgrades** (`upgrade` / `-Action Upgrade`):
 
 ### 1. Linux (`systemd` System / User & `OpenRC`)
 
 ```bash
 chmod +x ./dist/install-service.sh
 
-# Standard TCP system service with dedicated user & permission group (default: dbharbor:dbharbor)
+# Standard TCP system service + initial admin bootstrap
+# (Defaults to /usr/local/bin/dbharbor & /var/lib/dbharbor, or pass --install-dir /opt/dbharbor)
 sudo ./dist/install-service.sh install \
   --user dbharbor \
   --group dbharbor \
   --data-dir /var/lib/dbharbor \
   --data-dir-mode 0750 \
+  --admin-user ops_admin \
+  --admin-pass 'StrongPass!2026' \
   --host 127.0.0.1 --port 8787
 
 # Unix Domain Socket service granting socket group access to Nginx (www-data / nginx)
@@ -131,10 +135,15 @@ sudo ./dist/install-service.sh install \
   --socket-group www-data \
   --supplementary-groups www-data \
   --unix-socket /run/dbharbor/dbharbor.sock \
-  --unix-socket-perm 0660
+  --unix-socket-perm 0660 \
+  --admin-user ops_admin \
+  --admin-pass 'StrongPass!2026'
 
 # Non-root user service (systemd --user)
 ./dist/install-service.sh install --user-mode --port 8787
+
+# One-command online upgrade from GitHub Releases (supports --version <tag> and --mirror <url>)
+sudo ./dist/install-service.sh upgrade
 
 # Lifecycle management
 sudo ./dist/install-service.sh status
@@ -148,13 +157,17 @@ sudo ./dist/install-service.sh uninstall
 ```bash
 chmod +x ./dist/install-service.sh
 
-# System-wide LaunchDaemon (with optional execution user & group)
-sudo ./dist/install-service.sh install --host 127.0.0.1 --port 8787 --user _www --group _www
+# System-wide LaunchDaemon (with execution user/group & initial admin bootstrap)
+sudo ./dist/install-service.sh install \
+  --host 127.0.0.1 --port 8787 \
+  --user _www --group _www \
+  --admin-user ops_admin --admin-pass 'StrongPass!2026'
 
 # Current logged-in user LaunchAgent (~/Library/LaunchAgents/io.dbharbor.server.plist)
 ./dist/install-service.sh install --user-mode --port 8787
 
-# Check status / tail logs / uninstall
+# Upgrade / check status / tail logs / uninstall
+sudo ./dist/install-service.sh upgrade
 ./dist/install-service.sh status
 ./dist/install-service.sh logs
 ./dist/install-service.sh uninstall --user-mode
@@ -163,14 +176,17 @@ sudo ./dist/install-service.sh install --host 127.0.0.1 --port 8787 --user _www 
 ### 3. Windows (`ScheduledTask` Service + `icacls` ACL Hardening)
 
 ```powershell
-# Install auto-start background service (stores data in C:\ProgramData\DBHarbor\data)
+# Install auto-start background service (auto-downloads from GitHub Releases if needed, stores data in C:\ProgramData\DBHarbor\data)
 powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 `
   -Action Install `
   -ServiceAccount "NT AUTHORITY\LocalService" `
   -PermissionGroup "Administrators" `
+  -AdminUser "ops_admin" `
+  -AdminPass "StrongPass!2026" `
   -HostAddr "127.0.0.1" -Port 8787
 
-# Status / Restart / Uninstall
+# Online Upgrade / Status / Restart / Uninstall
+powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 -Action Upgrade
 powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 -Action Status
 powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 -Action Restart
 powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 -Action Uninstall

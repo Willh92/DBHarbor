@@ -26,6 +26,7 @@ type Config struct {
 	OpenBrowser     bool
 	UseOSDataDir    bool
 	IdleConnTTL     int // minutes
+	InitOnly        bool
 	ShowVersion     bool
 }
 
@@ -56,6 +57,7 @@ func Load(args []string) (*Config, error) {
 	fs.BoolVar(&cfg.OpenBrowser, "open", false, "Open default browser on startup")
 	fs.BoolVar(&cfg.UseOSDataDir, "use-os-data-dir", true, "Use OS-standard application data directory (retained for backwards CLI compatibility)")
 	fs.IntVar(&cfg.IdleConnTTL, "idle-ttl", 30, "Idle database connection eviction timeout in minutes")
+	fs.BoolVar(&cfg.InitOnly, "init-only", false, "Initialize encryption vault and initial admin account in data-dir, then exit")
 	fs.BoolVar(&cfg.ShowVersion, "version", false, "Print DBHarbor version and exit")
 
 	if err := fs.Parse(args); err != nil {

@@ -84,31 +84,42 @@ DBHarbor **預設不會將資料寫入程式啟動目錄**，而是自動儲存�
 
 ---
 
-## 開機自啟動服務安裝與角色 / 權限群組設定
+## 開機自啟動服務安裝、線上更新與初始管理員設定
+
+`scripts/` 與建置產物 `dist/` 內建跨平台服務管理指令碼，支援**無本機執行檔時自動從 GitHub Releases 下載並驗證 `SHA256SUMS.txt`**、自訂安裝目錄（`--install-dir` / `-InstallDir`）、**首次部署初始化管理員帳號密碼**（`--admin-user` / `--admin-pass`，初始化完成後自動抹除暫存憑證）與**一鍵線上升級**（`upgrade`）：
 
 ### 1. Linux (`systemd` / `OpenRC`)
 
 ```bash
 chmod +x ./dist/install-service.sh
 
-# Unix Domain Socket 模式 + 指定執行角色與 Nginx 權限群組 (www-data / nginx)
+# Unix Domain Socket 模式 + 指定執行角色、Nginx 權限群組 (www-data / nginx) 與初始管理員帳號
 sudo ./dist/install-service.sh install \
   --user dbharbor \
   --group dbharbor \
+  --data-dir /var/lib/dbharbor \
   --socket-group www-data \
   --supplementary-groups www-data \
   --unix-socket /run/dbharbor/dbharbor.sock \
-  --unix-socket-perm 0660
+  --unix-socket-perm 0660 \
+  --admin-user ops_admin \
+  --admin-pass 'StrongPass!2026'
 
 # 本地 TCP 模式
 sudo ./dist/install-service.sh install --user dbharbor --group dbharbor --host 127.0.0.1 --port 8787
+
+# 一鍵從 GitHub Releases 線上更新並重新啟動服務
+sudo ./dist/install-service.sh upgrade
 ```
 
 ### 2. macOS (`launchd`)
 
 ```bash
 chmod +x ./dist/install-service.sh
-sudo ./dist/install-service.sh install --host 127.0.0.1 --port 8787 --user _www --group _www
+sudo ./dist/install-service.sh install \
+  --host 127.0.0.1 --port 8787 \
+  --user _www --group _www \
+  --admin-user ops_admin --admin-pass 'StrongPass!2026'
 # 或非 root 使用者模式：
 ./dist/install-service.sh install --user-mode --port 8787
 ```
@@ -120,7 +131,12 @@ powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 `
   -Action Install `
   -ServiceAccount "NT AUTHORITY\LocalService" `
   -PermissionGroup "Administrators" `
+  -AdminUser "ops_admin" `
+  -AdminPass "StrongPass!2026" `
   -HostAddr "127.0.0.1" -Port 8787
+
+# 一鍵線上更新並重啟服務
+powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 -Action Upgrade
 ```
 
 ---
