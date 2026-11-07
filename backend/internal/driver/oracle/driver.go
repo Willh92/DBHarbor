@@ -30,18 +30,21 @@ func init() {
 		{Key: "password", Label: "Password", Type: "password", Target: "root"},
 	}
 	driver.Register(driver.DriverMeta{
-		Type:            "oracle",
-		Name:            "Oracle",
-		Category:        driver.CategoryRelational,
-		BadgeColor:      "#f5222d",
-		DefaultPort:     1521,
-		Description:     "Pure Go zero-dependency Oracle driver (no Instant Client required, supports multi-schema and session monitoring)",
-		SupportsSchemas: true,
-		SupportsExplain: false,
-		DefaultTypes:    []string{"NUMBER(19)", "NUMBER(10)", "NUMBER(18,2)", "VARCHAR2(255)", "NVARCHAR2(255)", "CLOB", "DATE", "TIMESTAMP", "BLOB"},
-		Fields:          fields,
+		Type:               "oracle",
+		Name:               "Oracle",
+		Category:           driver.CategoryRelational,
+		BadgeColor:         "#f5222d",
+		DefaultPort:        1521,
+		Description:        "Pure Go zero-dependency Oracle driver (no Instant Client required, supports multi-schema and session monitoring)",
+		SupportsSchemas:    true,
+		SupportsPartitions: true,
+		SupportsExplain:    false,
+		DefaultTypes:       []string{"NUMBER(19)", "NUMBER(10)", "NUMBER(18,2)", "VARCHAR2(255)", "NVARCHAR2(255)", "CLOB", "DATE", "TIMESTAMP", "BLOB"},
+		Fields:             fields,
 	}, New)
 }
+
+var _ driver.PartitionManager = (*Driver)(nil)
 
 type Driver struct {
 	cfg driver.ConnectionConfig
@@ -49,6 +52,24 @@ type Driver struct {
 }
 
 func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
+	restrictIP := cfg.Option("__restrict_internal_ip", "") == "1"
+	rawHost := strings.TrimSpace(cfg.Host)
+	if rawHost == "" && !restrictIP {
+		rawHost = "127.0.0.1"
+	}
+	connectHost, err := sqlbase.ValidateStrictHostname(rawHost)
+	if err != nil {
+		return nil, err
+	}
+	if restrictIP {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		pinnedIP, pinErr := sqlbase.ResolveAndPinSinglePublicIP(ctx, connectHost)
+		if pinErr != nil {
+			return nil, pinErr
+		}
+		connectHost = pinnedIP
+	}
 	port := cfg.Port
 	if port == 0 {
 		port = 1521
@@ -62,13 +83,13 @@ func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
 		urlOpts["SID"] = svc
 		svc = ""
 	}
-	connStr := go_ora.BuildUrl(cfg.Host, port, svc, cfg.Username, cfg.Password, urlOpts)
+	connStr := go_ora.BuildUrl(strings.Trim(connectHost, "[]"), port, svc, cfg.Username, cfg.Password, urlOpts)
 	db, err := sql.Open("oracle", connStr)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(8)
-	db.SetMaxIdleConns(3)
+	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(15 * time.Minute)
 	db.SetConnMaxIdleTime(3 * time.Minute)
 	return &Driver{cfg: cfg, db: db}, nil
@@ -151,26 +172,213 @@ func (d *Driver) ListObjects(ctx context.Context, database, schema string) (driv
 	return res, nil
 }
 
+func formatOracleColumnType(dataType string, charLen, prec, scale sql.NullInt64) string {
+	raw := strings.TrimSpace(dataType)
+	if strings.Contains(raw, "(") {
+		return raw
+	}
+	dt := strings.ToUpper(raw)
+	switch dt {
+	case "VARCHAR2", "NVARCHAR2", "VARCHAR", "NVARCHAR", "CHAR", "NCHAR", "RAW":
+		if charLen.Valid && charLen.Int64 > 0 {
+			return fmt.Sprintf("%s(%d)", dt, charLen.Int64)
+		}
+	case "NUMBER", "DECIMAL", "NUMERIC", "DEC":
+		if prec.Valid && prec.Int64 > 0 {
+			if scale.Valid && scale.Int64 != 0 {
+				return fmt.Sprintf("%s(%d,%d)", dt, prec.Int64, scale.Int64)
+			}
+			return fmt.Sprintf("%s(%d)", dt, prec.Int64)
+		}
+	case "FLOAT":
+		if prec.Valid && prec.Int64 > 0 && prec.Int64 != 126 {
+			return fmt.Sprintf("FLOAT(%d)", prec.Int64)
+		}
+	}
+	return raw
+}
+
+func (d *Driver) getPrimaryKeys(ctx context.Context, schema, table string) ([]string, string) {
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT c.CONSTRAINT_NAME, cc.COLUMN_NAME
+		FROM ALL_CONSTRAINTS c
+		JOIN ALL_CONS_COLUMNS cc ON c.OWNER = cc.OWNER AND c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
+		WHERE c.OWNER = :1 AND c.TABLE_NAME = :2 AND c.CONSTRAINT_TYPE = 'P'
+		ORDER BY cc.POSITION
+	`, schema, table)
+	if err != nil {
+		return nil, ""
+	}
+	defer rows.Close()
+	var pks []string
+	var pkConstraint string
+	for rows.Next() {
+		var cname, col string
+		if rows.Scan(&cname, &col) == nil {
+			pkConstraint = cname
+			pks = append(pks, col)
+		}
+	}
+	return pks, pkConstraint
+}
+
 func (d *Driver) GetTableStructure(ctx context.Context, database, schema, table string) (driver.TableStructure, error) {
 	if schema == "" {
 		schema = strings.ToUpper(d.cfg.Username)
 	}
-	st := driver.TableStructure{Database: database, Schema: schema, Table: table, Columns: []driver.ColumnDef{}, Indexes: []driver.IndexDef{}, ForeignKeys: []driver.ForeignKeyDef{}}
+	st := driver.TableStructure{
+		Database:         database,
+		Schema:           schema,
+		Table:            table,
+		Columns:          []driver.ColumnDef{},
+		Indexes:          []driver.IndexDef{},
+		ForeignKeys:      []driver.ForeignKeyDef{},
+		CheckConstraints: []driver.CheckConstraintDef{},
+	}
+
+	_ = d.db.QueryRowContext(ctx, `SELECT COALESCE(COMMENTS, '') FROM ALL_TAB_COMMENTS WHERE OWNER = :1 AND TABLE_NAME = :2`, schema, table).Scan(&st.Comment)
+
+	pks, pkConstraint := d.getPrimaryKeys(ctx, schema, table)
+	pkSet := make(map[string]bool, len(pks))
+	for _, pk := range pks {
+		pkSet[pk] = true
+	}
+
 	rows, err := d.db.QueryContext(ctx, `
-		SELECT COLUMN_NAME, DATA_TYPE, NULLABLE
-		FROM ALL_TAB_COLUMNS WHERE OWNER = :1 AND TABLE_NAME = :2 ORDER BY COLUMN_ID
+		SELECT c.COLUMN_NAME, c.DATA_TYPE, c.CHAR_LENGTH, c.DATA_PRECISION, c.DATA_SCALE,
+		       c.NULLABLE, c.DATA_DEFAULT, COALESCE(cc.COMMENTS, '')
+		FROM ALL_TAB_COLUMNS c
+		LEFT JOIN ALL_COL_COMMENTS cc
+		  ON c.OWNER = cc.OWNER AND c.TABLE_NAME = cc.TABLE_NAME AND c.COLUMN_NAME = cc.COLUMN_NAME
+		WHERE c.OWNER = :1 AND c.TABLE_NAME = :2
+		ORDER BY c.COLUMN_ID
 	`, schema, table)
 	if err != nil {
 		return st, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var n, t, nul string
-		if rows.Scan(&n, &t, &nul) == nil {
-			st.Columns = append(st.Columns, driver.ColumnDef{Name: n, Type: t, Nullable: nul == "Y"})
+		var n, t, nul, cmt string
+		var charLen, prec, scale sql.NullInt64
+		var dflt sql.NullString
+		if rows.Scan(&n, &t, &charLen, &prec, &scale, &nul, &dflt, &cmt) == nil {
+			defVal := ""
+			if dflt.Valid {
+				defVal = strings.TrimSpace(dflt.String)
+			}
+			st.Columns = append(st.Columns, driver.ColumnDef{
+				Name:         n,
+				Type:         formatOracleColumnType(t, charLen, prec, scale),
+				Nullable:     nul == "Y",
+				DefaultValue: defVal,
+				IsPrimaryKey: pkSet[n],
+				Comment:      strings.TrimSpace(cmt),
+			})
 		}
 	}
+
+	// Indexes
+	idxRows, idxErr := d.db.QueryContext(ctx, `
+		SELECT i.INDEX_NAME, COALESCE(i.UNIQUENESS, ''), COALESCE(i.INDEX_TYPE, 'NORMAL'), ic.COLUMN_NAME
+		FROM ALL_INDEXES i
+		JOIN ALL_IND_COLUMNS ic ON i.OWNER = ic.INDEX_OWNER AND i.INDEX_NAME = ic.INDEX_NAME
+		WHERE i.TABLE_OWNER = :1 AND i.TABLE_NAME = :2
+		ORDER BY i.INDEX_NAME, ic.COLUMN_POSITION
+	`, schema, table)
+	if idxErr == nil {
+		defer idxRows.Close()
+		idxMap := map[string]*driver.IndexDef{}
+		var idxOrder []string
+		for idxRows.Next() {
+			var iName, uniq, iType, colName string
+			if idxRows.Scan(&iName, &uniq, &iType, &colName) == nil {
+				item, exists := idxMap[iName]
+				if !exists {
+					item = &driver.IndexDef{
+						Name:      iName,
+						Unique:    strings.EqualFold(uniq, "UNIQUE"),
+						Primary:   pkConstraint != "" && strings.EqualFold(iName, pkConstraint),
+						IndexType: iType,
+					}
+					idxMap[iName] = item
+					idxOrder = append(idxOrder, iName)
+				}
+				item.Columns = append(item.Columns, colName)
+			}
+		}
+		for _, name := range idxOrder {
+			st.Indexes = append(st.Indexes, *idxMap[name])
+		}
+	}
+
+	// Foreign Keys
+	fkRows, fkErr := d.db.QueryContext(ctx, `
+		SELECT c.CONSTRAINT_NAME, COALESCE(c.DELETE_RULE, ''), acc.COLUMN_NAME, rc.TABLE_NAME, rcc.COLUMN_NAME
+		FROM ALL_CONSTRAINTS c
+		JOIN ALL_CONS_COLUMNS acc ON c.OWNER = acc.OWNER AND c.CONSTRAINT_NAME = acc.CONSTRAINT_NAME
+		JOIN ALL_CONSTRAINTS rc ON c.R_OWNER = rc.OWNER AND c.R_CONSTRAINT_NAME = rc.CONSTRAINT_NAME
+		JOIN ALL_CONS_COLUMNS rcc ON rc.OWNER = rcc.OWNER AND rc.CONSTRAINT_NAME = rcc.CONSTRAINT_NAME AND acc.POSITION = rcc.POSITION
+		WHERE c.OWNER = :1 AND c.TABLE_NAME = :2 AND c.CONSTRAINT_TYPE = 'R'
+		ORDER BY c.CONSTRAINT_NAME, acc.POSITION
+	`, schema, table)
+	if fkErr == nil {
+		defer fkRows.Close()
+		fkMap := map[string]*driver.ForeignKeyDef{}
+		var fkOrder []string
+		for fkRows.Next() {
+			var fkName, delRule, colName, refTbl, refCol string
+			if fkRows.Scan(&fkName, &delRule, &colName, &refTbl, &refCol) == nil {
+				item, exists := fkMap[fkName]
+				if !exists {
+					item = &driver.ForeignKeyDef{
+						Name:     fkName,
+						RefTable: refTbl,
+						OnDelete: delRule,
+					}
+					fkMap[fkName] = item
+					fkOrder = append(fkOrder, fkName)
+				}
+				item.Columns = append(item.Columns, colName)
+				item.RefColumns = append(item.RefColumns, refCol)
+			}
+		}
+		for _, name := range fkOrder {
+			st.ForeignKeys = append(st.ForeignKeys, *fkMap[name])
+		}
+	}
+
+	// Check Constraints
+	chkRows, chkErr := d.db.QueryContext(ctx, `
+		SELECT CONSTRAINT_NAME, SEARCH_CONDITION, COALESCE(STATUS, 'ENABLED')
+		FROM ALL_CONSTRAINTS
+		WHERE OWNER = :1 AND TABLE_NAME = :2 AND CONSTRAINT_TYPE = 'C' AND GENERATED = 'USER NAME'
+		ORDER BY CONSTRAINT_NAME
+	`, schema, table)
+	if chkErr == nil {
+		defer chkRows.Close()
+		for chkRows.Next() {
+			var cName, status string
+			var cond sql.NullString
+			if chkRows.Scan(&cName, &cond, &status) == nil && cond.Valid && strings.TrimSpace(cond.String) != "" {
+				st.CheckConstraints = append(st.CheckConstraints, driver.CheckConstraintDef{
+					Name:       cName,
+					Expression: strings.TrimSpace(cond.String),
+					Enforced:   strings.EqualFold(status, "ENABLED"),
+				})
+			}
+		}
+	}
+
 	_ = d.db.QueryRowContext(ctx, "SELECT DBMS_METADATA.GET_DDL('TABLE', :1, :2) FROM DUAL", table, schema).Scan(&st.DDL)
+	if strings.TrimSpace(st.DDL) == "" && len(st.Columns) > 0 {
+		st.DDL, _ = sqlbase.BuildCreateTableDDL(sqlbase.DialectOracle, driver.CreateTableRequest{
+			Schema:           schema,
+			Table:            table,
+			Columns:          st.Columns,
+			ForeignKeys:      st.ForeignKeys,
+			CheckConstraints: st.CheckConstraints,
+		})
+	}
 	return st, nil
 }
 
@@ -191,6 +399,8 @@ func (d *Driver) BrowseData(ctx context.Context, req driver.BrowseDataRequest) (
 		res.Total = total
 		res.HasTotal = true
 	}
+	pks, _ := d.getPrimaryKeys(ctx, req.Schema, req.Table)
+	res.PrimaryKeys = pks
 	return res, nil
 }
 
@@ -286,8 +496,107 @@ func (d *Driver) BatchImport(ctx context.Context, req driver.ImportRequest) (dri
 	return sqlbase.BatchImport(ctx, d.db, sqlbase.DialectOracle, req)
 }
 
-func (d *Driver) GetAutocompleteMeta(ctx context.Context, _ string) (driver.AutocompleteMeta, error) {
-	return driver.AutocompleteMeta{Tables: map[string][]string{}}, nil
+func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driver.AutocompleteMeta, error) {
+	meta := driver.AutocompleteMeta{Tables: map[string][]string{}}
+	if dbs, err := d.ListDatabases(ctx); err == nil {
+		for _, item := range dbs {
+			meta.Databases = append(meta.Databases, item.Name)
+		}
+	}
+	defaultOwner := strings.ToUpper(strings.TrimSpace(d.cfg.Username))
+	owner := strings.ToUpper(strings.TrimSpace(database))
+	if owner == "" || strings.EqualFold(owner, d.cfg.Database) || owner == "ORCL" {
+		owner = defaultOwner
+	}
+	loadCols := func(targetOwner string) {
+		if targetOwner == "" {
+			return
+		}
+		rows, err := d.db.QueryContext(ctx, `
+			SELECT TABLE_NAME, COLUMN_NAME
+			FROM ALL_TAB_COLUMNS
+			WHERE OWNER = :1
+			ORDER BY TABLE_NAME, COLUMN_ID
+		`, targetOwner)
+		if err != nil {
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var tName, cName string
+			if rows.Scan(&tName, &cName) == nil {
+				meta.Tables[tName] = append(meta.Tables[tName], cName)
+			}
+		}
+	}
+	loadCols(owner)
+	if len(meta.Tables) == 0 && owner != defaultOwner {
+		loadCols(defaultOwner)
+	}
+	return meta, nil
+}
+
+func (d *Driver) ListPartitions(ctx context.Context, _, schema, table string) ([]driver.PartitionInfo, error) {
+	if schema == "" {
+		schema = strings.ToUpper(d.cfg.Username)
+	}
+	out := []driver.PartitionInfo{}
+	var strategy string
+	_ = d.db.QueryRowContext(ctx, `SELECT COALESCE(PARTITIONING_TYPE, '') FROM ALL_PART_TABLES WHERE OWNER = :1 AND TABLE_NAME = :2`, schema, table).Scan(&strategy)
+
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT PARTITION_NAME, COALESCE(NUM_ROWS, 0), COALESCE(BLOCKS, 0) * 8192, HIGH_VALUE
+		FROM ALL_TAB_PARTITIONS
+		WHERE TABLE_OWNER = :1 AND TABLE_NAME = :2
+		ORDER BY PARTITION_POSITION
+	`, schema, table)
+	if err != nil {
+		return out, nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pName string
+		var numRows, bytesOnDisk int64
+		var highVal sql.NullString
+		if rows.Scan(&pName, &numRows, &bytesOnDisk, &highVal) == nil {
+			out = append(out, driver.PartitionInfo{
+				ID:               pName,
+				Name:             pName,
+				Rows:             numRows,
+				BytesOnDisk:      bytesOnDisk,
+				Active:           true,
+				Strategy:         strategy,
+				BoundDescription: strings.TrimSpace(highVal.String),
+			})
+		}
+	}
+	return out, nil
+}
+
+func (d *Driver) ManagePartition(ctx context.Context, req driver.PartitionActionRequest) (string, error) {
+	schema := strings.TrimSpace(req.Schema)
+	if schema == "" {
+		schema = strings.ToUpper(d.cfg.Username)
+	}
+	if strings.TrimSpace(req.Table) == "" || strings.TrimSpace(req.PartitionID) == "" {
+		return "", fmt.Errorf("table and partitionId are required")
+	}
+	tbl := sqlbase.QualifyTable(sqlbase.DialectOracle, "", schema, req.Table)
+	part := sqlbase.QuoteIdent(sqlbase.DialectOracle, req.PartitionID)
+	var stmt string
+	switch strings.ToUpper(strings.TrimSpace(req.Action)) {
+	case "TRUNCATE":
+		stmt = fmt.Sprintf("ALTER TABLE %s TRUNCATE PARTITION %s", tbl, part)
+	case "DROP":
+		stmt = fmt.Sprintf("ALTER TABLE %s DROP PARTITION %s", tbl, part)
+	default:
+		return "", fmt.Errorf("unsupported partition action %q for Oracle", req.Action)
+	}
+	if req.PreviewOnly {
+		return stmt, nil
+	}
+	_, err := d.db.ExecContext(ctx, stmt)
+	return stmt, err
 }
 
 func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot, error) {

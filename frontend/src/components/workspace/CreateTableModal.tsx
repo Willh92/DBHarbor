@@ -9,6 +9,7 @@ import {
   Input,
   Modal,
   Row,
+  Segmented,
   Select,
   Space,
   Typography,
@@ -20,7 +21,7 @@ import { ResizableTable } from '../common/ResizableTable';
 import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
-import type { ColumnDef } from '../../types';
+import type { CheckConstraintDef, ColumnDef } from '../../types';
 
 interface Props {
   open: boolean;
@@ -45,10 +46,21 @@ export const CreateTableModal: React.FC<Props> = ({
   const { isMobile } = useResponsive();
   const { t } = useI18n();
   const drv = drivers.find((d) => d.type === dbType);
+  const tableFeatures = drv?.capabilities?.tableFeatures || [];
+  const supportsVirtualTables = tableFeatures.includes('VIRTUAL_TABLES') || dbType === 'sqlite';
+  const supportsGeneratedCols = tableFeatures.includes('GENERATED_COLS');
+  const supportsChecks = tableFeatures.includes('CHECKS');
+
   const typeOptions = useMemo(
     () => (drv?.defaultTypes || ['BIGINT', 'INT', 'VARCHAR(255)', 'TEXT', 'TIMESTAMP']).map((tp) => ({ value: tp })),
     [drv?.defaultTypes]
   );
+
+  const [tableMode, setTableMode] = useState<'standard' | 'virtual'>('standard');
+  const [virtualModule, setVirtualModule] = useState<string>('fts5');
+  const [virtualArgs, setVirtualArgs] = useState<string>("title, body, tokenize='unicode61'");
+  const [strictTable, setStrictTable] = useState(false);
+  const [withoutRowId, setWithoutRowId] = useState(false);
 
   const [tableName, setTableName] = useState('');
   const [comment, setComment] = useState('');
@@ -56,17 +68,24 @@ export const CreateTableModal: React.FC<Props> = ({
   const [orderBy, setOrderBy] = useState('');
   const [partitionBy, setPartitionBy] = useState('');
   const [columns, setColumns] = useState<ColumnDef[]>([]);
+  const [checks, setChecks] = useState<CheckConstraintDef[]>([]);
   const [previewDDL, setPreviewDDL] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!open) return;
+    setTableMode('standard');
+    setVirtualModule('fts5');
+    setVirtualArgs("title, body, tokenize='unicode61'");
+    setStrictTable(false);
+    setWithoutRowId(false);
     setTableName('');
     setComment('');
     setPreviewDDL('');
     setEngine(dbType === 'clickhouse' ? 'MergeTree()' : 'InnoDB');
     setOrderBy('');
     setPartitionBy('');
+    setChecks([]);
     setColumns([
       {
         name: 'id',
@@ -100,19 +119,23 @@ export const CreateTableModal: React.FC<Props> = ({
     setColumns((prev) => prev.map((c, i) => (i === idx ? { ...c, ...patch } : c)));
   }, []);
 
+  const updateCheck = useCallback((idx: number, patch: Partial<CheckConstraintDef>) => {
+    setChecks((prev) => prev.map((ck, i) => (i === idx ? { ...ck, ...patch } : ck)));
+  }, []);
+
   const colCount = columns.length;
   const colTableColumns = useMemo(
     () => [
       {
         title: t('Column Name'),
-        width: 160,
+        width: 150,
         render: (_: any, r: ColumnDef, idx: number) => (
           <Input size="small" value={r.name} onChange={(e) => updateCol(idx, { name: e.target.value })} />
         ),
       },
       {
         title: t('Data Type'),
-        width: 180,
+        width: 165,
         render: (_: any, r: ColumnDef, idx: number) => (
           <AutoComplete
             size="small"
@@ -125,7 +148,7 @@ export const CreateTableModal: React.FC<Props> = ({
       },
       {
         title: t('Nullable'),
-        width: 85,
+        width: 78,
         align: 'center' as const,
         render: (_: any, r: ColumnDef, idx: number) => (
           <Checkbox checked={r.nullable} onChange={(e) => updateCol(idx, { nullable: e.target.checked })} />
@@ -133,7 +156,7 @@ export const CreateTableModal: React.FC<Props> = ({
       },
       {
         title: t('PK'),
-        width: 75,
+        width: 64,
         align: 'center' as const,
         render: (_: any, r: ColumnDef, idx: number) => (
           <Checkbox checked={r.isPrimaryKey} onChange={(e) => updateCol(idx, { isPrimaryKey: e.target.checked })} />
@@ -141,11 +164,11 @@ export const CreateTableModal: React.FC<Props> = ({
       },
       {
         title: t('Auto Inc'),
-        width: 75,
+        width: 74,
         align: 'center' as const,
         render: (_: any, r: ColumnDef, idx: number) => (
           <Checkbox
-            disabled={dbType === 'clickhouse'}
+            disabled={dbType === 'clickhouse' || Boolean(r.generatedExpr?.trim())}
             checked={r.isAutoIncrement}
             onChange={(e) => updateCol(idx, { isAutoIncrement: e.target.checked })}
           />
@@ -153,18 +176,58 @@ export const CreateTableModal: React.FC<Props> = ({
       },
       {
         title: t('Default Expr'),
-        width: 130,
+        width: 120,
         render: (_: any, r: ColumnDef, idx: number) => (
           <Input
             size="small"
+            disabled={Boolean(r.generatedExpr?.trim())}
             value={r.defaultValue || ''}
             onChange={(e) => updateCol(idx, { defaultValue: e.target.value })}
           />
         ),
       },
+      ...(supportsGeneratedCols
+        ? [
+            {
+              title: t('Generated Expr'),
+              width: 215,
+              render: (_: any, r: ColumnDef, idx: number) => (
+                <Space.Compact style={{ width: '100%' }}>
+                  <Input
+                    size="small"
+                    placeholder={t('Optional expr')}
+                    value={r.generatedExpr || ''}
+                    onChange={(e) =>
+                      updateCol(idx, {
+                        generatedExpr: e.target.value,
+                        generatedStorage: e.target.value.trim()
+                          ? r.generatedStorage || (dbType === 'postgres' || dbType === 'kingbase' ? 'STORED' : 'VIRTUAL')
+                          : undefined,
+                      })
+                    }
+                  />
+                  {r.generatedExpr?.trim() && (
+                    <Select
+                      size="small"
+                      style={{ width: 88 }}
+                      value={r.generatedStorage || 'VIRTUAL'}
+                      onChange={(val) => updateCol(idx, { generatedStorage: val })}
+                      options={[
+                        ...(dbType === 'postgres' || dbType === 'kingbase'
+                          ? []
+                          : [{ label: 'VIRTUAL', value: 'VIRTUAL' }]),
+                        { label: 'STORED', value: 'STORED' },
+                      ]}
+                    />
+                  )}
+                </Space.Compact>
+              ),
+            },
+          ]
+        : []),
       {
         title: t('Comment'),
-        width: 140,
+        width: 130,
         render: (_: any, r: ColumnDef, idx: number) => (
           <Input
             size="small"
@@ -175,7 +238,7 @@ export const CreateTableModal: React.FC<Props> = ({
       },
       {
         title: '',
-        width: 45,
+        width: 44,
         render: (_: any, __: ColumnDef, idx: number) => (
           <Button
             size="small"
@@ -188,22 +251,40 @@ export const CreateTableModal: React.FC<Props> = ({
         ),
       },
     ],
-    [t, typeOptions, dbType, colCount, updateCol]
+    [t, typeOptions, dbType, colCount, updateCol, supportsGeneratedCols]
   );
+
+  const buildPayload = (previewOnly: boolean) => {
+    const isVirtual = supportsVirtualTables && tableMode === 'virtual';
+    const validChecks = checks
+      .map((ck) => ({
+        name: ck.name.trim(),
+        expression: ck.expression.trim(),
+        enforced: ck.enforced !== false,
+      }))
+      .filter((ck) => ck.expression.length > 0);
+
+    return {
+      database,
+      schema,
+      table: tableName.trim() || (previewOnly ? 'new_table' : ''),
+      columns: isVirtual ? [] : columns,
+      checkConstraints: !isVirtual && validChecks.length > 0 ? validChecks : undefined,
+      engine,
+      orderBy,
+      partitionBy,
+      comment,
+      strict: dbType === 'sqlite' && !isVirtual ? strictTable : undefined,
+      withoutRowId: dbType === 'sqlite' && !isVirtual ? withoutRowId : undefined,
+      virtualModule: isVirtual ? virtualModule : undefined,
+      virtualArgs: isVirtual ? virtualArgs.trim() : undefined,
+      previewOnly,
+    };
+  };
 
   const handlePreview = async () => {
     try {
-      const ddl = await api.createTable(connectionId, {
-        database,
-        schema,
-        table: tableName.trim() || 'new_table',
-        columns,
-        engine,
-        orderBy,
-        partitionBy,
-        comment,
-        previewOnly: true,
-      });
+      const ddl = await api.createTable(connectionId, buildPayload(true));
       setPreviewDDL(ddl);
     } catch (err: any) {
       message.error(err.message);
@@ -215,19 +296,13 @@ export const CreateTableModal: React.FC<Props> = ({
       message.warning(t('Please enter a table name'));
       return;
     }
+    if (supportsVirtualTables && tableMode === 'virtual' && !virtualArgs.trim()) {
+      message.warning(t('Please enter virtual table columns or arguments'));
+      return;
+    }
     setSubmitting(true);
     try {
-      await api.createTable(connectionId, {
-        database,
-        schema,
-        table: tableName.trim(),
-        columns,
-        engine,
-        orderBy,
-        partitionBy,
-        comment,
-        previewOnly: false,
-      });
+      await api.createTable(connectionId, buildPayload(false));
       message.success(t('Table {name} created successfully!', { name: tableName.trim() }));
       onCreated(tableName.trim());
       onClose();
@@ -238,11 +313,13 @@ export const CreateTableModal: React.FC<Props> = ({
     }
   };
 
+  const isVirtualMode = supportsVirtualTables && tableMode === 'virtual';
+
   return (
     <Modal
       open={open}
       title={`${t('Visual Create Table')} — ${database}${schema ? '.' + schema : ''} (${drv?.name || dbType})`}
-      width="min(920px, calc(100vw - 16px))"
+      width="min(940px, calc(100vw - 16px))"
       style={isMobile ? { top: 10 } : undefined}
       styles={{
         body: {
@@ -265,6 +342,30 @@ export const CreateTableModal: React.FC<Props> = ({
         </div>
       }
     >
+      {supportsVirtualTables && (
+        <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+          <Segmented
+            size="small"
+            value={tableMode}
+            onChange={(v) => setTableMode(v as 'standard' | 'virtual')}
+            options={[
+              { label: t('Standard Table'), value: 'standard' },
+              { label: t('Virtual Table (FTS5 / RTree)'), value: 'virtual' },
+            ]}
+          />
+          {dbType === 'sqlite' && tableMode === 'standard' && (
+            <Space wrap>
+              <Checkbox checked={strictTable} onChange={(e) => setStrictTable(e.target.checked)}>
+                STRICT
+              </Checkbox>
+              <Checkbox checked={withoutRowId} onChange={(e) => setWithoutRowId(e.target.checked)}>
+                WITHOUT ROWID
+              </Checkbox>
+            </Space>
+          )}
+        </div>
+      )}
+
       <Form layout="vertical">
         <Row gutter={12}>
           <Col xs={24} sm={8}>
@@ -278,10 +379,47 @@ export const CreateTableModal: React.FC<Props> = ({
           </Col>
           <Col xs={24} sm={16}>
             <Form.Item label={t('Table Comment')}>
-              <Input value={comment} onChange={(e) => setComment(e.target.value)} />
+              <Input disabled={isVirtualMode} value={comment} onChange={(e) => setComment(e.target.value)} />
             </Form.Item>
           </Col>
         </Row>
+
+        {isVirtualMode && (
+          <Row gutter={12}>
+            <Col xs={24} sm={7}>
+              <Form.Item label={t('Virtual Module')} required>
+                <Select
+                  value={virtualModule}
+                  onChange={(val) => {
+                    setVirtualModule(val);
+                    if (val === 'rtree') {
+                      setVirtualArgs('id, minX, maxX, minY, maxY');
+                    } else if (val === 'fts5') {
+                      setVirtualArgs("title, body, tokenize='unicode61'");
+                    } else {
+                      setVirtualArgs('title, body');
+                    }
+                  }}
+                  options={[
+                    { label: 'fts5 (Full-Text Search 5)', value: 'fts5' },
+                    { label: 'fts4 (Full-Text Search 4)', value: 'fts4' },
+                    { label: 'rtree (Spatial R-Tree)', value: 'rtree' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={17}>
+              <Form.Item label={t('Module Columns / Arguments')} required>
+                <Input
+                  style={{ fontFamily: 'monospace' }}
+                  placeholder="title, body, tokenize='unicode61'"
+                  value={virtualArgs}
+                  onChange={(e) => setVirtualArgs(e.target.value)}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+        )}
 
         {dbType === 'clickhouse' && (
           <Row gutter={12}>
@@ -322,37 +460,91 @@ export const CreateTableModal: React.FC<Props> = ({
         )}
       </Form>
 
-      <div style={{ marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Typography.Text strong>{t('Column Definitions ({count})', { count: columns.length })}</Typography.Text>
-        <Button
-          size="small"
-          type="dashed"
-          icon={<PlusOutlined />}
-          onClick={() =>
-            setColumns([
-              ...columns,
-              {
-                name: `col_${columns.length + 1}`,
-                type: typeOptions[0]?.value || 'VARCHAR(255)',
-                nullable: true,
-                isPrimaryKey: false,
-                isAutoIncrement: false,
-              },
-            ])
-          }
-        >
-          {t('Add Column')}
-        </Button>
-      </div>
+      {!isVirtualMode && (
+        <>
+          <div style={{ marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+            <Typography.Text strong>{t('Column Definitions ({count})', { count: columns.length })}</Typography.Text>
+            <Button
+              size="small"
+              type="dashed"
+              icon={<PlusOutlined />}
+              onClick={() =>
+                setColumns([
+                  ...columns,
+                  {
+                    name: `col_${columns.length + 1}`,
+                    type: typeOptions[0]?.value || 'VARCHAR(255)',
+                    nullable: true,
+                    isPrimaryKey: false,
+                    isAutoIncrement: false,
+                  },
+                ])
+              }
+            >
+              {t('Add Column')}
+            </Button>
+          </div>
 
-      <ResizableTable<ColumnDef>
-        size="small"
-        pagination={false}
-        rowKey={(_, idx) => String(idx)}
-        dataSource={columns}
-        scroll={{ x: 890 }}
-        columns={colTableColumns}
-      />
+          <ResizableTable<ColumnDef>
+            size="small"
+            pagination={false}
+            rowKey={(_, idx) => String(idx)}
+            dataSource={columns}
+            scroll={{ x: supportsGeneratedCols ? 1040 : 860 }}
+            columns={colTableColumns}
+          />
+
+          {supportsChecks && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ marginBottom: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                <Typography.Text strong>{t('Check Constraints ({count})', { count: checks.length })}</Typography.Text>
+                <Button
+                  size="small"
+                  type="dashed"
+                  icon={<PlusOutlined />}
+                  onClick={() =>
+                    setChecks((prev) => [
+                      ...prev,
+                      {
+                        name: `chk_${(tableName.trim() || 'table')}_${prev.length + 1}`,
+                        expression: '',
+                        enforced: true,
+                      },
+                    ])
+                  }
+                >
+                  {t('Add Check')}
+                </Button>
+              </div>
+              {checks.map((ck, idx) => (
+                <div key={idx} style={{ display: 'flex', gap: 8, marginBottom: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <Input
+                    size="small"
+                    style={{ width: isMobile ? '100%' : 180 }}
+                    placeholder={t('Constraint Name')}
+                    value={ck.name}
+                    onChange={(e) => updateCheck(idx, { name: e.target.value })}
+                  />
+                  <Input
+                    size="small"
+                    style={{ flex: 1, minWidth: 180, fontFamily: 'monospace' }}
+                    placeholder={t('Check Expression, e.g. amount >= 0')}
+                    value={ck.expression}
+                    onChange={(e) => updateCheck(idx, { expression: e.target.value })}
+                  />
+                  <Button
+                    size="small"
+                    type="text"
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={() => setChecks((prev) => prev.filter((_, i) => i !== idx))}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
 
       {previewDDL && (
         <Alert

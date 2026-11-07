@@ -164,12 +164,32 @@ func TestRBACMultiUserIsolationAndOperations(t *testing.T) {
 	if w := doJSON(http.MethodGet, "/api/conn/"+connBID+"/databases", devTok, nil); w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 for dev_alice on unassigned ConnB, got %d", w.Code)
 	}
-	// dev_alice cannot delete or edit admin's Shared ConnA
+	// dev_alice cannot delete, edit, or duplicate admin's Shared ConnA
 	if w := doJSON(http.MethodDelete, "/api/connections/"+connAID, devTok, nil); w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 when dev_alice attempts to delete admin shared ConnA, got %d", w.Code)
 	}
-	// dev_alice creates a private connection inside local_databases (even if requesting shared, non-admin gets private)
-	privConnID := createConn(devTok, "Alice Scratch DB", filepath.Join("local_databases", "alice_priv.db"), "shared")
+	if w := doJSON(http.MethodPost, "/api/connections/"+connAID+"/duplicate", devTok, nil); w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when dev_alice attempts to duplicate admin shared ConnA, got %d", w.Code)
+	}
+	// Non-admin cannot create a connection in shared local_databases root outside their u_<hash> bucket
+	if w := doJSON(http.MethodPost, "/api/connections", devTok, map[string]any{
+		"name": "Shared Root Escape", "type": "sqlite", "filePath": filepath.Join(tmpDir, "local_databases", "shared_root.db"),
+	}); w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when non-admin creates DB in shared local_databases root, got %d: %s", w.Code, w.Body.String())
+	}
+	// dev_alice creates a private connection using bare filename (auto-scoped into local_databases/u_<hash>/alice_priv.db)
+	wAlicePriv := doJSON(http.MethodPost, "/api/connections", devTok, map[string]any{
+		"name":       "Alice Scratch DB",
+		"type":       "sqlite",
+		"filePath":   "alice_priv.db",
+		"visibility": "shared",
+	})
+	if wAlicePriv.Code != http.StatusOK {
+		t.Fatalf("create Alice Scratch DB failed (%d): %s", wAlicePriv.Code, wAlicePriv.Body.String())
+	}
+	var alicePrivSaved store.SavedConnection
+	_ = json.Unmarshal(wAlicePriv.Body.Bytes(), &alicePrivSaved)
+	privConnID := alicePrivSaved.ID
 	// auditor_bob cannot create connections and cannot see Alice's private connection
 	if w := doJSON(http.MethodPost, "/api/connections", auditTok, map[string]any{
 		"name": "Illegal Conn", "type": "sqlite", "filePath": filepath.Join(tmpDir, "illegal.db"),
@@ -337,13 +357,16 @@ func TestRBACMultiUserIsolationAndOperations(t *testing.T) {
 		t.Fatalf("expected 403 when non-admin opens SQLite file outside DataDir, got %d", w.Code)
 	}
 
-	// Non-admin browsing DataDir root is strictly blocked in v1.0.1+; browsing local_databases succeeds and never exposes internal files
+	// Non-admin browsing DataDir root or shared local_databases root is strictly blocked; browsing own u_<hash> dir succeeds
 	if wRoot := doJSON(http.MethodGet, "/api/fs/browse?path="+url.QueryEscape(tmpDir)+"&all=1", devTok, nil); wRoot.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 when non-admin browses DataDir root outside local_databases, got %d: %s", wRoot.Code, wRoot.Body.String())
 	}
-	wDevBrowse := doJSON(http.MethodGet, "/api/fs/browse?path="+url.QueryEscape(filepath.Join(tmpDir, "local_databases"))+"&all=1", devTok, nil)
+	if wSharedLocal := doJSON(http.MethodGet, "/api/fs/browse?path="+url.QueryEscape(filepath.Join(tmpDir, "local_databases"))+"&all=1", devTok, nil); wSharedLocal.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when non-admin browses shared local_databases root, got %d: %s", wSharedLocal.Code, wSharedLocal.Body.String())
+	}
+	wDevBrowse := doJSON(http.MethodGet, "/api/fs/browse?all=1", devTok, nil)
 	if wDevBrowse.Code != http.StatusOK {
-		t.Fatalf("expected 200 when dev_alice browses local_databases, got %d: %s", wDevBrowse.Code, wDevBrowse.Body.String())
+		t.Fatalf("expected 200 when dev_alice browses own isolated local_databases directory, got %d: %s", wDevBrowse.Code, wDevBrowse.Body.String())
 	}
 	if bytes.Contains(wDevBrowse.Body.Bytes(), []byte("dbharbor.db")) || bytes.Contains(wDevBrowse.Body.Bytes(), []byte("config.json")) {
 		t.Fatalf("expected internal files to be hidden in /api/fs/browse response: %s", wDevBrowse.Body.String())

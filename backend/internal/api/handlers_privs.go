@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"dbharbor/backend/internal/driver/dbprivs"
+	"dbharbor/backend/internal/driver/sqlmeta"
 	"dbharbor/backend/internal/store"
 )
 
@@ -14,7 +15,7 @@ func (s *Server) handleGetObjectDDL(c *Context) {
 	if !ok {
 		return
 	}
-	ddl, err := dbprivs.FetchObjectDDL(
+	ddl, err := sqlmeta.FetchObjectDDL(
 		c.Request.Context(),
 		cfg.Type,
 		sqlDrv,

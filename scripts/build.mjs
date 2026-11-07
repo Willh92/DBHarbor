@@ -80,7 +80,7 @@ function precompressEmbedDir(dir) {
 function resolveVersionMeta() {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf8'));
   const envVer = (process.env.DBHARBOR_BUILD_VERSION || '').trim().replace(/^[vV]/, '');
-  const version = envVer || pkg.version || '1.0.1';
+  const version = envVer || pkg.version || '1.0.2';
   const rawChannel = (process.env.DBHARBOR_BUILD_CHANNEL || '').trim().toLowerCase();
   const channel = rawChannel === 'preview' || rawChannel === 'release'
     ? rawChannel
@@ -182,6 +182,8 @@ function createMacOSAppBundle(desktopBinaryPath, goarch, version) {
   <string>APPL</string>
   <key>CFBundleExecutable</key>
   <string>dbharbor-desktop</string>
+  <key>CFBundleIconFile</key>
+  <string>icon.png</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>LSMinimumSystemVersion</key>
@@ -280,6 +282,18 @@ async function main() {
   const targets = buildAll ? ALL_TARGETS : [currentHostTarget()];
   const checksumLines = [];
 
+  const slimModPath = path.join(ROOT_DIR, '.toolchain', 'build-overlay', 'go.slim.mod');
+  console.log('[build] Generating compressed Oracle charset Go slim modfile...');
+  const ovRes = spawnSync(
+    goBin,
+    ['run', './cmd/gen-overlay', '-out', slimModPath],
+    { cwd: BACKEND_DIR, env: { ...env, CGO_ENABLED: '0' }, stdio: 'inherit' }
+  );
+  if (ovRes.status !== 0) {
+    console.error('[build] Failed generating Go slim modfile');
+    process.exit(ovRes.status || 1);
+  }
+
   for (const target of targets) {
     const buildEnv = {
       ...env,
@@ -298,7 +312,7 @@ async function main() {
 
       const res = spawnSync(
         goBin,
-        ['build', '-trimpath', `-ldflags=${serverLdflags}`, '-o', outPath, './cmd/dbharbor'],
+        ['build', '-trimpath', `-modfile=${slimModPath}`, `-ldflags=${serverLdflags}`, '-o', outPath, './cmd/dbharbor'],
         { cwd: BACKEND_DIR, env: buildEnv, stdio: 'inherit' }
       );
       if (res.status !== 0) {
@@ -325,7 +339,7 @@ async function main() {
 
       const deskRes = spawnSync(
         goBin,
-        ['build', '-trimpath', `-ldflags=${deskFlags.join(' ')}`, '-o', deskPath, './cmd/dbharbor-desktop'],
+        ['build', '-trimpath', `-modfile=${slimModPath}`, `-ldflags=${deskFlags.join(' ')}`, '-o', deskPath, './cmd/dbharbor-desktop'],
         { cwd: BACKEND_DIR, env: buildEnv, stdio: 'inherit' }
       );
       if (deskRes.status !== 0) {

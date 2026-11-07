@@ -22,6 +22,15 @@ var (
 
 // Register registers a pluggable database driver.
 func Register(meta DriverMeta, factory Factory) {
+	if meta.Capabilities.IsEmpty() {
+		meta.Capabilities = DefaultCapabilities(meta.Type)
+	}
+	if len(meta.Capabilities.PartitionActions) > 0 {
+		meta.SupportsPartitions = true
+	}
+	if meta.Type == "duckdb" {
+		meta.SupportsSchemas = true
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	seq++

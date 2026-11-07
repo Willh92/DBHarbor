@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -93,6 +93,19 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
   const [selectedUserDB, setSelectedUserDB] = useState<string>(tab.database || '');
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
+  const reqSeqRef = useRef(0);
+
+  // Sync external database / schema updates when Users & Grants is opened from another database
+  useEffect(() => {
+    if (tab.database && tab.database !== selectedUserDB) {
+      setSelectedUserDB(tab.database);
+      setTargetDB(tab.database);
+      setTargetTable('');
+    }
+    if (tab.schema && tab.schema !== targetSchema) {
+      setTargetSchema(tab.schema);
+    }
+  }, [tab.database, tab.schema]);
 
   // Create User Modal
   const [createOpen, setCreateOpen] = useState(false);
@@ -125,12 +138,14 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
   const [executingGrant, setExecutingGrant] = useState(false);
 
   const loadUsersAndCaps = useCallback(async () => {
+    const seq = ++reqSeqRef.current;
     setLoading(true);
     try {
       const [capRes, dbList] = await Promise.all([
         api.dbPrivCapabilities(tab.connectionId),
         api.listDatabases(tab.connectionId).catch(() => []),
       ]);
+      if (seq !== reqSeqRef.current) return;
       setCaps(capRes);
       const dbNames = dbList.map((d) => d.name);
       setDatabases(dbNames);
@@ -140,14 +155,19 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
       }
       if (capRes.supported) {
         const list = await api.dbListUsers(tab.connectionId, effectiveDB);
+        if (seq !== reqSeqRef.current) return;
         setUsers(list);
       } else {
         setUsers([]);
       }
     } catch (err: any) {
-      message.error(err.message);
+      if (seq === reqSeqRef.current) {
+        message.error(err.message);
+      }
     } finally {
-      setLoading(false);
+      if (seq === reqSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, [tab.connectionId, tab.database, selectedUserDB]);
 
@@ -720,15 +740,17 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
           )}
 
           {tab.dbType === 'redis' ? (
-            <Form.Item name="aclPreset" label={t('Initial ACL Permission Preset')}>
+            <Form.Item label={t('Initial ACL Permission Preset')}>
               <div className="dbharbor-no-scrollbar" style={{ overflowX: 'auto', maxWidth: '100%' }}>
-                <Segmented
-                  options={[
-                    { value: 'readonly', label: t('Read-Only') },
-                    { value: 'readwrite', label: t('Read-Write') },
-                    { value: 'admin', label: t('Full Admin') },
-                  ]}
-                />
+                <Form.Item name="aclPreset" noStyle>
+                  <Segmented
+                    options={[
+                      { value: 'readonly', label: t('Read-Only') },
+                      { value: 'readwrite', label: t('Read-Write') },
+                      { value: 'admin', label: t('Full Admin') },
+                    ]}
+                  />
+                </Form.Item>
               </div>
             </Form.Item>
           ) : (

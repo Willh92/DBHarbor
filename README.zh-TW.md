@@ -3,7 +3,7 @@
 **語言切換**: [English](./README.md) | [简体中文](./README.zh-CN.md) | **繁體中文** | [日本語](./README.ja.md)
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.1-1677ff.svg)](./CHANGELOG.zh-TW.md)
+[![Version](https://img.shields.io/badge/Version-v1.0.2-1677ff.svg)](./CHANGELOG.zh-TW.md)
 [![CGO_ENABLED=0](https://img.shields.io/badge/Go-CGO__ENABLED%3D0-00ADD8.svg)](https://github.com/Willh92/DBHarbor.git)
 
 融合 **phpMyAdmin 經典直覺式資料表操作體驗** 與 **現代多引擎 IDE 能力** 的零外部相依性單一執行檔跨平台 Web 資料庫管理平台。
@@ -16,17 +16,17 @@
 
 ## 核心特色
 
-- **內建 14 種資料庫驅動程式 (`CGO_ENABLED=0` 純 Go)**：
-  - **OLAP 分析型**：ClickHouse（Native TCP / HTTP 雙協定、`MergeTree` 視覺化建表、分區治理）、DuckDB
-  - **關聯式 RDBMS**：MySQL、MariaDB、TiDB、OceanBase、PostgreSQL、KingbaseES、SQLite 3、SQL Server、Oracle（純 Go 免安裝 Instant Client）、達夢 DM8
-  - **鍵值與文件 NoSQL**：Redis（DB0–15 瀏覽器、6 種資料結構編輯器、內嵌 CLI）、MongoDB（JSON / 表格雙檢視、BSON CRUD、索引與 `RunCommand` 終端機）
-- **完整的視覺化結構設計、資料庫權限指派與 SQL 維運**：
-  - **視覺化資料表結構、函式/觸發程序建立與資料庫權限治理**：新增/修改/重新命名欄位、變更型別與 `NULL` 約束、索引與外部索引鍵管理、視覺化新增與編輯函式/預存程序/觸發程序（內建多方言智慧範本）、資料庫級帳號與權限指派（`GRANT` / `REVOKE`、Redis ACL、MongoDB 角色）、複製/重新命名資料表、建立檢視表、SQLite 交易級無損重建資料表、SQLite 極速物件清單載入與即時 DDL 預覽。
-  - **Navicat 級鋪滿資料網格、空白列直接新增與多頁籤智慧 SQL 終端機**：資料網格自動鋪滿工作區高度並支援點擊空白列直接行內新增、批次修改欄位、單列/多列整列 TSV 複製貼上（`Ctrl+C` / `Ctrl+V` 相容記事本與 Excel）、本機資料庫檔案瀏覽與上傳（`SQLite 3` / `DuckDB`），內嵌輕量化 Monaco Editor 支援自動補全、`Ctrl/Cmd + Enter` 執行、`EXPLAIN` 查詢計畫、SQL 排版、查詢中斷 (`AbortController`) 與歷史紀錄。
-  - **串流匯入匯出與批次資料表維運**：支援整庫與多表勾選 SQL Dump、單表/篩選結果/自訂查詢/MongoDB 集合/Redis 鍵值串流匯入匯出（`SQL` / `CSV-BOM` / `CSV` / `JSON` / `JSONL` / `Markdown`）、DuckDB / MongoDB 串流記憶體上限保護、批次匯入與直接貼上執行 SQL 腳本。
+- **內建 14 種資料庫驅動程式 (`CGO_ENABLED=0` 純 Go，無損精簡瘦身執行檔)**：
+  - **OLAP 分析型**：ClickHouse（Native TCP / HTTP 雙協定、`MergeTree` 視覺化建表、投影 `Projections`、跳數索引 `Skipping Indexes`、實體化檢視表、`TTL` 策略、外部字典、SQL UDF 與分區治理）、DuckDB（多 Schema 切換、序列 `Sequences`、純量/資料表巨集 `Macros`）
+  - **關聯式 RDBMS**：MySQL、MariaDB、TiDB、OceanBase、PostgreSQL、KingbaseES、SQLite 3（`FTS5`/`RTree` 虛擬表與 `PRAGMA`/完整性檢查面板）、SQL Server、Oracle（純 Go 免安裝 Instant Client，內建 236 張字元集表 Gzip 無損壓縮覆寫層）、達夢 DM8
+  - **鍵值與文件 NoSQL**：Redis（DB0–15 瀏覽器、6 種資料結構編輯器、Stream 消費者群組管理、慢查詢日誌、執行期設定 `CONFIG GET`、Pub/Sub 與內嵌 CLI）、MongoDB（JSON / 表格雙檢視、BSON CRUD、唯讀檢視表 / 時間序列集合 / 固定大小集合、`$jsonSchema` 驗證規則、TTL/Partial/Sparse 進階索引與 `RunCommand` 終端機）
+- **完整的 14 引擎專屬物件 CRUD、視覺化結構設計、資料庫權限指派與 SQL 維運**：
+  - **視覺化資料表結構、各引擎專屬物件管理與資料庫權限治理**：新增/修改/重新命名欄位（含產生欄位/計算欄位與 `CHECK` 約束）、索引/外部索引鍵/資料表分區管理，視覺化建立、編輯與即時預覽 **排程事件 (`Events`)**（MySQL/MariaDB/OceanBase）、**序列 (`Sequences`)**（PG/Oracle/DM8/MSSQL/MariaDB/TiDB/DuckDB）、**實體化檢視表及重新整理**（PG/Oracle/DM8/ClickHouse）、**套件 (`PACKAGE` 規格+主體)、同義詞與資料庫連結 (`DB Links`)**（Oracle/DM8）、**擴充套件與自訂型別 (`ENUM`/`DOMAIN`)**（PG/KingbaseES）、**函式/預存程序/觸發程序**；支援資料庫級帳號與權限指派（`GRANT` / `REVOKE`、Redis ACL、MongoDB 角色）、SQLite 交易級無損重建資料表，以及左側導覽樹**預設全折疊 + 一鍵全部展開/折疊**與跨連線/跨資料庫/跨 Schema 嚴格狀態隔離。
+  - **Web 瀏覽器直開本機單檔資料庫 (`SQLite 3` / `DuckDB`)、Navicat 級鋪滿資料網格與多頁籤 SQL 終端機**：Web 服務版支援拖放或一鍵 **「開啟本機資料庫 (`Open Local DB`)」** 直接載入本機 `.db`/`.sqlite`/`.duckdb` 檔案，於 Chromium 瀏覽器支援透過 File System Access API **直接寫回覆寫本機原始檔案**或一鍵下載最新快照；資料網格（`CellStateHub` 低記憶體架構）自動鋪滿工作區高度並支援點擊空白列直接新增、批次修改欄位、單列/多列 TSV 複製貼上（`Ctrl+C` / `Ctrl+V` 相容記事本與 Excel），內嵌輕量化 Monaco Editor 支援自動補全、`Ctrl/Cmd + Enter` 執行、`EXPLAIN` 查詢計畫、SQL 排版、查詢中斷 (`AbortController`) 與歷史紀錄。
+  - **串流匯入匯出與批次資料表維運**：支援整庫與多表勾選 SQL Dump、單表/篩選結果/自訂查詢/MongoDB/Redis/DuckDB 串流匯出與 `< 64 KiB` 記憶體串流上傳（`SQL` / `CSV-BOM` / `CSV` / `JSON` / `JSONL` / `Markdown`）、串流記憶體上限保護、批次匯入與直接貼上執行 SQL 腳本。
 - **Web 多成員三級 RBAC、登入品牌自訂、安全沙箱與管理員緊急復原 *(僅 Web 服務版)***：
   - **零預設弱密碼初始化、登入頁品牌自訂與防搜尋引擎收錄**：首次啟動開啟一次性**初始化管理員帳號精靈**（密碼至少 `8` 碼，移除預設 `admin123`）、零指紋登入介面、支援自訂瀏覽器 `<title>`、頂部圖示（上傳 `<= 128 KB` 圖示並同步 Favicon）與主副標題，內建 `/robots.txt`、`X-Robots-Tag` 與 `<meta name="robots">` 三重防爬蟲收錄保護。
-  - **多成員 RBAC、2FA 與縱深安全強化**：三級 RBAC（`Admin` / `Read-Write` / `Read-Only`）、金鑰衍生單次有效圖形驗證碼、`trustedProxies` 可信反向代理限流 (`HTTP 429`)、離線 QR Code **RFC 6238 TOTP 雙重驗證** + 8 組一次性備用恢復碼 + 2FA 嘗試次數限制、嚴格 TLS 憑證驗證、非管理員 `<DataDir>/local_databases/` 沙箱（Web 模式停用 SQLite `ATTACH` 與 DuckDB 外部檔案存取）、非管理員內網 SSRF 防護、引用計數並行連線池安全回收、SQL Server 獨佔連線 `USE [db]` 隔離，以及 `<DataDir>/config.json` 持久化設定與**自動清除式管理員緊急復原**。
+  - **多成員 RBAC、2FA 與縱深安全強化**：三級 RBAC（`Admin` / `Read-Write` / `Read-Only`）與依帳號隔離的工作區分頁/SQL 草稿、金鑰衍生單次有效圖形驗證碼、`trustedProxies` 可信反向代理限流 (`HTTP 429`)、離線 QR Code **RFC 6238 TOTP 雙重驗證** + 8 組一次性備用恢復碼 + 2FA 嘗試次數限制、嚴格 TLS 憑證驗證、非管理員 `<DataDir>/local_databases/u_<hash>/` 與 `<DataDir>/ephemeral_workspaces/` 依使用者隔離沙箱（詞法級阻擋 SQLite `ATTACH`/檔案函式、DuckDB `-safe` 模式 + `stdin` 傳參 + `enable_external_access = false`、解開辨識 MariaDB `/*M!...*/` 可執行註解）、全遠端驅動連線期防 DNS 重新綁定 SSRF 防護、引用計數並行連線池安全回收、SQL Server 獨佔連線 `USE [db]` 隔離，以及 `<DataDir>/config.json` 持久化設定與**自動清除式管理員緊急復原**。
 - **原生深色標題列同步、手機端全觸控工作台與多語言支援 (i18n)**：
   - 桌面端支援系統級原生深色標題列同步（`Win32 DWM`、`macOS DarkAqua`、`Linux GTK3`）；手機與觸控裝置支援原生 GPU CSS `position: sticky` 零閃爍固定表頭、手指拖曳調整欄寬 + 雙擊自動展開欄寬、側欄與表格觸控 `[⋮]` 及長按選單、手機 SQL 快捷符號列、點選檢視截斷儲存格、底部抽屜編輯器、左側導覽列 `keep-alive` 記憶體快取與全域彈出選單邊界防溢出定位。
   - 同時支援 **TCP 連接埠** 與 **Unix Domain Socket (`AF_UNIX`)** 監聽（`-unix-socket`、`-unix-socket-perm`、`-unix-socket-group`）。
@@ -130,7 +130,7 @@ DBHarbor **預設不會將資料寫入程式啟動目錄**，而是自動儲存�
 1. **編輯 `<DataDir>/config.json` 並重啟服務**：將 `"recovery"` 設為 `{ "enabled": true, "adminUsername": "admin", "newPassword": "YourNewStrongPassword", "reset2FA": true }`（或 `"newPassword": "auto"` 自動產生 16 碼隨機密碼印出至啟動日誌）並重啟 DBHarbor。系統會自動備份 `dbharbor.db` 至 `<DataDir>/.backups/`、重設密碼/2FA、撤銷舊工作階段，並**立即自動將 `config.json` 重設為 `enabled: false, newPassword: ""`**，確保明文密碼不殘留於磁碟。
 2. **單次 CLI 指令復原**：`dbharbor -data-dir /var/lib/dbharbor -recover-admin -recover-pass auto -reset-2fa`
 
-> **Web 服務版本機檔案與網路安全邊界**：DBHarbor 內部元資料庫（`dbharbor.db`）、`config.json` 與主金鑰（`.secret.key`）在所有模式下皆自動隱藏保護。於 **Web 服務版**中，非管理員（`Read-Write`）成員操作 SQLite / DuckDB 本機檔案時嚴格限制於 `<DataDir>/local_databases/` 沙箱內（停用 SQLite `ATTACH`、強制伺服端控管 `security.duckdbCliPath` 與 DuckDB `enable_external_access = false`，並預設封鎖非管理員連線內網 SSRF 目標）；**原生桌面視窗版**運行於純本機免登入模式，保有完整本機目錄存取權限。
+> **Web 服務版本機檔案與網路安全邊界**：DBHarbor 內部元資料庫（`dbharbor.db`）、`config.json` 與主金鑰（`.secret.key`）在所有模式下皆自動隱藏保護。於 **Web 服務版**中，非管理員（`Read-Write`）成員操作伺服端 SQLite / DuckDB 本機檔案時依帳號隔離於 `<DataDir>/local_databases/u_<hash>/` 子目錄內，透過瀏覽器 **「開啟本機資料庫 (`Open Local DB`)」** 載入的臨時單檔資料庫則依使用者隔離於 `0700` `<DataDir>/ephemeral_workspaces/` 目錄內（嚴格驗證檔頭魔數、12 小時閒置自動清理、詞法級停用 SQLite `ATTACH`/檔案讀寫函式、強制伺服端控管 `security.duckdbCliPath` 與 DuckDB `-safe` 模式 + `stdin` 傳參 + `enable_external_access = false`，並於連線階段封鎖私網 DNS 重新綁定與 SSRF 目標）；**原生桌面視窗版**運行於無使用者帳戶體系的純本機免登入模式，保有完整本機目錄存取權限。
 
 ---
 

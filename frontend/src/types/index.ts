@@ -20,6 +20,13 @@ export interface ConnFieldSchema {
   selectOptions?: SelectOption[];
 }
 
+export interface DriverCapabilities {
+  objectTypes?: string[];
+  tableFeatures?: string[];
+  partitionActions?: string[];
+  matViewActions?: string[];
+}
+
 export interface DriverMeta {
   type: string;
   name: string;
@@ -32,6 +39,7 @@ export interface DriverMeta {
   supportsExplain: boolean;
   defaultTypes?: string[];
   fields: ConnFieldSchema[];
+  capabilities?: DriverCapabilities;
 }
 
 export interface ConnectionFormPayload {
@@ -67,8 +75,17 @@ export interface SavedConnection {
   ownerId?: string;
   visibility?: ConnectionVisibility;
   editable?: boolean;
+  ephemeral?: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface EphemeralOpenResponse {
+  connection: SavedConnection;
+  database: string;
+  firstTable?: string;
+  tablesCount: number;
+  sizeBytes: number;
 }
 
 export interface ExportedConnectionProfile {
@@ -121,6 +138,10 @@ export interface ObjectItem {
   indexBytes?: number;
   collation?: string;
   comment?: string;
+  createdAt?: string;
+  targetName?: string;
+  status?: string;
+  extra?: Record<string, string>;
 }
 
 export interface SchemaObjects {
@@ -128,8 +149,18 @@ export interface SchemaObjects {
   schema: string;
   tables: ObjectItem[];
   views: ObjectItem[];
+  materializedViews?: ObjectItem[];
   routines: ObjectItem[];
   triggers?: ObjectItem[];
+  sequences?: ObjectItem[];
+  events?: ObjectItem[];
+  packages?: ObjectItem[];
+  types?: ObjectItem[];
+  synonyms?: ObjectItem[];
+  extensions?: ObjectItem[];
+  dictionaries?: ObjectItem[];
+  dbLinks?: ObjectItem[];
+  macros?: ObjectItem[];
 }
 
 export interface ColumnDef {
@@ -141,6 +172,29 @@ export interface ColumnDef {
   isAutoIncrement: boolean;
   comment?: string;
   extra?: string;
+  generatedExpr?: string;
+  generatedStorage?: string;
+}
+
+export interface CheckConstraintDef {
+  name: string;
+  expression: string;
+  enforced: boolean;
+}
+
+export interface ProjectionDef {
+  name: string;
+  query: string;
+  rows?: number;
+  bytesOnDisk?: number;
+}
+
+export interface SkippingIndexDef {
+  name: string;
+  type: string;
+  expression: string;
+  granularity: number;
+  bytesOnDisk?: number;
 }
 
 export interface AlterAction {
@@ -154,7 +208,20 @@ export interface AlterAction {
     | 'ADD_FOREIGN_KEY'
     | 'DROP_FOREIGN_KEY'
     | 'RENAME_TABLE'
-    | 'COMMENT_TABLE';
+    | 'COMMENT_TABLE'
+    | 'ADD_CHECK'
+    | 'DROP_CHECK'
+    | 'ADD_PROJECTION'
+    | 'DROP_PROJECTION'
+    | 'MATERIALIZE_PROJECTION'
+    | 'CLEAR_PROJECTION'
+    | 'ADD_SKIPPING_INDEX'
+    | 'DROP_SKIPPING_INDEX'
+    | 'MATERIALIZE_SKIPPING_INDEX'
+    | 'CLEAR_SKIPPING_INDEX'
+    | 'MODIFY_TTL'
+    | 'REMOVE_TTL'
+    | 'SET_PRAGMA';
   column?: ColumnDef;
   oldName?: string;
   newName?: string;
@@ -162,6 +229,73 @@ export interface AlterAction {
   afterColumn?: string;
   index?: IndexDef;
   foreignKey?: ForeignKeyDef;
+  check?: CheckConstraintDef;
+  projection?: ProjectionDef;
+  skippingIndex?: SkippingIndexDef;
+  ttlExpr?: string;
+  pragmaKey?: string;
+  pragmaValue?: string;
+}
+
+export interface ObjectSpec {
+  dataType?: string;
+  startWith?: number;
+  incrementBy?: number;
+  minValue?: number;
+  maxValue?: number;
+  cache?: number;
+  cycle?: boolean;
+  restartWith?: number;
+
+  scheduleKind?: 'EVERY' | 'AT';
+  everyValue?: number;
+  everyUnit?: string;
+  executeAt?: string;
+  startsAt?: string;
+  endsAt?: string;
+  preserve?: boolean;
+  enabled?: boolean;
+  bodySql?: string;
+
+  selectSql?: string;
+  populate?: boolean;
+  targetTable?: string;
+  engineClause?: string;
+  refreshMode?: string;
+
+  typeKind?: 'ENUM' | 'DOMAIN' | 'COMPOSITE';
+  enumValues?: string[];
+  newEnumValue?: string;
+  baseType?: string;
+  checkExpr?: string;
+  extensionVersion?: string;
+  cascade?: boolean;
+
+  targetOwner?: string;
+  targetObject?: string;
+  dbLinkHost?: string;
+  dbLinkUser?: string;
+  dbLinkPass?: string;
+  public?: boolean;
+
+  parameters?: string[];
+  isTableMacro?: boolean;
+  macroExpr?: string;
+}
+
+export interface ObjectActionPayload {
+  database?: string;
+  schema?: string;
+  objectName: string;
+  objectType: string;
+  action: string;
+  targetName?: string;
+  viewSql?: string;
+  routineSql?: string;
+  replaceExisting?: boolean;
+  comment?: string;
+  previewOnly?: boolean;
+  spec?: ObjectSpec;
 }
 
 export interface IndexDef {
@@ -193,6 +327,11 @@ export interface TableStructure {
   columns: ColumnDef[];
   indexes: IndexDef[];
   foreignKeys: ForeignKeyDef[];
+  checkConstraints?: CheckConstraintDef[];
+  projections?: ProjectionDef[];
+  skippingIndexes?: SkippingIndexDef[];
+  tableTtl?: string;
+  diagnostics?: Record<string, string>;
   options?: Record<string, string>;
 }
 
@@ -208,6 +347,7 @@ export interface QueryResult {
   rows: any[][];
   total: number;
   hasTotal: boolean;
+  truncated?: boolean;
   affectedRows: number;
   elapsedMs: number;
   isSelect: boolean;
@@ -222,6 +362,10 @@ export interface PartitionInfo {
   bytesOnDisk: number;
   partsCount: number;
   active: boolean;
+  detached?: boolean;
+  strategy?: string;
+  expression?: string;
+  boundDescription?: string;
 }
 
 export interface KVKeySummary {
@@ -243,21 +387,78 @@ export interface KVEntryDetail {
   type: string;
   ttl: number;
   length: number;
+  memoryBytes?: number;
+  encoding?: string;
   stringValue?: string;
   items: KVCollectionItem[];
 }
 
+export interface KVStreamConsumer {
+  name: string;
+  pending: number;
+  idleMs: number;
+}
+
+export interface KVStreamGroup {
+  name: string;
+  consumers: number;
+  pending: number;
+  lastDeliveredId: string;
+  entriesRead?: number;
+  lag?: number;
+  consumerList?: KVStreamConsumer[];
+}
+
+export interface KVStreamInfo {
+  length: number;
+  radixKeys?: number;
+  firstId?: string;
+  lastId?: string;
+  groupsCount: number;
+  groups: KVStreamGroup[];
+}
+
+export interface KVSlowlogEntry {
+  id: number;
+  timestamp: string;
+  durationUs: number;
+  command: string;
+  clientAddr?: string;
+  clientName?: string;
+}
+
+export interface KVConfigItem {
+  key: string;
+  value: string;
+}
+
 export interface CollectionSummary {
   name: string;
+  type?: 'collection' | 'view' | 'timeseries' | string;
   count: number;
   sizeBytes: number;
   indexesCount: number;
+  capped?: boolean;
+  maxBytes?: number;
+  maxDocs?: number;
+  viewOn?: string;
+  pipelineJson?: string;
+  validatorJson?: string;
+  validationLevel?: string;
+  validationAction?: string;
+  timeField?: string;
+  metaField?: string;
+  granularity?: string;
+  expireAfterSeconds?: number;
 }
 
 export interface DocIndexInfo {
   name: string;
   keys: Record<string, any>;
   unique: boolean;
+  sparse?: boolean;
+  expireAfterSeconds?: number;
+  partialFilterJson?: string;
 }
 
 export interface MonitorMetric {

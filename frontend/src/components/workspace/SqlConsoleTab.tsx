@@ -1,4 +1,4 @@
-import React, { memo, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -152,6 +152,23 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
   const [inspectCell, setInspectCell] = useState<{ column: string; value: string } | null>(null);
   const cellTapStartRef = useRef<{ x: number; y: number } | null>(null);
 
+  useEffect(() => {
+    setRowSearch('');
+    setInspectCell(null);
+  }, [result]);
+
+  const rowKeyMapRef = useRef<WeakMap<any[], string>>(new WeakMap());
+  const rowKeySeqRef = useRef<number>(0);
+  const getArrayRowKey = (row: any[]) => {
+    let k = rowKeyMapRef.current.get(row);
+    if (!k) {
+      rowKeySeqRef.current += 1;
+      k = `rk_${rowKeySeqRef.current}`;
+      rowKeyMapRef.current.set(row, k);
+    }
+    return k;
+  };
+
   const filteredRawRows = useMemo(() => {
     const q = deferredRowSearch.trim().toLowerCase();
     if (!q) return result.rows;
@@ -160,21 +177,10 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
     );
   }, [result.rows, deferredRowSearch]);
 
-  const dataSource = useMemo(
-    () =>
-      filteredRawRows.map((arr, rIdx) => {
-        const obj: Record<string, any> = { __rk: String(rIdx) };
-        result.columns.forEach((_, cIdx) => {
-          obj[`c_${cIdx}`] = arr[cIdx];
-        });
-        return obj;
-      }),
-    [filteredRawRows, result.columns]
-  );
-
   const columns = useMemo(
     () =>
       result.columns.map((c, cIdx) => ({
+        key: `c_${cIdx}`,
         title: (
           <span data-col-name={c.name} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
             <span>{c.name}</span>
@@ -185,29 +191,31 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
             )}
           </span>
         ),
-        dataIndex: `c_${cIdx}`,
         width: calcSmartColumnWidth(c.name, { type: c.type, minBodyWidth: 130 }),
         ellipsis: true,
-        render: (v: any) => (
-          <span
-            data-raw-copy={formatRawCellText(v)}
-            onPointerDown={(e) => {
-              cellTapStartRef.current = { x: e.clientX, y: e.clientY };
-            }}
-            onClick={(e) => {
-              if (!isMobile || v === null || v === undefined) return;
-              const start = cellTapStartRef.current;
-              if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) >= 8) return;
-              if (typeof window !== 'undefined' && window.getSelection?.()?.toString()) return;
-              setInspectCell({ column: c.name, value: prettyFormatCellValue(v) });
-            }}
-            onDoubleClick={() => setInspectCell({ column: c.name, value: prettyFormatCellValue(v) })}
-            style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer' }}
-            title={v === null ? 'NULL' : String(v)}
-          >
-            {v === null ? <Tag style={{ fontSize: 10, opacity: 0.6, margin: 0 }}>NULL</Tag> : String(v)}
-          </span>
-        ),
+        render: (_: any, row: any[]) => {
+          const v = row[cIdx];
+          return (
+            <span
+              data-raw-copy={formatRawCellText(v)}
+              onPointerDown={(e) => {
+                cellTapStartRef.current = { x: e.clientX, y: e.clientY };
+              }}
+              onClick={(e) => {
+                if (!isMobile || v === null || v === undefined) return;
+                const start = cellTapStartRef.current;
+                if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) >= 8) return;
+                if (typeof window !== 'undefined' && window.getSelection?.()?.toString()) return;
+                setInspectCell({ column: c.name, value: prettyFormatCellValue(v) });
+              }}
+              onDoubleClick={() => setInspectCell({ column: c.name, value: prettyFormatCellValue(v) })}
+              style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer' }}
+              title={v === null ? 'NULL' : String(v)}
+            >
+              {v === null ? <Tag style={{ fontSize: 10, opacity: 0.6, margin: 0 }}>NULL</Tag> : String(v)}
+            </span>
+          );
+        },
       })),
     [result.columns, isMobile]
   );
@@ -268,7 +276,7 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
       ro.disconnect();
       window.removeEventListener('dbharbor-layout-settled', measure);
     };
-  }, [result.columns.length, dataSource.length]);
+  }, [result.columns.length, filteredRawRows.length]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
@@ -343,13 +351,13 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
         </div>
       </div>
       <div ref={gridWrapRef} style={{ flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
-        <ResizableTable
+        <ResizableTable<any[]>
           size="small"
           bordered
-          rowKey="__rk"
+          rowKey={getArrayRowKey}
           pagination={{ pageSize: 50, size: 'small', simple: isMobile, showSizeChanger: !isMobile, responsive: true }}
           scroll={{ x: 'max-content', y: gridBodyHeight }}
-          dataSource={dataSource}
+          dataSource={filteredRawRows}
           columns={columns}
         />
       </div>
@@ -391,7 +399,7 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
 const DEFAULT_PLACEHOLDER_PREFIX = '-- Connection: ';
 
 export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
-  const { darkMode, bumpTreeRefresh, openTab, isDesktop } = useWorkbenchStore();
+  const { darkMode, bumpTreeRefresh, openTab, updateTab, isDesktop } = useWorkbenchStore();
   const { isMobile } = useResponsive();
   const { t } = useI18n();
   const defaultHeader = `${DEFAULT_PLACEHOLDER_PREFIX}${tab.connName} (${tab.dbType})\n-- Shortcut: Ctrl+Enter / Cmd+Enter to execute selection or full script (semicolon-separated)\n`;
@@ -469,6 +477,14 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
       .catch(() => {});
   }, [tab.connectionId]);
 
+  const handleSelectConsoleDB = useCallback(
+    (nextDB: string) => {
+      setCurrentDB(nextDB);
+      updateTab(tab.key, { database: nextDB });
+    },
+    [tab.key, updateTab]
+  );
+
   useEffect(() => {
     let active = true;
     api
@@ -487,6 +503,8 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
               ? `${defaultHeader}SELECT * FROM ${tableNames[0]} LIMIT 50;`
               : prev
           );
+        } else {
+          setFirstTableHint(tab.table || 'table_name');
         }
 
         const uri = editorRef.current?.getModel()?.uri.toString() || modelUriRef.current;
@@ -495,7 +513,14 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
           setSQLModelAutocomplete(uri, tables, dbs);
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!active) return;
+        latestMetaRef.current = { tables: {}, databases: [] };
+        const uri = editorRef.current?.getModel()?.uri.toString() || modelUriRef.current;
+        if (uri) {
+          setSQLModelAutocomplete(uri, {}, []);
+        }
+      });
 
     return () => {
       active = false;
@@ -766,7 +791,7 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
             size="middle"
             style={{ flex: 1, minWidth: 90, height: 34 }}
             value={currentDB || undefined}
-            onChange={setCurrentDB}
+            onChange={handleSelectConsoleDB}
             placeholder={t('Database')}
             options={databases.map((d) => ({ value: d.name, label: d.name }))}
           />
@@ -880,7 +905,7 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
               size="small"
               style={{ minWidth: 160 }}
               value={currentDB || undefined}
-              onChange={setCurrentDB}
+              onChange={handleSelectConsoleDB}
               placeholder={t('Database')}
               options={databases.map((d) => ({ value: d.name, label: `DB: ${d.name}` }))}
             />

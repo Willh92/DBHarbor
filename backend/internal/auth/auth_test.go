@@ -110,3 +110,23 @@ func TestLoginProtectorRateLimitAndLockout(t *testing.T) {
 		t.Fatal("expected lockout cleared after RecordSuccess")
 	}
 }
+
+func TestCaptchaSpentNonceAndHardEntryBounds(t *testing.T) {
+	lp := NewLoginProtector([]byte("unit-test-captcha-secret"))
+	tok, _, err := lp.GenerateCaptcha()
+	if err != nil || tok == "" {
+		t.Fatalf("GenerateCaptcha failed: %v", err)
+	}
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		t.Fatalf("unexpected captcha token format: %s", tok)
+	}
+	// Flood 5,000 GenerateCaptcha calls; usedNonces must stay empty until a valid token is spent
+	for i := 0; i < 5000; i++ {
+		_, _, _ = lp.GenerateCaptcha()
+	}
+	if len(lp.usedNonces) != 0 {
+		t.Fatalf("expected 0 entries in usedNonces after unauthenticated GenerateCaptcha flood, got %d", len(lp.usedNonces))
+	}
+}
+

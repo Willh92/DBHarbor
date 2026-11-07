@@ -1,14 +1,19 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   Button,
   Checkbox,
+  Col,
   Dropdown,
   Form,
   Input,
+  InputNumber,
   Modal,
   Pagination,
   Popconfirm,
+  Row,
   Segmented,
+  Select,
   Space,
   Tabs,
   Tag,
@@ -21,10 +26,13 @@ import {
   DeleteOutlined,
   DownloadOutlined,
   EditOutlined,
+  EyeOutlined,
+  FieldTimeOutlined,
   MoreOutlined,
   PlayCircleOutlined,
   PlusOutlined,
   ReloadOutlined,
+  SaveOutlined,
   TeamOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
@@ -32,7 +40,7 @@ import { api } from '../../api/client';
 import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
-import type { DocIndexInfo, WorkspaceTab } from '../../types';
+import type { CollectionSummary, DocIndexInfo, WorkspaceTab } from '../../types';
 import { formatRawCellText, writeTextToClipboard } from '../../utils/tableClipboard';
 import { LazyCodeEditor } from '../common/LazyCodeEditor';
 import { ResizableTable, calcSmartColumnWidth } from '../common/ResizableTable';
@@ -42,11 +50,17 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
   const isDesktop = useWorkbenchStore((s) => s.isDesktop);
   const role = useWorkbenchStore((s) => s.role);
   const updateTab = useWorkbenchStore((s) => s.updateTab);
+  const closeTab = useWorkbenchStore((s) => s.closeTab);
   const bumpTreeRefresh = useWorkbenchStore((s) => s.bumpTreeRefresh);
   const openTab = useWorkbenchStore((s) => s.openTab);
   const canWrite = isDesktop || role !== 'readonly';
   const { isMobile } = useResponsive();
   const { t } = useI18n();
+
+  const [collMeta, setCollMeta] = useState<CollectionSummary | null>(null);
+  const isView = collMeta?.type === 'view';
+  const isTimeSeries = collMeta?.type === 'timeseries' || Boolean(collMeta?.timeField);
+  const canMutateDocs = canWrite && !isView;
 
   const [viewMode, setViewMode] = useState<'json' | 'table'>('json');
   const [filterJson, setFilterJson] = useState('{}');
@@ -57,6 +71,16 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
   const [pageSize, setPageSize] = useState(30);
   const [loading, setLoading] = useState(false);
   const [selectedIds, setSelectedIds] = useState<React.Key[]>([]);
+
+  // View Pipeline Editor
+  const [editViewOn, setEditViewOn] = useState('');
+  const [editPipelineJson, setEditPipelineJson] = useState('[\n  { "$match": {} }\n]');
+  const [savingOptions, setSavingOptions] = useState(false);
+
+  // Validation Schema Editor
+  const [editValidatorJson, setEditValidatorJson] = useState('{}');
+  const [editValidationLevel, setEditValidationLevel] = useState<string>('strict');
+  const [editValidationAction, setEditValidationAction] = useState<string>('error');
 
   // Document Editor Modal
   const [docModalOpen, setDocModalOpen] = useState(false);
@@ -76,9 +100,28 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
   // Indexes & Command Runner
   const [indexes, setIndexes] = useState<DocIndexInfo[]>([]);
   const [idxModalOpen, setIdxModalOpen] = useState(false);
+  const [idxSubmitting, setIdxSubmitting] = useState(false);
   const [idxForm] = Form.useForm();
   const [cmdText, setCmdText] = useState(`{\n  "count": "${tab.table || 'users'}"\n}`);
   const [cmdResult, setCmdResult] = useState('');
+
+  const loadCollectionMeta = async () => {
+    if (!tab.table) return;
+    try {
+      const meta = await api.docGetCollectionOptions(tab.connectionId, tab.database, tab.table);
+      setCollMeta(meta);
+      if (meta?.type === 'view') {
+        setEditViewOn(meta.viewOn || '');
+        setEditPipelineJson(meta.pipelineJson || '[]');
+      } else {
+        setEditValidatorJson(meta?.validatorJson || '{}');
+        setEditValidationLevel(meta?.validationLevel || 'strict');
+        setEditValidationAction(meta?.validationAction || 'error');
+      }
+    } catch {
+      // fallback if server restricts listCollections options
+    }
+  };
 
   const loadDocs = async (p = page, ps = pageSize) => {
     if (!tab.table) return;
@@ -109,17 +152,20 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
       const list = await api.docListIndexes(tab.connectionId, tab.database, tab.table);
       setIndexes(list || []);
     } catch {
-      // ignore index fetch error on restricted users
+      // ignore index fetch error on views or restricted users
     }
   };
 
   useEffect(() => {
+    setPage(1);
+    setCmdResult('');
+    loadCollectionMeta();
     loadDocs(1, pageSize);
     loadIndexes();
   }, [tab.connectionId, tab.database, tab.table]);
 
   const handleSaveDoc = async () => {
-    if (!tab.table || !canWrite) return;
+    if (!tab.table || !canMutateDocs) return;
     try {
       if (editingId) {
         await api.docUpdate(tab.connectionId, tab.database, tab.table, editingId, docJsonText);
@@ -144,7 +190,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
   };
 
   const handleBatchDelete = async () => {
-    if (!tab.table || !canWrite || selectedIds.length === 0) return;
+    if (!tab.table || !canMutateDocs || selectedIds.length === 0) return;
     try {
       await api.docDelete(tab.connectionId, tab.database, tab.table, selectedIds.map(String));
       message.success(t('Deleted {count} documents', { count: selectedIds.length }));
@@ -155,12 +201,18 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
   };
 
   const handleRenameCollection = async () => {
+    const prevName = tab.table;
     const next = newCollName.trim();
-    if (!tab.table || !next || next === tab.table) return;
+    if (!prevName || !next || next === prevName) return;
     try {
-      await api.docRenameCollection(tab.connectionId, tab.database, tab.table, next);
+      await api.docRenameCollection(tab.connectionId, tab.database, prevName, next);
       message.success(t('Collection renamed to {name}', { name: next }));
       setRenameOpen(false);
+      setCmdResult('');
+      setCmdText((prev) => {
+        const prevDefault = `{\n  "count": "${prevName}"\n}`;
+        return prev.trim() === prevDefault.trim() ? `{\n  "count": "${next}"\n}` : prev;
+      });
       bumpTreeRefresh();
       updateTab(tab.key, {
         key: `mongo:${tab.connectionId}:${tab.database}:${next}`,
@@ -169,6 +221,68 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
       });
     } catch (err: any) {
       message.error(err.message);
+    }
+  };
+
+  const handleDropCollectionOrView = () => {
+    if (!tab.table || !canWrite) return;
+    Modal.confirm({
+      title: isView ? t('Drop View') : t('Drop Collection'),
+      content: isView
+        ? t('Permanently drop MongoDB view {name}?', { name: tab.table })
+        : t('Permanently drop MongoDB collection {name} and all its documents?', { name: tab.table }),
+      okButtonProps: { danger: true },
+      okText: t('Drop'),
+      onOk: async () => {
+        try {
+          await api.docDropCollection(tab.connectionId, tab.database, tab.table || '');
+          message.success(isView ? t('View dropped') : t('Collection dropped'));
+          bumpTreeRefresh();
+          closeTab(tab.key);
+        } catch (err: any) {
+          message.error(err.message);
+        }
+      },
+    });
+  };
+
+  const handleSaveViewPipeline = async () => {
+    if (!tab.table || !canWrite) return;
+    setSavingOptions(true);
+    try {
+      await api.docUpdateCollectionOptions(tab.connectionId, {
+        database: tab.database,
+        collection: tab.table,
+        viewOn: editViewOn.trim(),
+        pipelineJson: editPipelineJson,
+      });
+      message.success(t('View pipeline updated'));
+      await loadCollectionMeta();
+      await loadDocs(1, pageSize);
+    } catch (err: any) {
+      message.error(err.message);
+    } finally {
+      setSavingOptions(false);
+    }
+  };
+
+  const handleSaveValidation = async () => {
+    if (!tab.table || !canWrite) return;
+    setSavingOptions(true);
+    try {
+      await api.docUpdateCollectionOptions(tab.connectionId, {
+        database: tab.database,
+        collection: tab.table,
+        validatorJson: editValidatorJson,
+        validationLevel: editValidationLevel,
+        validationAction: editValidationAction,
+      });
+      message.success(t('Collection validation rules updated'));
+      await loadCollectionMeta();
+    } catch (err: any) {
+      message.error(err.message);
+    } finally {
+      setSavingOptions(false);
     }
   };
 
@@ -210,7 +324,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
       {
         title: t('Actions'),
         key: '__actions',
-        width: canWrite ? 116 : 56,
+        width: canMutateDocs ? 116 : 56,
         resizable: false,
         onHeaderCell: () => ({ 'data-copy-skip': 'true' } as any),
         render: (_: any, doc: Record<string, any>) => {
@@ -227,7 +341,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                   message.success(t('Copied to clipboard'));
                 }}
               />
-              {canWrite && (
+              {canMutateDocs && (
                 <>
                   <Button
                     size="small"
@@ -254,10 +368,33 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
         },
       },
     ];
-  }, [docs, canWrite, t]);
+  }, [docs, canMutateDocs, t]);
 
   return (
     <div style={{ padding: isMobile ? 6 : 12, height: '100%', minWidth: 0, minHeight: 0, overflowY: 'auto' }}>
+      {(isView || isTimeSeries || collMeta?.capped) && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 }}>
+          {isView && (
+            <>
+              <Tag color="purple" icon={<EyeOutlined />}>
+                {t('View (Read-Only)')}
+              </Tag>
+              {collMeta?.viewOn && (
+                <Tag>
+                  {t('Source')}: <code>{collMeta.viewOn}</code>
+                </Tag>
+              )}
+            </>
+          )}
+          {isTimeSeries && (
+            <Tag color="cyan" icon={<FieldTimeOutlined />}>
+              {t('Time-Series')}: <code>{collMeta?.timeField}</code>
+            </Tag>
+          )}
+          {collMeta?.capped && <Tag color="orange">{t('Capped')}</Tag>}
+        </div>
+      )}
+
       <Tabs
         size="small"
         tabBarExtraContent={
@@ -267,7 +404,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
               placement="bottomRight"
               menu={{
                 items: [
-                  ...(canWrite
+                  ...(canMutateDocs
                     ? [
                         {
                           key: 'import',
@@ -292,7 +429,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                     label: t('Users & Grants'),
                     onClick: () =>
                       openTab({
-                        key: `dbusers:${tab.connectionId}`,
+                        key: `db_users:${tab.connectionId}`,
                         title: `${tab.connName} (${t('Users & Grants')})`,
                         kind: 'db_users',
                         connectionId: tab.connectionId,
@@ -312,6 +449,18 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                       { key: 'exp_csv_bom', icon: <DownloadOutlined />, label: 'CSV Excel UTF-8 BOM (.csv)', onClick: () => handleExport('csv_bom') },
                     ],
                   },
+                  ...(canWrite
+                    ? [
+                        { type: 'divider' as const },
+                        {
+                          key: 'drop',
+                          danger: true,
+                          icon: <DeleteOutlined />,
+                          label: isView ? t('Drop View') : t('Drop Collection'),
+                          onClick: handleDropCollectionOrView,
+                        },
+                      ]
+                    : []),
                 ],
               }}
             >
@@ -324,7 +473,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
             </Dropdown>
           ) : (
             <Space size={6} wrap>
-              {canWrite && (
+              {canMutateDocs && (
                 <Button size="small" icon={<UploadOutlined />} onClick={() => setImportOpen(true)}>
                   {t('Import Documents')}
                 </Button>
@@ -343,7 +492,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                   {t('Export Collection')}
                 </Button>
               </Dropdown>
-              {canWrite && (
+              {canMutateDocs && (
                 <Button
                   size="small"
                   icon={<EditOutlined />}
@@ -360,7 +509,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                 icon={<TeamOutlined />}
                 onClick={() =>
                   openTab({
-                    key: `dbusers:${tab.connectionId}`,
+                    key: `db_users:${tab.connectionId}`,
                     title: `${tab.connName} (${t('Users & Grants')})`,
                     kind: 'db_users',
                     connectionId: tab.connectionId,
@@ -372,6 +521,11 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
               >
                 {t('Users & Grants')}
               </Button>
+              {canWrite && (
+                <Button size="small" danger icon={<DeleteOutlined />} onClick={handleDropCollectionOrView}>
+                  {isView ? t('Drop View') : t('Drop Collection')}
+                </Button>
+              )}
             </Space>
           )
         }
@@ -383,7 +537,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
               <div>
                 <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
                   <Input
-                    addonBefore="Filter"
+                    addonBefore={t('Filter')}
                     style={{ width: isMobile ? '100%' : 300, maxWidth: '100%', fontFamily: 'monospace' }}
                     size={isMobile ? 'middle' : 'small'}
                     value={filterJson}
@@ -391,7 +545,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                     onPressEnter={() => loadDocs(1, pageSize)}
                   />
                   <Input
-                    addonBefore="Sort"
+                    addonBefore={t('Sort')}
                     style={{ width: isMobile ? '100%' : 190, maxWidth: '100%', fontFamily: 'monospace' }}
                     size={isMobile ? 'middle' : 'small'}
                     value={sortJson}
@@ -406,7 +560,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                   >
                     {t('Query')}
                   </Button>
-                  {canWrite && (
+                  {canMutateDocs && (
                     <Button
                       size="small"
                       style={isMobile ? { height: 34, paddingInline: 12 } : undefined}
@@ -420,7 +574,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                       {t('Insert Document')}
                     </Button>
                   )}
-                  {canWrite && selectedIds.length > 0 && (
+                  {canMutateDocs && selectedIds.length > 0 && (
                     <Popconfirm
                       title={t('Delete {count} selected documents?', { count: selectedIds.length })}
                       onConfirm={handleBatchDelete}
@@ -439,7 +593,10 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                     size="small"
                     style={isMobile ? { width: 34, height: 34, padding: 0 } : undefined}
                     icon={<ReloadOutlined />}
-                    onClick={() => loadDocs()}
+                    onClick={() => {
+                      loadCollectionMeta();
+                      loadDocs();
+                    }}
                   />
                   <Segmented
                     size={isMobile ? 'middle' : 'small'}
@@ -479,7 +636,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                               >
                                 {t('Copy JSON')}
                               </Button>
-                              {canWrite && (
+                              {canMutateDocs && (
                                 <>
                                   <Button
                                     size="small"
@@ -504,9 +661,13 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                                   <Popconfirm
                                     title={t('Delete this document?')}
                                     onConfirm={async () => {
-                                      await api.docDelete(tab.connectionId, tab.database, tab.table || '', [idStr]);
-                                      message.success(t('Document deleted'));
-                                      loadDocs();
+                                      try {
+                                        await api.docDelete(tab.connectionId, tab.database, tab.table || '', [idStr]);
+                                        message.success(t('Document deleted'));
+                                        loadDocs();
+                                      } catch (err: any) {
+                                        message.error(err.message);
+                                      }
                                     }}
                                   >
                                     <Button size="small" type="text" danger icon={<DeleteOutlined />} />
@@ -527,9 +688,9 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                     size="small"
                     bordered
                     loading={loading}
-                    rowKey={(r) => String(r._id)}
+                    rowKey={(r, idx) => String(r._id ?? idx)}
                     rowSelection={
-                      canWrite
+                      canMutateDocs
                         ? {
                             columnWidth: isMobile ? 38 : 40,
                             selectedRowKeys: selectedIds,
@@ -561,57 +722,220 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
               </div>
             ),
           },
-          {
-            key: 'indexes',
-            label: t('Indexes ({count})', { count: indexes.length }),
-            children: (
-              <div>
-                {canWrite && (
-                  <Button
-                    size="small"
-                    type="primary"
-                    icon={<PlusOutlined />}
-                    style={{ marginBottom: 8 }}
-                    onClick={() => setIdxModalOpen(true)}
-                  >
-                    {t('Create Index')}
-                  </Button>
-                )}
-                <ResizableTable<DocIndexInfo>
-                  rowKey="name"
-                  size="small"
-                  pagination={false}
-                  scroll={{ x: 620 }}
-                  dataSource={indexes}
-                  columns={[
-                    { title: t('Index Name'), dataIndex: 'name', width: 180 },
-                    { title: t('Index Keys'), dataIndex: 'keys', width: 250, render: (v) => <code>{JSON.stringify(v)}</code> },
-                    { title: t('Unique'), dataIndex: 'unique', width: 100, render: (u) => (u ? <Tag color="green">UNIQUE</Tag> : '-') },
-                    ...(canWrite
-                      ? [
+          ...(isView
+            ? [
+                {
+                  key: 'view_pipeline',
+                  label: t('View Pipeline'),
+                  children: (
+                    <Space direction="vertical" style={{ width: '100%' }} size={10}>
+                      <Alert
+                        type="info"
+                        showIcon
+                        message={t('MongoDB Read-Only Aggregation View')}
+                        description={t('Modify the source collection or aggregation pipeline JSON below and save via collMod.')}
+                      />
+                      <Row gutter={12}>
+                        <Col xs={24} sm={12}>
+                          <Typography.Text strong>{t('Source Collection (viewOn)')}</Typography.Text>
+                          <Input
+                            style={{ marginTop: 4 }}
+                            disabled={!canWrite}
+                            value={editViewOn}
+                            onChange={(e) => setEditViewOn(e.target.value)}
+                            placeholder="e.g. orders"
+                          />
+                        </Col>
+                      </Row>
+                      <div>
+                        <Typography.Text strong>{t('Aggregation Pipeline (JSON Array)')}</Typography.Text>
+                        <div style={{ height: 260, marginTop: 6, border: '1px solid rgba(128,128,128,0.22)', borderRadius: 6, overflow: 'hidden' }}>
+                          <LazyCodeEditor
+                            language="json"
+                            darkMode={darkMode}
+                            readOnly={!canWrite}
+                            value={editPipelineJson}
+                            onChange={(v) => setEditPipelineJson(v)}
+                          />
+                        </div>
+                      </div>
+                      {canWrite && (
+                        <div>
+                          <Button type="primary" icon={<SaveOutlined />} loading={savingOptions} onClick={handleSaveViewPipeline}>
+                            {t('Save View Pipeline')}
+                          </Button>
+                        </div>
+                      )}
+                    </Space>
+                  ),
+                },
+              ]
+            : [
+                {
+                  key: 'indexes',
+                  label: t('Indexes ({count})', { count: indexes.length }),
+                  children: (
+                    <div>
+                      {canWrite && (
+                        <Button
+                          size="small"
+                          type="primary"
+                          icon={<PlusOutlined />}
+                          style={{ marginBottom: 8 }}
+                          onClick={() => {
+                            idxForm.resetFields();
+                            setIdxModalOpen(true);
+                          }}
+                        >
+                          {t('Create Index')}
+                        </Button>
+                      )}
+                      <ResizableTable<DocIndexInfo>
+                        rowKey="name"
+                        size="small"
+                        pagination={false}
+                        scroll={{ x: 700 }}
+                        dataSource={indexes}
+                        columns={[
+                          { title: t('Index Name'), dataIndex: 'name', width: 180 },
                           {
-                            title: t('Actions'),
-                            width: 90,
-                            render: (_: any, r: DocIndexInfo) =>
-                              r.name !== '_id_' ? (
-                                <Popconfirm
-                                  title={t('Drop index {name}?', { name: r.name })}
-                                  onConfirm={async () => {
-                                    await api.docDropIndex(tab.connectionId, tab.database, tab.table || '', r.name);
-                                    loadIndexes();
-                                  }}
-                                >
-                                  <Button size="small" danger type="text" icon={<DeleteOutlined />} />
-                                </Popconfirm>
-                              ) : null,
+                            title: t('Index Keys'),
+                            dataIndex: 'keys',
+                            width: 240,
+                            render: (v) => <code>{JSON.stringify(v)}</code>,
                           },
-                        ]
-                      : []),
-                  ]}
-                />
-              </div>
-            ),
-          },
+                          {
+                            title: t('Properties'),
+                            width: 240,
+                            render: (_: any, r: DocIndexInfo) => (
+                              <Space size={4} wrap>
+                                {r.unique && <Tag color="green">UNIQUE</Tag>}
+                                {r.sparse && <Tag color="blue">SPARSE</Tag>}
+                                {typeof r.expireAfterSeconds === 'number' && (
+                                  <Tag color="orange">TTL: {r.expireAfterSeconds}s</Tag>
+                                )}
+                                {r.partialFilterJson && (
+                                  <Tag color="purple" title={r.partialFilterJson}>
+                                    {t('Partial')}: {r.partialFilterJson}
+                                  </Tag>
+                                )}
+                                {!r.unique && !r.sparse && typeof r.expireAfterSeconds !== 'number' && !r.partialFilterJson && '-'}
+                              </Space>
+                            ),
+                          },
+                          ...(canWrite
+                            ? [
+                                {
+                                  title: t('Actions'),
+                                  width: 84,
+                                  render: (_: any, r: DocIndexInfo) =>
+                                    r.name !== '_id_' ? (
+                                      <Popconfirm
+                                        title={t('Drop index {name}?', { name: r.name })}
+                                        onConfirm={async () => {
+                                          try {
+                                            await api.docDropIndex(tab.connectionId, tab.database, tab.table || '', r.name);
+                                            loadIndexes();
+                                          } catch (err: any) {
+                                            message.error(err.message);
+                                          }
+                                        }}
+                                      >
+                                        <Button size="small" danger type="text" icon={<DeleteOutlined />} />
+                                      </Popconfirm>
+                                    ) : null,
+                                },
+                              ]
+                            : []),
+                        ]}
+                      />
+                    </div>
+                  ),
+                },
+                {
+                  key: 'validation',
+                  label: t('Validation (JSON Schema)'),
+                  children: (
+                    <Space direction="vertical" style={{ width: '100%' }} size={10}>
+                      <Row gutter={12}>
+                        <Col xs={24} sm={12}>
+                          <Typography.Text strong>{t('Validation Level')}</Typography.Text>
+                          <Select
+                            style={{ width: '100%', marginTop: 4 }}
+                            disabled={!canWrite}
+                            value={editValidationLevel}
+                            onChange={setEditValidationLevel}
+                            options={[
+                              { label: 'off', value: 'off' },
+                              { label: 'strict', value: 'strict' },
+                              { label: 'moderate', value: 'moderate' },
+                            ]}
+                          />
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Typography.Text strong>{t('Validation Action')}</Typography.Text>
+                          <Select
+                            style={{ width: '100%', marginTop: 4 }}
+                            disabled={!canWrite}
+                            value={editValidationAction}
+                            onChange={setEditValidationAction}
+                            options={[
+                              { label: 'error', value: 'error' },
+                              { label: 'warn', value: 'warn' },
+                            ]}
+                          />
+                        </Col>
+                      </Row>
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                          <Typography.Text strong>{t('Validator Expression (JSON / $jsonSchema)')}</Typography.Text>
+                          {canWrite && (
+                            <Button
+                              size="small"
+                              type="link"
+                              onClick={() =>
+                                setEditValidatorJson(
+                                  JSON.stringify(
+                                    {
+                                      $jsonSchema: {
+                                        bsonType: 'object',
+                                        required: ['name'],
+                                        properties: {
+                                          name: { bsonType: 'string' },
+                                        },
+                                      },
+                                    },
+                                    null,
+                                    2
+                                  )
+                                )
+                              }
+                            >
+                              {t('Insert $jsonSchema Template')}
+                            </Button>
+                          )}
+                        </div>
+                        <div style={{ height: 240, marginTop: 6, border: '1px solid rgba(128,128,128,0.22)', borderRadius: 6, overflow: 'hidden' }}>
+                          <LazyCodeEditor
+                            language="json"
+                            darkMode={darkMode}
+                            readOnly={!canWrite}
+                            value={editValidatorJson}
+                            onChange={(v) => setEditValidatorJson(v)}
+                          />
+                        </div>
+                      </div>
+                      {canWrite && (
+                        <div>
+                          <Button type="primary" icon={<SaveOutlined />} loading={savingOptions} onClick={handleSaveValidation}>
+                            {t('Save Validation Rules')}
+                          </Button>
+                        </div>
+                      )}
+                    </Space>
+                  ),
+                },
+              ]),
           {
             key: 'command',
             label: t('RunCommand Console'),
@@ -657,7 +981,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
         open={docModalOpen}
         destroyOnClose
         title={editingId ? t('Edit Document (_id: {id})', { id: editingId }) : t('Insert BSON/JSON Document')}
-        width="min(680px, calc(100vw - 24px))"
+        width="min(680px, calc(100vw - 16px))"
         onCancel={() => setDocModalOpen(false)}
         onOk={handleSaveDoc}
       >
@@ -677,7 +1001,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
         open={importOpen}
         destroyOnClose
         title={t('Import JSON / JSONL Documents')}
-        width="min(640px, calc(100vw - 24px))"
+        width="min(640px, calc(100vw - 16px))"
         onCancel={() => setImportOpen(false)}
         confirmLoading={importing}
         okText={t('Import Text')}
@@ -752,6 +1076,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
       <Modal
         open={renameOpen}
         title={t('Rename Collection')}
+        width="min(460px, calc(100vw - 16px))"
         onCancel={() => setRenameOpen(false)}
         onOk={handleRenameCollection}
         destroyOnClose
@@ -768,20 +1093,59 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
       <Modal
         open={idxModalOpen}
         title={t('Create MongoDB Index')}
+        width="min(560px, calc(100vw - 16px))"
+        confirmLoading={idxSubmitting}
         onCancel={() => setIdxModalOpen(false)}
+        destroyOnClose
         onOk={async () => {
-          const vals = await idxForm.validateFields();
-          await api.docCreateIndex(tab.connectionId, tab.database, tab.table || '', vals.keysJson, Boolean(vals.unique));
-          setIdxModalOpen(false);
-          loadIndexes();
+          try {
+            const vals = await idxForm.validateFields();
+            setIdxSubmitting(true);
+            await api.docCreateIndex(tab.connectionId, {
+              database: tab.database,
+              collection: tab.table || '',
+              name: vals.name?.trim() || undefined,
+              keysJson: vals.keysJson,
+              unique: Boolean(vals.unique),
+              sparse: Boolean(vals.sparse),
+              expireAfterSeconds:
+                typeof vals.expireAfterSeconds === 'number' ? vals.expireAfterSeconds : undefined,
+              partialFilterJson: vals.partialFilterJson?.trim() || undefined,
+            });
+            message.success(t('Index created'));
+            setIdxModalOpen(false);
+            loadIndexes();
+          } catch (err: any) {
+            if (!err?.errorFields) message.error(err.message);
+          } finally {
+            setIdxSubmitting(false);
+          }
         }}
       >
-        <Form form={idxForm} layout="vertical" initialValues={{ keysJson: '{"createdAt": -1}', unique: false }}>
-          <Form.Item name="keysJson" label={t('Index Keys JSON (1 asc, -1 desc)')} rules={[{ required: true }]}>
-            <Input />
+        <Form
+          form={idxForm}
+          layout="vertical"
+          initialValues={{ keysJson: '{"createdAt": -1}', unique: false, sparse: false }}
+        >
+          <Form.Item name="name" label={t('Index Name (Optional)')}>
+            <Input placeholder="e.g. idx_created_at" />
           </Form.Item>
-          <Form.Item name="unique" valuePropName="checked">
-            <Checkbox>{t('Unique Index (Unique)')}</Checkbox>
+          <Form.Item name="keysJson" label={t('Index Keys JSON (1 asc, -1 desc)')} rules={[{ required: true }]}>
+            <Input style={{ fontFamily: 'monospace' }} />
+          </Form.Item>
+          <Space size={16} wrap style={{ marginBottom: 8 }}>
+            <Form.Item name="unique" valuePropName="checked" noStyle>
+              <Checkbox>{t('Unique Index (Unique)')}</Checkbox>
+            </Form.Item>
+            <Form.Item name="sparse" valuePropName="checked" noStyle>
+              <Checkbox>{t('Sparse Index')}</Checkbox>
+            </Form.Item>
+          </Space>
+          <Form.Item name="expireAfterSeconds" label={t('TTL Expire After Seconds (Optional)')}>
+            <InputNumber min={0} style={{ width: '100%' }} placeholder="e.g. 3600" />
+          </Form.Item>
+          <Form.Item name="partialFilterJson" label={t('Partial Filter Expression JSON (Optional)')}>
+            <Input style={{ fontFamily: 'monospace' }} placeholder='e.g. {"status": "active"}' />
           </Form.Item>
         </Form>
       </Modal>

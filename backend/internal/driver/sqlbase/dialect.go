@@ -117,12 +117,22 @@ func FormatLiteralForDialect(d Dialect, val any) string {
 	return FormatLiteral(val)
 }
 
+// ContainsUnquotedSQLMeta reports whether expr contains unquoted ';', '#', '--', '/*',
+// or unclosed single/double/backtick/bracket quotes.
+func ContainsUnquotedSQLMeta(expr string) bool {
+	return containsUnquotedSQLMeta(expr)
+}
+
 func containsUnquotedSQLMeta(expr string) bool {
 	inSingle := false
 	inDouble := false
 	inBacktick := false
+	inBracket := false
 	for i := 0; i < len(expr); i++ {
 		ch := expr[i]
+		if ch == 0 {
+			return true
+		}
 		if inSingle {
 			if ch == '\\' && i+1 < len(expr) {
 				i++
@@ -157,6 +167,16 @@ func containsUnquotedSQLMeta(expr string) bool {
 			}
 			continue
 		}
+		if inBracket {
+			if ch == ']' {
+				if i+1 < len(expr) && expr[i+1] == ']' {
+					i++
+				} else {
+					inBracket = false
+				}
+			}
+			continue
+		}
 		switch ch {
 		case '\'':
 			inSingle = true
@@ -164,7 +184,9 @@ func containsUnquotedSQLMeta(expr string) bool {
 			inDouble = true
 		case '`':
 			inBacktick = true
-		case ';':
+		case '[':
+			inBracket = true
+		case ';', '#':
 			return true
 		case '-':
 			if i+1 < len(expr) && expr[i+1] == '-' {
@@ -176,7 +198,7 @@ func containsUnquotedSQLMeta(expr string) bool {
 			}
 		}
 	}
-	return inSingle || inDouble || inBacktick
+	return inSingle || inDouble || inBacktick || inBracket
 }
 
 func validateDDLFragment(label, val string) error {
@@ -188,6 +210,296 @@ func validateDDLFragment(label, val string) error {
 		return fmt.Errorf("invalid %s: semicolons, unclosed quotes, or SQL comments are not allowed", label)
 	}
 	return nil
+}
+
+// ValidateColumnType strictly validates a SQL column data type specification.
+// Only alphanumeric characters, spaces, underscores, commas, periods, quotes, and balanced
+// parentheses/brackets are allowed; SQL comments (--, /*, #) and semicolons are rejected.
+func ValidateColumnType(colType string) error {
+	trimmed := strings.TrimSpace(colType)
+	if trimmed == "" {
+		return errors.New("column type cannot be empty")
+	}
+	if containsUnquotedSQLMeta(trimmed) {
+		return errors.New("invalid column type: semicolons, unclosed quotes, or SQL comments are not allowed")
+	}
+	parenDepth := 0
+	bracketDepth := 0
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(trimmed); i++ {
+		ch := trimmed[i]
+		if ch == '\r' || ch == '\n' || ch == 0 {
+			return errors.New("invalid column type: control characters are not allowed")
+		}
+		if inSingle {
+			if ch == '\\' && i+1 < len(trimmed) {
+				i++
+				continue
+			}
+			if ch == '\'' {
+				if i+1 < len(trimmed) && trimmed[i+1] == '\'' {
+					i++
+				} else {
+					inSingle = false
+				}
+			}
+			continue
+		}
+		if inDouble {
+			if ch == '"' {
+				if i+1 < len(trimmed) && trimmed[i+1] == '"' {
+					i++
+				} else {
+					inDouble = false
+				}
+			}
+			continue
+		}
+		switch {
+		case (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'):
+		case ch == ' ' || ch == '_' || ch == ',' || ch == '.':
+		case ch == '\'':
+			inSingle = true
+		case ch == '"':
+			inDouble = true
+		case ch == '(':
+			parenDepth++
+		case ch == ')':
+			parenDepth--
+			if parenDepth < 0 {
+				return errors.New("invalid column type: unbalanced parentheses")
+			}
+		case ch == '[':
+			bracketDepth++
+		case ch == ']':
+			bracketDepth--
+			if bracketDepth < 0 {
+				return errors.New("invalid column type: unbalanced brackets")
+			}
+		default:
+			return fmt.Errorf("invalid column type %q: disallowed character %q", colType, ch)
+		}
+	}
+	if inSingle || inDouble || parenDepth != 0 || bracketDepth != 0 {
+		return errors.New("invalid column type: unclosed quotes or unbalanced parentheses")
+	}
+	return nil
+}
+
+// ValidateSQLExpression ensures expr is non-empty, contains no semicolons or SQL comments,
+// has no unclosed quotes, and has strictly balanced parentheses.
+func ValidateSQLExpression(label, expr string) error {
+	trimmed := strings.TrimSpace(expr)
+	if trimmed == "" {
+		return fmt.Errorf("%s cannot be empty", label)
+	}
+	if containsUnquotedSQLMeta(trimmed) {
+		return fmt.Errorf("invalid %s: semicolons, unclosed quotes, or SQL comments are not allowed", label)
+	}
+	parenDepth := 0
+	inSingle := false
+	inDouble := false
+	inBacktick := false
+	inBracket := false
+	for i := 0; i < len(trimmed); i++ {
+		ch := trimmed[i]
+		if ch == 0 {
+			return fmt.Errorf("invalid %s: null byte is not allowed", label)
+		}
+		if inSingle {
+			if ch == '\\' && i+1 < len(trimmed) {
+				i++
+				continue
+			}
+			if ch == '\'' {
+				if i+1 < len(trimmed) && trimmed[i+1] == '\'' {
+					i++
+				} else {
+					inSingle = false
+				}
+			}
+			continue
+		}
+		if inDouble {
+			if ch == '"' {
+				if i+1 < len(trimmed) && trimmed[i+1] == '"' {
+					i++
+				} else {
+					inDouble = false
+				}
+			}
+			continue
+		}
+		if inBacktick {
+			if ch == '`' {
+				if i+1 < len(trimmed) && trimmed[i+1] == '`' {
+					i++
+				} else {
+					inBacktick = false
+				}
+			}
+			continue
+		}
+		if inBracket {
+			if ch == ']' {
+				if i+1 < len(trimmed) && trimmed[i+1] == ']' {
+					i++
+				} else {
+					inBracket = false
+				}
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '`':
+			inBacktick = true
+		case '[':
+			inBracket = true
+		case '(':
+			parenDepth++
+		case ')':
+			parenDepth--
+			if parenDepth < 0 {
+				return fmt.Errorf("invalid %s: unbalanced parentheses", label)
+			}
+		}
+	}
+	if inSingle || inDouble || inBacktick || inBracket || parenDepth != 0 {
+		return fmt.Errorf("invalid %s: unclosed quotes or unbalanced parentheses", label)
+	}
+	if len(SplitStatements("SELECT "+trimmed)) > 1 {
+		return fmt.Errorf("invalid %s: multiple SQL statements are not allowed", label)
+	}
+	return nil
+}
+
+func stripOuterParens(expr string) string {
+	s := strings.TrimSpace(expr)
+	for len(s) >= 2 && s[0] == '(' && s[len(s)-1] == ')' {
+		depth := 0
+		inSingle := false
+		inDouble := false
+		wrapsAll := true
+		for i := 0; i < len(s); i++ {
+			ch := s[i]
+			if inSingle {
+				if ch == '\\' && i+1 < len(s) {
+					i++
+					continue
+				}
+				if ch == '\'' {
+					if i+1 < len(s) && s[i+1] == '\'' {
+						i++
+					} else {
+						inSingle = false
+					}
+				}
+				continue
+			}
+			if inDouble {
+				if ch == '"' {
+					if i+1 < len(s) && s[i+1] == '"' {
+						i++
+					} else {
+						inDouble = false
+					}
+				}
+				continue
+			}
+			switch ch {
+			case '\'':
+				inSingle = true
+			case '"':
+				inDouble = true
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 && i < len(s)-1 {
+					wrapsAll = false
+				}
+			}
+			if !wrapsAll {
+				break
+			}
+		}
+		if !wrapsAll || depth != 0 {
+			break
+		}
+		s = strings.TrimSpace(s[1 : len(s)-1])
+	}
+	return s
+}
+
+func formatGeneratedColumnClause(d Dialect, col driver.ColumnDef) (clause string, err error) {
+	if err := ValidateSQLExpression("generated column expression", col.GeneratedExpr); err != nil {
+		return "", err
+	}
+	inner := stripOuterParens(col.GeneratedExpr)
+	storage := strings.ToUpper(strings.TrimSpace(col.GeneratedStorage))
+	if d == DialectSQLServer {
+		if storage == "STORED" || storage == "PERSISTED" {
+			return fmt.Sprintf("AS (%s) PERSISTED", inner), nil
+		}
+		return fmt.Sprintf("AS (%s)", inner), nil
+	}
+	if d == DialectPostgres {
+		if storage != "VIRTUAL" {
+			storage = "STORED"
+		}
+		return fmt.Sprintf("GENERATED ALWAYS AS (%s) %s", inner, storage), nil
+	}
+	if storage == "STORED" {
+		return fmt.Sprintf("GENERATED ALWAYS AS (%s) STORED", inner), nil
+	}
+	return fmt.Sprintf("GENERATED ALWAYS AS (%s) VIRTUAL", inner), nil
+}
+
+func buildCheckConstraintClause(d Dialect, chk driver.CheckConstraintDef) (string, error) {
+	if err := ValidateSQLExpression("CHECK constraint expression", chk.Expression); err != nil {
+		return "", err
+	}
+	inner := stripOuterParens(chk.Expression)
+	if strings.TrimSpace(chk.Name) != "" {
+		return fmt.Sprintf("CONSTRAINT %s CHECK (%s)", QuoteIdent(d, chk.Name), inner), nil
+	}
+	return fmt.Sprintf("CHECK (%s)", inner), nil
+}
+
+// BuildSQLServerExtendedPropertySQL builds an idempotent T-SQL statement (without internal semicolons)
+// that updates or adds the MS_Description extended property on a table or column.
+func BuildSQLServerExtendedPropertySQL(schema, table, column, comment string) string {
+	sc := strings.TrimSpace(schema)
+	if sc == "" {
+		sc = "dbo"
+	}
+	nv := func(s string) string {
+		clean := strings.ReplaceAll(s, "\x00", "")
+		return "N'" + strings.ReplaceAll(clean, "'", "''") + "'"
+	}
+	if strings.TrimSpace(column) == "" {
+		return fmt.Sprintf(
+			"IF EXISTS (SELECT 1 FROM sys.fn_listextendedproperty(N'MS_Description', N'SCHEMA', %s, N'TABLE', %s, NULL, NULL)) "+
+				"EXEC sp_updateextendedproperty @name = N'MS_Description', @value = %s, @level0type = N'SCHEMA', @level0name = %s, @level1type = N'TABLE', @level1name = %s "+
+				"ELSE EXEC sp_addextendedproperty @name = N'MS_Description', @value = %s, @level0type = N'SCHEMA', @level0name = %s, @level1type = N'TABLE', @level1name = %s",
+			nv(sc), nv(table),
+			nv(comment), nv(sc), nv(table),
+			nv(comment), nv(sc), nv(table),
+		)
+	}
+	return fmt.Sprintf(
+		"IF EXISTS (SELECT 1 FROM sys.fn_listextendedproperty(N'MS_Description', N'SCHEMA', %s, N'TABLE', %s, N'COLUMN', %s)) "+
+			"EXEC sp_updateextendedproperty @name = N'MS_Description', @value = %s, @level0type = N'SCHEMA', @level0name = %s, @level1type = N'TABLE', @level1name = %s, @level2type = N'COLUMN', @level2name = %s "+
+			"ELSE EXEC sp_addextendedproperty @name = N'MS_Description', @value = %s, @level0type = N'SCHEMA', @level0name = %s, @level1type = N'TABLE', @level1name = %s, @level2type = N'COLUMN', @level2name = %s",
+		nv(sc), nv(table), nv(column),
+		nv(comment), nv(sc), nv(table), nv(column),
+		nv(comment), nv(sc), nv(table), nv(column),
+	)
 }
 
 func BuildBrowseQuery(d Dialect, req driver.BrowseDataRequest) (dataSQL string, countSQL string, err error) {
@@ -372,11 +684,17 @@ func BuildCreateTableDDL(d Dialect, req driver.CreateTableRequest) (string, erro
 	var pkCols []string
 
 	for _, col := range req.Columns {
-		if strings.TrimSpace(col.Name) == "" || strings.TrimSpace(col.Type) == "" {
+		if strings.TrimSpace(col.Name) == "" {
 			continue
 		}
-		if err := validateDDLFragment("column type", col.Type); err != nil {
-			return "", err
+		hasGen := strings.TrimSpace(col.GeneratedExpr) != ""
+		if strings.TrimSpace(col.Type) == "" && !(d == DialectSQLServer && hasGen) {
+			continue
+		}
+		if strings.TrimSpace(col.Type) != "" {
+			if err := ValidateColumnType(col.Type); err != nil {
+				return "", err
+			}
 		}
 		if err := validateDDLFragment("column default value", col.DefaultValue); err != nil {
 			return "", err
@@ -386,7 +704,28 @@ func BuildCreateTableDDL(d Dialect, req driver.CreateTableRequest) (string, erro
 		sb.WriteString(QuoteIdent(d, col.Name))
 		sb.WriteString(" ")
 
-		if d == DialectClickHouse {
+		if hasGen && d != DialectClickHouse {
+			genClause, err := formatGeneratedColumnClause(d, col)
+			if err != nil {
+				return "", err
+			}
+			if d == DialectSQLServer {
+				sb.WriteString(genClause)
+				if (!col.Nullable || col.IsPrimaryKey) && strings.HasSuffix(genClause, "PERSISTED") {
+					sb.WriteString(" NOT NULL")
+				}
+			} else {
+				sb.WriteString(strings.TrimSpace(col.Type))
+				sb.WriteString(" ")
+				sb.WriteString(genClause)
+				if !col.Nullable || col.IsPrimaryKey {
+					sb.WriteString(" NOT NULL")
+				}
+				if d == DialectMySQL && col.Comment != "" {
+					sb.WriteString(" COMMENT " + FormatLiteralForDialect(d, col.Comment))
+				}
+			}
+		} else if d == DialectClickHouse {
 			colType := normalizeClickHouseType(col.Type, col.Nullable)
 			sb.WriteString(colType)
 			if col.DefaultValue != "" {
@@ -398,7 +737,7 @@ func BuildCreateTableDDL(d Dialect, req driver.CreateTableRequest) (string, erro
 		} else if d == DialectSQLite && col.IsPrimaryKey && col.IsAutoIncrement && pkCount == 1 {
 			sb.WriteString("INTEGER PRIMARY KEY AUTOINCREMENT")
 		} else {
-			colType := col.Type
+			colType := strings.TrimSpace(col.Type)
 			if d == DialectPostgres && col.IsAutoIncrement {
 				if strings.Contains(strings.ToUpper(colType), "BIG") {
 					colType = "BIGSERIAL"
@@ -430,6 +769,10 @@ func BuildCreateTableDDL(d Dialect, req driver.CreateTableRequest) (string, erro
 		lines = append(lines, sb.String())
 	}
 
+	if len(lines) == 0 {
+		return "", errors.New("at least one valid column must be defined")
+	}
+
 	if len(pkCols) > 0 && d != DialectClickHouse {
 		lines = append(lines, fmt.Sprintf("  PRIMARY KEY (%s)", strings.Join(pkCols, ", ")))
 	}
@@ -458,6 +801,16 @@ func BuildCreateTableDDL(d Dialect, req driver.CreateTableRequest) (string, erro
 			if clause := buildForeignKeyConstraintClause(d, fk); clause != "" {
 				lines = append(lines, "  "+clause)
 			}
+		}
+		for _, chk := range req.CheckConstraints {
+			if strings.TrimSpace(chk.Expression) == "" {
+				continue
+			}
+			clause, err := buildCheckConstraintClause(d, chk)
+			if err != nil {
+				return "", err
+			}
+			lines = append(lines, "  "+clause)
 		}
 	}
 
@@ -513,6 +866,17 @@ func BuildCreateTableDDL(d Dialect, req driver.CreateTableRequest) (string, erro
 		ddl.WriteString(fmt.Sprintf(" ENGINE=%s DEFAULT CHARSET=%s", engine, charset))
 		if req.Comment != "" {
 			ddl.WriteString(" COMMENT=" + FormatLiteralForDialect(d, req.Comment))
+		}
+	case DialectSQLite:
+		var opts []string
+		if req.WithoutRowID {
+			opts = append(opts, "WITHOUT ROWID")
+		}
+		if req.Strict {
+			opts = append(opts, "STRICT")
+		}
+		if len(opts) > 0 {
+			ddl.WriteString(" " + strings.Join(opts, ", "))
 		}
 	}
 
@@ -573,6 +937,26 @@ func sanitizeFKAction(act string) string {
 	}
 }
 
+// BuildAlterTableSQLsForEngine builds dialect-specific ALTER TABLE statements, accounting for engine
+// sub-variants such as MariaDB using DROP CONSTRAINT instead of MySQL 8.0's DROP CHECK.
+func BuildAlterTableSQLsForEngine(dbType string, d Dialect, req driver.AlterTableRequest) ([]string, error) {
+	stmts, err := BuildAlterTableSQLs(d, req)
+	if err != nil {
+		return nil, err
+	}
+	if strings.EqualFold(strings.TrimSpace(dbType), "mariadb") && d == DialectMySQL {
+		tbl := QualifyTable(d, req.Database, req.Schema, req.Table)
+		prefix := "ALTER TABLE " + tbl + " DROP CHECK "
+		replacement := "ALTER TABLE " + tbl + " DROP CONSTRAINT "
+		for i, s := range stmts {
+			if strings.HasPrefix(s, prefix) {
+				stmts[i] = replacement + strings.TrimPrefix(s, prefix)
+			}
+		}
+	}
+	return stmts, nil
+}
+
 func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, error) {
 	if strings.TrimSpace(req.Table) == "" {
 		return nil, errors.New("table name cannot be empty")
@@ -584,11 +968,14 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 		switch strings.ToUpper(strings.TrimSpace(act.Action)) {
 		case "ADD_COLUMN":
 			col := act.Column
-			if strings.TrimSpace(col.Name) == "" || strings.TrimSpace(col.Type) == "" {
+			hasGen := strings.TrimSpace(col.GeneratedExpr) != ""
+			if strings.TrimSpace(col.Name) == "" || (strings.TrimSpace(col.Type) == "" && !(d == DialectSQLServer && hasGen)) {
 				return nil, errors.New("column name and type cannot be empty when adding a column")
 			}
-			if err := validateDDLFragment("column type", col.Type); err != nil {
-				return nil, err
+			if strings.TrimSpace(col.Type) != "" {
+				if err := ValidateColumnType(col.Type); err != nil {
+					return nil, err
+				}
 			}
 			if err := validateDDLFragment("column default value", col.DefaultValue); err != nil {
 				return nil, err
@@ -597,16 +984,9 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 			if !col.Nullable && d != DialectClickHouse {
 				nullStr = " NOT NULL"
 			}
-			colType := col.Type
+			colType := strings.TrimSpace(col.Type)
 			if d == DialectClickHouse {
-				colType = normalizeClickHouseType(col.Type, col.Nullable)
-			}
-			defStr := ""
-			if col.DefaultValue != "" {
-				defStr = " DEFAULT " + col.DefaultValue
-			} else if d == DialectSQLite && !col.Nullable {
-				// SQLite requires a DEFAULT when adding a NOT NULL column to a populated table
-				defStr = " DEFAULT ''"
+				colType = normalizeClickHouseType(colType, col.Nullable)
 			}
 			cmtStr := ""
 			if col.Comment != "" && (d == DialectMySQL || d == DialectClickHouse) {
@@ -617,13 +997,41 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 				afterStr = " AFTER " + QuoteIdent(d, act.AfterColumn)
 			}
 
-			if d == DialectOracle || d == DialectSQLServer {
-				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ADD %s %s%s%s", tbl, QuoteIdent(d, col.Name), colType, defStr, nullStr))
+			if hasGen && d != DialectClickHouse {
+				genClause, err := formatGeneratedColumnClause(d, col)
+				if err != nil {
+					return nil, err
+				}
+				if d == DialectSQLServer {
+					if !col.Nullable && strings.HasSuffix(genClause, "PERSISTED") {
+						stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ADD %s %s NOT NULL", tbl, QuoteIdent(d, col.Name), genClause))
+					} else {
+						stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ADD %s %s", tbl, QuoteIdent(d, col.Name), genClause))
+					}
+				} else if d == DialectOracle || d == DialectDameng {
+					stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ADD %s %s %s%s", tbl, QuoteIdent(d, col.Name), colType, genClause, nullStr))
+				} else {
+					stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s %s%s%s%s", tbl, QuoteIdent(d, col.Name), colType, genClause, nullStr, cmtStr, afterStr))
+				}
 			} else {
-				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s%s%s%s%s", tbl, QuoteIdent(d, col.Name), colType, nullStr, defStr, cmtStr, afterStr))
+				defStr := ""
+				if col.DefaultValue != "" {
+					defStr = " DEFAULT " + col.DefaultValue
+				} else if d == DialectSQLite && !col.Nullable {
+					// SQLite requires a DEFAULT when adding a NOT NULL column to a populated table
+					defStr = " DEFAULT ''"
+				}
+				if d == DialectOracle || d == DialectDameng || d == DialectSQLServer {
+					stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ADD %s %s%s%s", tbl, QuoteIdent(d, col.Name), colType, defStr, nullStr))
+				} else {
+					stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s%s%s%s%s", tbl, QuoteIdent(d, col.Name), colType, nullStr, defStr, cmtStr, afterStr))
+				}
 			}
 			if col.Comment != "" && (d == DialectPostgres || d == DialectOracle || d == DialectDameng) {
 				stmts = append(stmts, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s", tbl, QuoteIdent(d, col.Name), FormatLiteralForDialect(d, col.Comment)))
+			}
+			if col.Comment != "" && d == DialectSQLServer {
+				stmts = append(stmts, BuildSQLServerExtendedPropertySQL(req.Schema, req.Table, col.Name, col.Comment))
 			}
 
 		case "DROP_COLUMN":
@@ -663,7 +1071,7 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 			if strings.TrimSpace(col.Name) == "" || strings.TrimSpace(col.Type) == "" {
 				return nil, errors.New("column name and type cannot be empty when modifying a column")
 			}
-			if err := validateDDLFragment("column type", col.Type); err != nil {
+			if err := ValidateColumnType(col.Type); err != nil {
 				return nil, err
 			}
 			if err := validateDDLFragment("column default value", col.DefaultValue); err != nil {
@@ -673,20 +1081,13 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 			if oldName == "" {
 				oldName = col.Name
 			}
+			colType := strings.TrimSpace(col.Type)
 
 			switch d {
 			case DialectMySQL:
 				nullStr := "NULL"
 				if !col.Nullable || col.IsPrimaryKey {
 					nullStr = "NOT NULL"
-				}
-				defStr := ""
-				if col.DefaultValue != "" && !col.IsAutoIncrement {
-					defStr = " DEFAULT " + col.DefaultValue
-				}
-				aiStr := ""
-				if col.IsAutoIncrement {
-					aiStr = " AUTO_INCREMENT"
 				}
 				cmtStr := ""
 				if col.Comment != "" {
@@ -696,19 +1097,41 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 				if act.AfterColumn != "" {
 					afterStr = " AFTER " + QuoteIdent(d, act.AfterColumn)
 				}
-				if oldName != col.Name {
-					stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s CHANGE COLUMN %s %s %s %s%s%s%s%s",
-						tbl, QuoteIdent(d, oldName), QuoteIdent(d, col.Name), col.Type, nullStr, defStr, aiStr, cmtStr, afterStr))
+				if strings.TrimSpace(col.GeneratedExpr) != "" {
+					genClause, err := formatGeneratedColumnClause(d, col)
+					if err != nil {
+						return nil, err
+					}
+					if oldName != col.Name {
+						stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s CHANGE COLUMN %s %s %s %s %s%s%s",
+							tbl, QuoteIdent(d, oldName), QuoteIdent(d, col.Name), colType, genClause, nullStr, cmtStr, afterStr))
+					} else {
+						stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s %s %s%s%s",
+							tbl, QuoteIdent(d, col.Name), colType, genClause, nullStr, cmtStr, afterStr))
+					}
 				} else {
-					stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s %s%s%s%s%s",
-						tbl, QuoteIdent(d, col.Name), col.Type, nullStr, defStr, aiStr, cmtStr, afterStr))
+					defStr := ""
+					if col.DefaultValue != "" && !col.IsAutoIncrement {
+						defStr = " DEFAULT " + col.DefaultValue
+					}
+					aiStr := ""
+					if col.IsAutoIncrement {
+						aiStr = " AUTO_INCREMENT"
+					}
+					if oldName != col.Name {
+						stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s CHANGE COLUMN %s %s %s %s%s%s%s%s",
+							tbl, QuoteIdent(d, oldName), QuoteIdent(d, col.Name), colType, nullStr, defStr, aiStr, cmtStr, afterStr))
+					} else {
+						stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s %s%s%s%s%s",
+							tbl, QuoteIdent(d, col.Name), colType, nullStr, defStr, aiStr, cmtStr, afterStr))
+					}
 				}
 
 			case DialectPostgres:
 				if oldName != col.Name {
 					stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s", tbl, QuoteIdent(d, oldName), QuoteIdent(d, col.Name)))
 				}
-				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s", tbl, QuoteIdent(d, col.Name), col.Type))
+				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s", tbl, QuoteIdent(d, col.Name), colType))
 				if col.Nullable && !col.IsPrimaryKey {
 					stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP NOT NULL", tbl, QuoteIdent(d, col.Name)))
 				} else {
@@ -727,7 +1150,7 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 				if oldName != col.Name {
 					stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s", tbl, QuoteIdent(d, oldName), QuoteIdent(d, col.Name)))
 				}
-				colType := normalizeClickHouseType(col.Type, col.Nullable)
+				normType := normalizeClickHouseType(colType, col.Nullable)
 				defStr := ""
 				if col.DefaultValue != "" {
 					defStr = " DEFAULT " + col.DefaultValue
@@ -736,7 +1159,7 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 				if col.Comment != "" {
 					cmtStr = " COMMENT " + FormatLiteralForDialect(d, col.Comment)
 				}
-				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s%s%s", tbl, QuoteIdent(d, col.Name), colType, defStr, cmtStr))
+				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s%s%s", tbl, QuoteIdent(d, col.Name), normType, defStr, cmtStr))
 
 			case DialectSQLServer:
 				if oldName != col.Name {
@@ -750,7 +1173,10 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 				if !col.Nullable || col.IsPrimaryKey {
 					nullStr = "NOT NULL"
 				}
-				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s %s %s", tbl, QuoteIdent(d, col.Name), col.Type, nullStr))
+				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s %s %s", tbl, QuoteIdent(d, col.Name), colType, nullStr))
+				if col.Comment != "" {
+					stmts = append(stmts, BuildSQLServerExtendedPropertySQL(req.Schema, req.Table, col.Name, col.Comment))
+				}
 
 			default:
 				if oldName != col.Name {
@@ -760,7 +1186,7 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 				if col.DefaultValue != "" {
 					defStr = " DEFAULT " + col.DefaultValue
 				}
-				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s MODIFY (%s %s%s)", tbl, QuoteIdent(d, col.Name), col.Type, defStr))
+				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s MODIFY (%s %s%s)", tbl, QuoteIdent(d, col.Name), colType, defStr))
 				if col.Comment != "" && (d == DialectOracle || d == DialectDameng) {
 					stmts = append(stmts, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s", tbl, QuoteIdent(d, col.Name), FormatLiteralForDialect(d, col.Comment)))
 				}
@@ -823,6 +1249,28 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", tbl, QuoteIdent(d, fkName)))
 			}
 
+		case "ADD_CHECK":
+			chk := act.Check
+			clause, err := buildCheckConstraintClause(d, chk)
+			if err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ADD %s", tbl, clause))
+
+		case "DROP_CHECK":
+			chkName := strings.TrimSpace(act.Check.Name)
+			if chkName == "" {
+				chkName = strings.TrimSpace(act.OldName)
+			}
+			if chkName == "" {
+				return nil, errors.New("check constraint name cannot be empty")
+			}
+			if d == DialectMySQL {
+				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s DROP CHECK %s", tbl, QuoteIdent(d, chkName)))
+			} else {
+				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", tbl, QuoteIdent(d, chkName)))
+			}
+
 		case "RENAME_TABLE":
 			newTbl := strings.TrimSpace(act.NewName)
 			if newTbl == "" {
@@ -849,6 +1297,8 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s MODIFY COMMENT %s", tbl, FormatLiteralForDialect(d, act.Comment)))
 			case DialectPostgres, DialectOracle, DialectDameng:
 				stmts = append(stmts, fmt.Sprintf("COMMENT ON TABLE %s IS %s", tbl, FormatLiteralForDialect(d, act.Comment)))
+			case DialectSQLServer:
+				stmts = append(stmts, BuildSQLServerExtendedPropertySQL(req.Schema, req.Table, "", act.Comment))
 			default:
 				return nil, fmt.Errorf("table comments are not supported by the current database engine")
 			}
@@ -864,6 +1314,11 @@ func BuildObjectActionSQLs(d Dialect, req driver.ObjectActionRequest) ([]string,
 	if objName == "" {
 		return nil, errors.New("target object name cannot be empty")
 	}
+	if req.WebMode && !req.IsAdmin {
+		if HasSQLDefinerClause(req.RoutineSQL) || HasSQLDefinerClause(req.ViewSQL) {
+			return nil, errors.New("DEFINER and SQL SECURITY DEFINER clauses are not permitted for non-administrator accounts in Web mode")
+		}
+	}
 	tbl := QualifyTable(d, req.Database, req.Schema, objName)
 	objTypeUpper := strings.ToUpper(strings.TrimSpace(req.ObjectType))
 	isView := objTypeUpper == "VIEW"
@@ -872,35 +1327,43 @@ func BuildObjectActionSQLs(d Dialect, req driver.ObjectActionRequest) ([]string,
 	case "DROP":
 		switch objTypeUpper {
 		case "TRIGGER":
-			if d == DialectOracle {
+			if d == DialectOracle || d == DialectDameng {
 				return []string{"DROP TRIGGER " + tbl}, nil
 			}
 			if d == DialectPostgres {
-				// PostgreSQL DROP TRIGGER requires ON table_name if targetName is provided; otherwise quote trigger
 				if strings.TrimSpace(req.TargetName) != "" {
 					onTbl := QualifyTable(d, req.Database, req.Schema, strings.TrimSpace(req.TargetName))
 					return []string{fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s", QuoteIdent(d, objName), onTbl)}, nil
 				}
+				return nil, errors.New("target table name (targetName) is required to drop a PostgreSQL trigger")
 			}
 			return []string{"DROP TRIGGER IF EXISTS " + tbl}, nil
 		case "PROCEDURE":
-			if d == DialectOracle {
+			if d == DialectOracle || d == DialectDameng {
 				return []string{"DROP PROCEDURE " + tbl}, nil
 			}
 			return []string{"DROP PROCEDURE IF EXISTS " + tbl}, nil
 		case "FUNCTION":
-			if d == DialectOracle {
+			if d == DialectOracle || d == DialectDameng {
 				return []string{"DROP FUNCTION " + tbl}, nil
 			}
 			return []string{"DROP FUNCTION IF EXISTS " + tbl}, nil
+		case "MATERIALIZED_VIEW", "MATERIALIZED VIEW":
+			if d == DialectOracle || d == DialectDameng {
+				return []string{"DROP MATERIALIZED VIEW " + tbl}, nil
+			}
+			if d == DialectClickHouse {
+				return []string{"DROP TABLE IF EXISTS " + tbl}, nil
+			}
+			return []string{"DROP MATERIALIZED VIEW IF EXISTS " + tbl}, nil
 		}
 		if isView {
-			if d == DialectOracle {
+			if d == DialectOracle || d == DialectDameng {
 				return []string{"DROP VIEW " + tbl}, nil
 			}
 			return []string{"DROP VIEW IF EXISTS " + tbl}, nil
 		}
-		if d == DialectOracle {
+		if d == DialectOracle || d == DialectDameng {
 			return []string{"DROP TABLE " + tbl}, nil
 		}
 		return []string{"DROP TABLE IF EXISTS " + tbl}, nil
@@ -992,16 +1455,32 @@ func BuildObjectActionSQLs(d Dialect, req driver.ObjectActionRequest) ([]string,
 		}
 
 	case "CREATE_VIEW":
-		viewSQL := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(req.ViewSQL), ";"))
-		if viewSQL == "" {
+		splitView := SplitStatements(req.ViewSQL)
+		if len(splitView) == 0 {
 			return nil, errors.New("view SELECT query cannot be empty")
 		}
-		upperView := strings.ToUpper(viewSQL)
-		if strings.HasPrefix(upperView, "CREATE ") || strings.HasPrefix(upperView, "ALTER ") {
-			if d == DialectSQLite && strings.HasPrefix(upperView, "CREATE VIEW") {
+		if len(splitView) > 1 {
+			return nil, errors.New("view definition must contain a single SQL statement")
+		}
+		viewSQL := strings.TrimSpace(splitView[0])
+		if d == DialectClickHouse && req.WebMode && !req.IsAdmin && !req.AllowPrivIP {
+			if err := ValidateClickHouseRestrictedWebSQL(viewSQL); err != nil {
+				return nil, err
+			}
+		}
+		leadKw := leadingSQLKeyword(viewSQL)
+		if leadKw == "CREATE" || leadKw == "ALTER" || leadKw == "REPLACE" {
+			if err := ValidateExpectedDDLTarget(viewSQL, []string{"CREATE", "ALTER", "REPLACE"}, "VIEW"); err != nil {
+				return nil, err
+			}
+			upperView := strings.ToUpper(StripLeadingSQLComments(viewSQL))
+			if d == DialectSQLite && strings.HasPrefix(upperView, "CREATE") && !strings.Contains(upperView, "IF NOT EXISTS") {
 				return []string{"DROP VIEW IF EXISTS " + tbl, viewSQL}, nil
 			}
 			return []string{viewSQL}, nil
+		}
+		if leadKw != "SELECT" && leadKw != "WITH" && leadKw != "VALUES" && leadKw != "TABLE" {
+			return nil, errors.New("view definition must be a SELECT query or CREATE VIEW statement")
 		}
 		if d == DialectSQLite {
 			return []string{
@@ -1022,10 +1501,20 @@ func BuildObjectActionSQLs(d Dialect, req driver.ObjectActionRequest) ([]string,
 		if rawDDL == "" {
 			return nil, errors.New("routine DDL statement cannot be empty")
 		}
-		upperDDL := strings.ToUpper(rawDDL)
-		if !strings.HasPrefix(upperDDL, "CREATE ") && !strings.HasPrefix(upperDDL, "ALTER ") {
-			return nil, errors.New("routine DDL must start with CREATE or ALTER")
+		splitRoutine := SplitStatements(rawDDL)
+		if len(splitRoutine) != 1 {
+			return nil, errors.New("routine DDL must contain a single statement")
 		}
+		rawDDL = strings.TrimSpace(splitRoutine[0])
+		if err := ValidateExpectedDDLTarget(rawDDL, []string{"CREATE", "ALTER", "REPLACE"}, "FUNCTION", "PROCEDURE"); err != nil {
+			return nil, err
+		}
+		if d == DialectClickHouse && req.WebMode && !req.IsAdmin && !req.AllowPrivIP {
+			if err := ValidateClickHouseRestrictedWebSQL(rawDDL); err != nil {
+				return nil, err
+			}
+		}
+		upperDDL := strings.ToUpper(StripLeadingSQLComments(rawDDL))
 		var stmts []string
 		if req.ReplaceExisting && (d == DialectMySQL || d == DialectSQLite) && !strings.Contains(upperDDL, "CREATE OR REPLACE") {
 			routineKind := "FUNCTION"
@@ -1045,10 +1534,15 @@ func BuildObjectActionSQLs(d Dialect, req driver.ObjectActionRequest) ([]string,
 		if rawDDL == "" {
 			return nil, errors.New("trigger DDL statement cannot be empty")
 		}
-		upperDDL := strings.ToUpper(rawDDL)
-		if !strings.HasPrefix(upperDDL, "CREATE ") && !strings.HasPrefix(upperDDL, "ALTER ") {
-			return nil, errors.New("trigger DDL must start with CREATE or ALTER")
+		splitTrig := SplitStatements(rawDDL)
+		if len(splitTrig) != 1 {
+			return nil, errors.New("trigger DDL must contain a single statement")
 		}
+		rawDDL = strings.TrimSpace(splitTrig[0])
+		if err := ValidateExpectedDDLTarget(rawDDL, []string{"CREATE", "ALTER", "REPLACE"}, "TRIGGER"); err != nil {
+			return nil, err
+		}
+		upperDDL := strings.ToUpper(StripLeadingSQLComments(rawDDL))
 		var stmts []string
 		if req.ReplaceExisting || d == DialectSQLite {
 			switch d {

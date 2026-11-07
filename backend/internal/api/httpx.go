@@ -21,14 +21,18 @@ type H map[string]any
 // HandlerFunc defines a lightweight stdlib-backed HTTP handler.
 type HandlerFunc func(*Context)
 
+const maxMultipartFieldBytes = 64 << 10
+
 // Context wraps http.ResponseWriter and *http.Request without third-party router bloat.
 type Context struct {
-	Writer         http.ResponseWriter
-	Request        *http.Request
-	Claims         *auth.Claims
-	Principal      store.UserPrincipal
-	TrustedProxies []*net.IPNet
-	cleanups       []func()
+	Writer              http.ResponseWriter
+	Request             *http.Request
+	Claims              *auth.Claims
+	Principal           store.UserPrincipal
+	TrustedProxies      []*net.IPNet
+	cleanups            []func()
+	multipartReader     *multipart.Reader
+	multipartFieldBytes int
 }
 
 func (c *Context) Defer(fn func()) {
@@ -170,6 +174,74 @@ func (c *Context) SessionID() string {
 	return ""
 }
 
+// StreamFormFile streams a multipart file part directly from the HTTP socket without buffering into RAM or temp disk,
+// collecting any preceding text form fields (capped at 64 KiB total).
+func (c *Context) StreamFormFile(fieldName string) (*multipart.Part, string, map[string]string, error) {
+	mr, err := c.Request.MultipartReader()
+	if err != nil {
+		return nil, "", nil, err
+	}
+	c.multipartReader = mr
+	c.multipartFieldBytes = 0
+	fields := make(map[string]string, 8)
+	for {
+		part, pErr := mr.NextPart()
+		if pErr != nil {
+			if errors.Is(pErr, io.EOF) {
+				return nil, "", fields, errors.New("multipart file field not found: " + fieldName)
+			}
+			return nil, "", fields, pErr
+		}
+		formName := part.FormName()
+		fileName := part.FileName()
+		if formName == fieldName && fileName != "" {
+			return part, fileName, fields, nil
+		}
+		if fileName == "" && formName != "" && c.multipartFieldBytes < maxMultipartFieldBytes {
+			rem := maxMultipartFieldBytes - c.multipartFieldBytes
+			b, _ := io.ReadAll(io.LimitReader(part, int64(rem)))
+			c.multipartFieldBytes += len(b)
+			fields[formName] = string(b)
+		}
+		_ = part.Close()
+	}
+}
+
+// DrainMultipartFields reads any trailing non-file form fields emitted after the streamed file part (within the 64 KiB cap).
+func (c *Context) DrainMultipartFields(fields map[string]string) {
+	if c.multipartReader == nil || fields == nil {
+		return
+	}
+	for c.multipartFieldBytes < maxMultipartFieldBytes {
+		part, err := c.multipartReader.NextPart()
+		if err != nil {
+			break
+		}
+		formName := part.FormName()
+		if part.FileName() == "" && formName != "" {
+			rem := maxMultipartFieldBytes - c.multipartFieldBytes
+			b, _ := io.ReadAll(io.LimitReader(part, int64(rem)))
+			c.multipartFieldBytes += len(b)
+			if _, exists := fields[formName]; !exists {
+				fields[formName] = string(b)
+			}
+		}
+		_ = part.Close()
+	}
+}
+
+func isTrustedProxyIP(ip net.IP, trusted []*net.IPNet) bool {
+	if ip == nil || len(trusted) == 0 {
+		return false
+	}
+	for _, ipNet := range trusted {
+		if ipNet != nil && ipNet.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Context) ClientIP() string {
 	remote := strings.TrimSpace(c.Request.RemoteAddr)
 	isUnix := remote == "" || remote == "@" || strings.HasPrefix(remote, "/") || strings.HasSuffix(remote, ".sock")
@@ -179,35 +251,36 @@ func (c *Context) ClientIP() string {
 	} else if host, _, err := net.SplitHostPort(remote); err == nil && host != "" {
 		peerHost = host
 	}
+	peerHost = strings.Trim(peerHost, "[]")
+	peerIP := net.ParseIP(peerHost)
 
-	trustProxyHeaders := isUnix
-	if !trustProxyHeaders {
-		if peerIP := net.ParseIP(peerHost); peerIP != nil {
-			if peerIP.IsLoopback() {
-				trustProxyHeaders = true
-			} else {
-				for _, ipNet := range c.TrustedProxies {
-					if ipNet != nil && ipNet.Contains(peerIP) {
-						trustProxyHeaders = true
-						break
-					}
+	trustProxyHeaders := isUnix || (len(c.TrustedProxies) > 0 && isTrustedProxyIP(peerIP, c.TrustedProxies))
+	if trustProxyHeaders {
+		if xff := strings.TrimSpace(c.Request.Header.Get("X-Forwarded-For")); xff != "" {
+			parts := strings.Split(xff, ",")
+			for i := len(parts) - 1; i >= 0; i-- {
+				cand := strings.Trim(strings.TrimSpace(parts[i]), "[]")
+				if cand == "" {
+					continue
 				}
+				ip := net.ParseIP(cand)
+				if ip == nil {
+					continue
+				}
+				if isTrustedProxyIP(ip, c.TrustedProxies) {
+					continue
+				}
+				return ip.String()
+			}
+		}
+		if xrip := strings.Trim(strings.TrimSpace(c.Request.Header.Get("X-Real-IP")), "[]"); xrip != "" {
+			if ip := net.ParseIP(xrip); ip != nil {
+				return ip.String()
 			}
 		}
 	}
-
-	if trustProxyHeaders {
-		if xff := strings.TrimSpace(c.Request.Header.Get("X-Forwarded-For")); xff != "" {
-			if idx := strings.IndexByte(xff, ','); idx >= 0 {
-				xff = strings.TrimSpace(xff[:idx])
-			}
-			if xff != "" {
-				return xff
-			}
-		}
-		if xrip := strings.TrimSpace(c.Request.Header.Get("X-Real-IP")); xrip != "" {
-			return xrip
-		}
+	if peerIP != nil {
+		return peerIP.String()
 	}
 	return peerHost
 }
@@ -226,6 +299,8 @@ type gzipAPIResponseWriter struct {
 	gw          *gzip.Writer
 	wroteHeader bool
 }
+
+func (g *gzipAPIResponseWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }
 
 func (g *gzipAPIResponseWriter) WriteHeader(code int) {
 	if g.wroteHeader {

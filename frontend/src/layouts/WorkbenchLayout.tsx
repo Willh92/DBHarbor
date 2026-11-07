@@ -26,10 +26,13 @@ import {
   CodeOutlined,
   ColumnWidthOutlined,
   DashboardOutlined,
+  DeleteOutlined,
   DisconnectOutlined,
   DownOutlined,
+  DownloadOutlined,
   EditOutlined,
   ExclamationCircleOutlined,
+  FolderOpenOutlined,
   GithubOutlined,
   GlobalOutlined,
   KeyOutlined,
@@ -41,6 +44,7 @@ import {
   PlusOutlined,
   RocketOutlined,
   SafetyCertificateOutlined,
+  SaveOutlined,
   SunOutlined,
   TeamOutlined,
   UserOutlined,
@@ -56,16 +60,27 @@ import { BrandLogo } from '../components/common/BrandLogo';
 import { LanguageSwitcher } from '../components/common/LanguageSwitcher';
 import { ConnectionSidebar } from '../components/connection/ConnectionSidebar';
 import type { TransferModalMode, TransferOpenOptions } from '../components/workspace/ContextNavBar';
-import { TableDataTab } from '../components/workspace/TableDataTab';
 import { useResponsive } from '../hooks/useResponsive';
 import { LOCALE_OPTIONS } from '../i18n';
 import { useI18n } from '../i18n/useI18n';
 import { useWorkbenchStore } from '../store/useWorkbenchStore';
 import type { BuildVersionInfo, SavedConnection, SystemStats, UpdateCheckResult, WorkspaceTab } from '../types';
+import {
+  bindEphemeralFileHandle,
+  clearEphemeralFileHandle,
+  hasEphemeralFileHandle,
+  isSupportedSingleFileDBName,
+  pickLocalSingleFileDBWithHandle,
+  supportsDirectFileHandleAccess,
+  writeBlobBackToLocalHandle,
+} from '../utils/ephemeralFileHandles';
 import { DB_SHORT_LABELS } from '../utils/format';
 
 // Lazy-load Monaco-heavy tabs, OverviewTab & on-demand modals to keep initial workbench JS & React fiber footprint minimal
 const OverviewTab = lazy(() => import('../components/workspace/OverviewTab'));
+const TableDataTab = lazy(() =>
+  import('../components/workspace/TableDataTab').then((m) => ({ default: m.TableDataTab }))
+);
 const TableStructureTab = lazy(() =>
   import('../components/workspace/TableStructureTab').then((m) => ({ default: m.TableStructureTab }))
 );
@@ -135,12 +150,14 @@ export const WorkbenchLayout: React.FC = () => {
     reorderTabs,
     openTab,
     updateTab,
+    requestSelectConnection,
   } = useWorkbenchStore();
   const { locale, setLocale, t } = useI18n();
   const { isMobile, isTablet } = useResponsive();
   const maxMountedTabs = isMobile ? MAX_MOUNTED_TABS_MOBILE : MAX_MOUNTED_TABS_DESKTOP;
 
   const effectiveCanCreateConn = isDesktop || canCreateConn || role === 'admin';
+  const canOpenEphemeralWeb = !isDesktop && effectiveCanCreateConn && role !== 'readonly';
   const isAdmin = isDesktop || role === 'admin';
 
   const [isNarrowViewport, setIsNarrowViewport] = useState<boolean>(
@@ -205,6 +222,15 @@ export const WorkbenchLayout: React.FC = () => {
     tables?: string[];
     customSQL?: string;
   }>({ open: false, mode: 'export', connectionId: '', database: '' });
+
+  // Web Ephemeral Local Single-File DB (SQLite 3 / DuckDB) session state
+  const ephemeralFileInputRef = useRef<HTMLInputElement | null>(null);
+  const fileDragDepthRef = useRef(0);
+  const [openingEphemeral, setOpeningEphemeral] = useState(false);
+  const [savingEphemeralId, setSavingEphemeralId] = useState('');
+  const [downloadingEphemeralId, setDownloadingEphemeralId] = useState('');
+  const [fileDragOver, setFileDragOver] = useState(false);
+  const [handleBindTick, setHandleBindTick] = useState(0);
 
   useEffect(() => {
     loadBootstrap().catch((err) => message.error(err.message));
@@ -311,7 +337,8 @@ export const WorkbenchLayout: React.FC = () => {
       connections.find((c) => {
         const d = drivers.find((dr) => dr.type === c.type);
         return d ? d.category === 'relational' || d.category === 'olap' : c.type !== 'redis' && c.type !== 'mongodb';
-      });
+      }) ||
+      connections[0];
     if (!conn) {
       if (effectiveCanCreateConn) {
         setEditingConn(null);
@@ -441,6 +468,145 @@ export const WorkbenchLayout: React.FC = () => {
     }
   }, []);
 
+  const openLocalDBFile = useCallback(
+    async (file: File, handle?: any) => {
+      if (!isSupportedSingleFileDBName(file.name)) {
+        message.warning(
+          t('Supported local single-file databases: .sqlite, .sqlite3, .db, .db3, .s3db, .duckdb, .ddb')
+        );
+        return;
+      }
+      setOpeningEphemeral(true);
+      try {
+        const res = await api.openEphemeralDBFile(file);
+        const canDirectWrite = Boolean(handle && typeof handle.createWritable === 'function');
+        if (canDirectWrite) {
+          bindEphemeralFileHandle(res.connection.id, handle);
+          setHandleBindTick((n) => n + 1);
+        }
+        await reloadConnections();
+        requestSelectConnection(res.connection.id);
+        const dbName = res.database || 'main';
+        if (res.tablesCount === 1 && res.firstTable) {
+          openTab({
+            key: `data:${res.connection.id}:${dbName}::${res.firstTable}`,
+            title: res.firstTable,
+            kind: 'table_data',
+            connectionId: res.connection.id,
+            connName: res.connection.name,
+            dbType: res.connection.type,
+            database: dbName,
+            schema: '',
+            table: res.firstTable,
+          });
+        } else {
+          openTab({
+            key: `overview:${res.connection.id}:${dbName}:`,
+            title: `${dbName} (${t('Overview')})`,
+            kind: 'overview',
+            connectionId: res.connection.id,
+            connName: res.connection.name,
+            dbType: res.connection.type,
+            database: dbName,
+            schema: '',
+          });
+        }
+        if (isNarrowRef.current) {
+          setSidebarCollapsed(true);
+        }
+        message.success(
+          canDirectWrite
+            ? t('Opened local database {name} (Direct Save Back ready)', { name: res.connection.name })
+            : t('Opened temporary database {name}', { name: res.connection.name })
+        );
+      } catch (err: any) {
+        message.error(t(err?.message || 'Failed to open local database file'));
+      } finally {
+        setOpeningEphemeral(false);
+      }
+    },
+    [openTab, reloadConnections, requestSelectConnection, t]
+  );
+
+  const handleTriggerOpenLocalDB = useCallback(async () => {
+    if (!canOpenEphemeralWeb || openingEphemeral) return;
+    if (!isMobile && supportsDirectFileHandleAccess()) {
+      try {
+        const picked = await pickLocalSingleFileDBWithHandle();
+        if (picked) {
+          await openLocalDBFile(picked.file, picked.handle);
+        }
+        return;
+      } catch {
+        // Fall back to standard file input when File System Access API is blocked in current context
+      }
+    }
+    ephemeralFileInputRef.current?.click();
+  }, [canOpenEphemeralWeb, isMobile, openLocalDBFile, openingEphemeral]);
+
+  const handleEphemeralInputChange = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = '';
+      if (!file) return;
+      await openLocalDBFile(file);
+    },
+    [openLocalDBFile]
+  );
+
+  const handleSaveBackEphemeral = useCallback(
+    async (conn: SavedConnection) => {
+      if (savingEphemeralId) return;
+      setSavingEphemeralId(conn.id);
+      try {
+        const blob = await api.fetchEphemeralDBFileBlob(conn.id);
+        await writeBlobBackToLocalHandle(conn.id, blob);
+        message.success(t('Saved changes directly back to local file: {name}', { name: conn.name }));
+      } catch (err: any) {
+        message.error(t(err?.message || 'Failed to save back to local file'));
+      } finally {
+        setSavingEphemeralId('');
+      }
+    },
+    [savingEphemeralId, t]
+  );
+
+  const handleDownloadEphemeral = useCallback(
+    async (conn: SavedConnection) => {
+      if (downloadingEphemeralId) return;
+      setDownloadingEphemeralId(conn.id);
+      try {
+        await api.triggerEphemeralDBFileDownload(conn.id);
+        message.success(t('Downloading updated database file: {name}', { name: conn.name }));
+      } catch (err: any) {
+        message.error(t(err?.message || 'Failed to download database file'));
+      } finally {
+        setDownloadingEphemeralId('');
+      }
+    },
+    [downloadingEphemeralId, t]
+  );
+
+  const handleCloseEphemeral = useCallback(
+    (conn: SavedConnection) => {
+      Modal.confirm({
+        title: t('Close temporary database and clean up server copy?'),
+        content: `${conn.name} — ${t('Make sure you have saved or downloaded your latest changes before closing.')}`,
+        okText: t('Close & Clean Up'),
+        okButtonProps: { danger: true },
+        onOk: async () => {
+          clearEphemeralFileHandle(conn.id);
+          setHandleBindTick((n) => n + 1);
+          await api.deleteConnection(conn.id);
+          closeConnectionTabs(conn.id);
+          await reloadConnections();
+          message.success(t('Temporary database closed and cleaned up'));
+        },
+      });
+    },
+    [closeConnectionTabs, reloadConnections, t]
+  );
+
   const renderTabContent = useCallback(
     (tab: WorkspaceTab) => {
       const fallback = (
@@ -448,11 +614,14 @@ export const WorkbenchLayout: React.FC = () => {
           <Spin tip={t('Loading module...')} />
         </div>
       );
+      const targetInstanceKey = `${tab.key}::${tab.connectionId}::${tab.database}::${tab.schema || ''}::${tab.table || ''}`;
+      const connInstanceKey = `${tab.key}::${tab.connectionId}`;
       switch (tab.kind) {
         case 'overview':
           return (
             <Suspense fallback={fallback}>
               <OverviewTab
+                key={targetInstanceKey}
                 tab={tab}
                 onOpenCreateTable={() =>
                   setCreateTblCtx({
@@ -469,15 +638,19 @@ export const WorkbenchLayout: React.FC = () => {
           );
         case 'table_data':
           return (
-            <TableDataTab
-              tab={tab}
-              onOpenTransfer={(mode, tableName, opts) => openTransferForTab(tab, mode, tableName, opts)}
-            />
+            <Suspense fallback={fallback}>
+              <TableDataTab
+                key={targetInstanceKey}
+                tab={tab}
+                onOpenTransfer={(mode, tableName, opts) => openTransferForTab(tab, mode, tableName, opts)}
+              />
+            </Suspense>
           );
         case 'table_structure':
           return (
             <Suspense fallback={fallback}>
               <TableStructureTab
+                key={targetInstanceKey}
                 tab={tab}
                 onOpenTransfer={(mode, tableName, opts) => openTransferForTab(tab, mode, tableName, opts)}
               />
@@ -487,6 +660,7 @@ export const WorkbenchLayout: React.FC = () => {
           return (
             <Suspense fallback={fallback}>
               <SqlConsoleTab
+                key={connInstanceKey}
                 tab={tab}
                 onOpenExportSQL={(database, sql) =>
                   setTransferCtx({
@@ -503,25 +677,25 @@ export const WorkbenchLayout: React.FC = () => {
         case 'redis_browser':
           return (
             <Suspense fallback={fallback}>
-              <RedisBrowserTab tab={tab} />
+              <RedisBrowserTab key={connInstanceKey} tab={tab} />
             </Suspense>
           );
         case 'mongo_collection':
           return (
             <Suspense fallback={fallback}>
-              <MongoCollectionTab tab={tab} />
+              <MongoCollectionTab key={targetInstanceKey} tab={tab} />
             </Suspense>
           );
         case 'monitor':
           return (
             <Suspense fallback={fallback}>
-              <ServerMonitorTab tab={tab} />
+              <ServerMonitorTab key={connInstanceKey} tab={tab} />
             </Suspense>
           );
         case 'db_users':
           return (
             <Suspense fallback={fallback}>
-              <DbUsersTab tab={tab} />
+              <DbUsersTab key={connInstanceKey} tab={tab} />
             </Suspense>
           );
         default:
@@ -563,7 +737,7 @@ export const WorkbenchLayout: React.FC = () => {
     [tabs, activeTabKey, lruTabKeys, renderTabContent]
   );
 
-  const displayVersion = updateCheck?.currentVersion || buildInfo?.displayVersion || 'v1.0.1';
+  const displayVersion = updateCheck?.currentVersion || buildInfo?.displayVersion || 'v1.0.2';
   const hasNewVersion = Boolean(updateCheck?.hasUpdate);
 
   const handleSidebarSplitterPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -705,9 +879,104 @@ export const WorkbenchLayout: React.FC = () => {
 
   const activeTabIdx = tabs.findIndex((x) => x.key === activeTabKey);
   const activeTabObj = activeTabIdx >= 0 ? tabs[activeTabIdx] : tabs[0];
+  const activeTabConn = activeTabObj
+    ? connections.find((c) => c.id === activeTabObj.connectionId)
+    : undefined;
+  const hasActiveDirectHandle = Boolean(
+    handleBindTick >= 0 && activeTabConn?.ephemeral && hasEphemeralFileHandle(activeTabConn.id)
+  );
+  const allowGlobalFileDrop =
+    canOpenEphemeralWeb && !connModalOpen && !transferCtx.open && !securityModalOpen && !draggingTabKey;
 
   return (
-    <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div
+      style={{ height: '100dvh', display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}
+      onDragEnter={(e) => {
+        if (!allowGlobalFileDrop) return;
+        const hasFiles = Array.from(e.dataTransfer?.types || []).includes('Files');
+        if (!hasFiles) return;
+        e.preventDefault();
+        fileDragDepthRef.current += 1;
+        setFileDragOver(true);
+      }}
+      onDragOver={(e) => {
+        if (!allowGlobalFileDrop) return;
+        const hasFiles = Array.from(e.dataTransfer?.types || []).includes('Files');
+        if (!hasFiles) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+        if (!fileDragOver) setFileDragOver(true);
+      }}
+      onDragLeave={(e) => {
+        if (!allowGlobalFileDrop) return;
+        const hasFiles = Array.from(e.dataTransfer?.types || []).includes('Files');
+        if (!hasFiles) return;
+        fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1);
+        if (fileDragDepthRef.current === 0) {
+          setFileDragOver(false);
+        }
+      }}
+      onDrop={async (e) => {
+        if (!allowGlobalFileDrop) return;
+        const hasFiles = Array.from(e.dataTransfer?.types || []).includes('Files');
+        if (!hasFiles) return;
+        e.preventDefault();
+        fileDragDepthRef.current = 0;
+        setFileDragOver(false);
+        const item = e.dataTransfer.items?.[0];
+        const file = e.dataTransfer.files?.[0];
+        if (!file) return;
+        let handle: any = undefined;
+        if (item && typeof (item as any).getAsFileSystemHandle === 'function') {
+          try {
+            const h = await (item as any).getAsFileSystemHandle();
+            if (h && h.kind === 'file') {
+              handle = h;
+            }
+          } catch {
+            // Standard File upload + Download mode fallback
+          }
+        }
+        await openLocalDBFile(file, handle);
+      }}
+    >
+      {canOpenEphemeralWeb && (
+        <input
+          ref={ephemeralFileInputRef}
+          type="file"
+          accept=".sqlite,.sqlite3,.db,.db3,.s3db,.duckdb,.ddb"
+          style={{ display: 'none' }}
+          onChange={handleEphemeralInputChange}
+        />
+      )}
+      {fileDragOver && allowGlobalFileDrop && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 8,
+            zIndex: 1200,
+            borderRadius: 12,
+            border: '2px dashed #fa8c16',
+            background: darkMode ? 'rgba(20, 20, 20, 0.84)' : 'rgba(255, 251, 235, 0.90)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 8,
+            pointerEvents: 'none',
+            padding: 20,
+            textAlign: 'center',
+          }}
+        >
+          <FolderOpenOutlined style={{ fontSize: 36, color: '#fa8c16' }} />
+          <Typography.Text strong style={{ fontSize: 16 }}>
+            {t('Drop SQLite 3 or DuckDB File to Open Temporary Session')}
+          </Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {t('Opens in an isolated per-user workspace · Direct local file save-back or binary download supported')}
+          </Typography.Text>
+        </div>
+      )}
       {/* Top Global Bar */}
       <header
         className="workbench-top-header"
@@ -853,6 +1122,23 @@ export const WorkbenchLayout: React.FC = () => {
                           })),
                         ]
                       : [
+                          ...(canOpenEphemeralWeb
+                            ? [
+                                {
+                                  key: 'open-local-db',
+                                  icon: <FolderOpenOutlined />,
+                                  label: openingEphemeral
+                                    ? t('Opening local database...')
+                                    : t('Open Local SQLite / DuckDB'),
+                                  disabled: openingEphemeral,
+                                  onClick: () => {
+                                    setMobileMoreOpen(false);
+                                    handleTriggerOpenLocalDB();
+                                  },
+                                },
+                                { type: 'divider' as const },
+                              ]
+                            : []),
                           {
                             key: 'theme',
                             icon: darkMode ? <SunOutlined /> : <MoonOutlined />,
@@ -950,6 +1236,22 @@ export const WorkbenchLayout: React.FC = () => {
           </Space>
         ) : (
           <Space size={isTablet ? 6 : 8} style={{ flexShrink: 0 }}>
+            {canOpenEphemeralWeb && (
+              <Tooltip
+                title={t(
+                  'Temporarily open a local SQLite or DuckDB file in browser (isolated workspace, direct save-back or download)'
+                )}
+              >
+                <Button
+                  size="middle"
+                  icon={<FolderOpenOutlined />}
+                  loading={openingEphemeral}
+                  onClick={handleTriggerOpenLocalDB}
+                >
+                  {!isTablet && <span className="workbench-btn-label">{t('Open Local DB')}</span>}
+                </Button>
+              </Tooltip>
+            )}
             {effectiveCanCreateConn && (
               <Button
                 type="primary"
@@ -1199,6 +1501,9 @@ export const WorkbenchLayout: React.FC = () => {
         >
           <ConnectionSidebar
             onNewConnection={handleSidebarNewConnection}
+            onOpenLocalDB={canOpenEphemeralWeb ? handleTriggerOpenLocalDB : undefined}
+            onSaveBackEphemeral={handleSaveBackEphemeral}
+            onDownloadEphemeral={handleDownloadEphemeral}
             onEditConnection={handleSidebarEditConnection}
             onOpenCreateTable={handleSidebarOpenCreateTable}
             onOpenTransfer={handleSidebarOpenTransfer}
@@ -1224,6 +1529,90 @@ export const WorkbenchLayout: React.FC = () => {
         )}
 
         <main style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          {!isDesktop && tabs.length > 0 && activeTabConn?.ephemeral && (
+            <div
+              style={{
+                minHeight: isMobile ? 36 : 38,
+                padding: isMobile ? '4px 8px' : '4px 12px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+                borderBottom: '1px solid rgba(250, 140, 22, 0.28)',
+                background: darkMode ? 'rgba(250, 140, 22, 0.11)' : '#fff7e6',
+                flexShrink: 0,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1, overflow: 'hidden' }}>
+                <Tag color="orange" style={{ margin: 0, fontSize: 11, paddingInline: 5, flexShrink: 0 }}>
+                  {isMobile ? t('Temp') : t('Temporary Local DB')}
+                </Tag>
+                <Typography.Text
+                  strong
+                  style={{
+                    fontSize: 12,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                  title={activeTabConn.name}
+                >
+                  {activeTabConn.name}
+                </Typography.Text>
+                {!isMobile && (
+                  <Typography.Text
+                    type="secondary"
+                    className="workbench-header-tag-extra"
+                    style={{
+                      fontSize: 12,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    —{' '}
+                    {hasActiveDirectHandle
+                      ? t('Isolated browser session · Direct local file write-back enabled')
+                      : t('Isolated browser session · Download DB file after editing to save locally')}
+                  </Typography.Text>
+                )}
+              </div>
+              <Space size={isMobile ? 4 : 6} style={{ flexShrink: 0 }}>
+                {hasActiveDirectHandle && (
+                  <Button
+                    size="small"
+                    type="primary"
+                    icon={<SaveOutlined />}
+                    loading={savingEphemeralId === activeTabConn.id}
+                    onClick={() => handleSaveBackEphemeral(activeTabConn)}
+                  >
+                    {isMobile ? t('Save Back') : t('Save Back to Local File')}
+                  </Button>
+                )}
+                <Button
+                  size="small"
+                  type={hasActiveDirectHandle ? 'default' : 'primary'}
+                  icon={<DownloadOutlined />}
+                  loading={downloadingEphemeralId === activeTabConn.id}
+                  title={t('Download DB File')}
+                  onClick={() => handleDownloadEphemeral(activeTabConn)}
+                >
+                  {isMobile ? (hasActiveDirectHandle ? undefined : t('Download')) : t('Download DB File')}
+                </Button>
+                <Button
+                  size="small"
+                  danger
+                  type={isMobile ? 'text' : 'default'}
+                  ghost={!isMobile}
+                  icon={<DeleteOutlined />}
+                  title={t('Close Temp DB & Clean Up')}
+                  onClick={() => handleCloseEphemeral(activeTabConn)}
+                >
+                  {!isMobile && !isTablet ? t('Close & Clean Up') : undefined}
+                </Button>
+              </Space>
+            </div>
+          )}
           {tabs.length === 0 ? (
             <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? 14 : 32 }}>
               <div style={{ maxWidth: 920, margin: '0 auto' }}>
@@ -1242,6 +1631,49 @@ export const WorkbenchLayout: React.FC = () => {
                 </div>
 
                 <Row gutter={[16, 16]} style={{ marginTop: 20 }}>
+                  {canOpenEphemeralWeb && (
+                    <Col xs={24}>
+                      <Card
+                        size="small"
+                        style={{
+                          borderColor: 'rgba(250, 140, 22, 0.38)',
+                          background: darkMode ? 'rgba(250, 140, 22, 0.08)' : '#fffaf0',
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: 12,
+                            flexWrap: 'wrap',
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: '1 1 240px' }}>
+                            <FolderOpenOutlined style={{ fontSize: 22, color: '#fa8c16', flexShrink: 0 }} />
+                            <div style={{ minWidth: 0 }}>
+                              <Typography.Text strong style={{ display: 'block', fontSize: 13 }}>
+                                {t('Quick Open Local SQLite 3 / DuckDB File')}
+                              </Typography.Text>
+                              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                {t(
+                                  'Browse or drag & drop a local .sqlite / .db / .duckdb file to edit in an isolated temporary session, then save directly back or download.'
+                                )}
+                              </Typography.Text>
+                            </div>
+                          </div>
+                          <Button
+                            type="primary"
+                            icon={<FolderOpenOutlined />}
+                            loading={openingEphemeral}
+                            onClick={handleTriggerOpenLocalDB}
+                          >
+                            {t('Open Local SQLite / DuckDB')}
+                          </Button>
+                        </div>
+                      </Card>
+                    </Col>
+                  )}
                   <Col xs={24} md={8}>
                     <Card
                       hoverable={effectiveCanCreateConn}
@@ -1267,20 +1699,12 @@ export const WorkbenchLayout: React.FC = () => {
                   </Col>
                   <Col xs={24} md={8}>
                     <Card
-                      hoverable
+                      hoverable={connections.length > 0 || effectiveCanCreateConn}
                       onClick={() => {
-                        const first = connections[0];
-                        if (first) {
-                          openTab({
-                            key: `sql:${first.id}:${Date.now()}`,
-                            title: `SQL - ${first.name}`,
-                            kind: 'sql_console',
-                            connectionId: first.id,
-                            connName: first.name,
-                            dbType: first.type,
-                            database: first.database || 'main',
-                          });
+                        if (connections.length > 0) {
+                          openNewSqlConsole();
                         } else if (effectiveCanCreateConn) {
+                          setEditingConn(null);
                           setConnModalOpen(true);
                         }
                       }}
@@ -1298,7 +1722,7 @@ export const WorkbenchLayout: React.FC = () => {
                   </Col>
                   <Col xs={24} md={8}>
                     <Card
-                      hoverable
+                      hoverable={connections.length > 0 || effectiveCanCreateConn}
                       onClick={() => {
                         const first = connections[0];
                         if (first) {
@@ -1311,7 +1735,8 @@ export const WorkbenchLayout: React.FC = () => {
                             dbType: first.type,
                             database: first.database || '',
                           });
-                        } else {
+                        } else if (effectiveCanCreateConn) {
+                          setEditingConn(null);
                           setConnModalOpen(true);
                         }
                       }}
@@ -1542,7 +1967,7 @@ export const WorkbenchLayout: React.FC = () => {
                   closeTab(targetKey);
                 }
               }}
-              style={{ height: '100%' }}
+              style={{ flex: 1, minHeight: 0 }}
               className="workbench-main-tabs"
               tabBarExtraContent={{
                 right: (() => {
@@ -1763,6 +2188,7 @@ export const WorkbenchLayout: React.FC = () => {
             editing={editingConn}
             onClose={() => setConnModalOpen(false)}
             onSaved={reloadConnections}
+            onOpenEphemeral={canOpenEphemeralWeb ? handleTriggerOpenLocalDB : undefined}
           />
         )}
 

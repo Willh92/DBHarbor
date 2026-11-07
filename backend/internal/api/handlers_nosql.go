@@ -419,6 +419,144 @@ func (s *Server) handleKVImportKeys(c *Context) {
 	})
 }
 
+func (s *Server) handleKVGetStreamInfo(c *Context) {
+	kvDrv, _, ok := s.getKVDriverAccess(c, false)
+	if !ok {
+		return
+	}
+	diag, ok := kvDrv.(driver.KVDiagnosticsDriver)
+	if !ok {
+		c.JSON(http.StatusBadRequest, H{"error": "Stream diagnostics are not supported by this engine"})
+		return
+	}
+	dbIdx, _ := strconv.Atoi(c.DefaultQuery("db", "0"))
+	info, err := diag.GetStreamInfo(c.Request.Context(), dbIdx, c.Query("key"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, info)
+}
+
+func (s *Server) handleKVManageStreamGroup(c *Context) {
+	kvDrv, cfg, ok := s.getKVDriverAccess(c, true)
+	if !ok {
+		return
+	}
+	diag, ok := kvDrv.(driver.KVDiagnosticsDriver)
+	if !ok {
+		c.JSON(http.StatusBadRequest, H{"error": "Stream consumer groups are not supported by this engine"})
+		return
+	}
+	var req driver.KVStreamGroupActionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, H{"error": "Invalid stream consumer group request"})
+		return
+	}
+	start := time.Now()
+	if err := diag.ManageStreamGroup(c.Request.Context(), req); err != nil {
+		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		return
+	}
+	s.store.AddHistory(store.HistoryEntry{
+		UserID: c.UserID(), ConnectionID: cfg.ID, ConnName: cfg.Name, DBType: cfg.Type,
+		Database: fmt.Sprintf("db%d", req.DB),
+		Query:    fmt.Sprintf("XGROUP %s %s %s", strings.ToUpper(strings.TrimSpace(req.Action)), req.Key, req.Group),
+		ElapsedMs: time.Since(start).Milliseconds(), Status: "ok",
+	})
+	c.JSON(http.StatusOK, H{"message": "Stream consumer group updated successfully"})
+}
+
+func (s *Server) handleKVGetDiagnostics(c *Context) {
+	kvDrv, _, ok := s.getKVDriverAccess(c, false)
+	if !ok {
+		return
+	}
+	diag, ok := kvDrv.(driver.KVDiagnosticsDriver)
+	if !ok {
+		c.JSON(http.StatusBadRequest, H{"error": "Redis diagnostics are not supported by this engine"})
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(c.DefaultQuery("kind", "slowlog")))
+	switch kind {
+	case "config":
+		pattern := strings.TrimSpace(c.DefaultQuery("pattern", "*"))
+		items, err := diag.GetConfig(c.Request.Context(), pattern)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, H{"config": items})
+	default:
+		count, _ := strconv.ParseInt(c.DefaultQuery("count", "50"), 10, 64)
+		entries, err := diag.GetSlowlog(c.Request.Context(), count)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, H{"slowlog": entries})
+	}
+}
+
+func (s *Server) handleKVActionDiagnostics(c *Context) {
+	kvDrv, cfg, ok := s.getKVDriverAccess(c, true)
+	if !ok {
+		return
+	}
+	diag, ok := kvDrv.(driver.KVDiagnosticsDriver)
+	if !ok {
+		c.JSON(http.StatusBadRequest, H{"error": "Redis diagnostics are not supported by this engine"})
+		return
+	}
+	var req struct {
+		Action  string `json:"action"`
+		Key     string `json:"key"`
+		Value   string `json:"value"`
+		Channel string `json:"channel"`
+		Message string `json:"message"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, H{"error": "Invalid diagnostics action payload"})
+		return
+	}
+	start := time.Now()
+	switch strings.ToUpper(strings.TrimSpace(req.Action)) {
+	case "RESET_SLOWLOG":
+		if err := diag.ResetSlowlog(c.Request.Context()); err != nil {
+			c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+			return
+		}
+		s.store.AddHistory(store.HistoryEntry{
+			UserID: c.UserID(), ConnectionID: cfg.ID, ConnName: cfg.Name, DBType: cfg.Type,
+			Query: "SLOWLOG RESET", ElapsedMs: time.Since(start).Milliseconds(), Status: "ok",
+		})
+		c.JSON(http.StatusOK, H{"message": "Slowlog reset successfully"})
+	case "SET_CONFIG":
+		if err := diag.SetConfig(c.Request.Context(), req.Key, req.Value); err != nil {
+			c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+			return
+		}
+		s.store.AddHistory(store.HistoryEntry{
+			UserID: c.UserID(), ConnectionID: cfg.ID, ConnName: cfg.Name, DBType: cfg.Type,
+			Query: fmt.Sprintf("CONFIG SET %s [REDACTED]", req.Key), ElapsedMs: time.Since(start).Milliseconds(), Status: "ok",
+		})
+		c.JSON(http.StatusOK, H{"message": "Configuration updated successfully"})
+	case "PUBLISH":
+		receivers, err := diag.PublishMessage(c.Request.Context(), req.Channel, req.Message)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+			return
+		}
+		s.store.AddHistory(store.HistoryEntry{
+			UserID: c.UserID(), ConnectionID: cfg.ID, ConnName: cfg.Name, DBType: cfg.Type,
+			Query: fmt.Sprintf("PUBLISH %s (%d bytes)", req.Channel, len(req.Message)), ElapsedMs: time.Since(start).Milliseconds(), Status: "ok",
+		})
+		c.JSON(http.StatusOK, H{"message": "Message published", "receivers": receivers})
+	default:
+		c.JSON(http.StatusBadRequest, H{"error": fmt.Sprintf("Unsupported diagnostics action: %s", req.Action)})
+	}
+}
+
 // MongoDB Handlers
 
 func (s *Server) handleDocListCollections(c *Context) {
@@ -434,24 +572,81 @@ func (s *Server) handleDocListCollections(c *Context) {
 	c.JSON(http.StatusOK, H{"collections": colls})
 }
 
-func (s *Server) handleDocCreateCollection(c *Context) {
-	docDrv, _, ok := s.getDocDriverAccess(c, true)
+func (s *Server) handleDocGetCollectionOptions(c *Context) {
+	docDrv, _, ok := s.getDocDriverAccess(c, false)
 	if !ok {
 		return
 	}
-	var req struct {
-		Database   string `json:"database"`
-		Collection string `json:"collection"`
+	gov, ok := docDrv.(driver.DocGovernanceDriver)
+	if !ok {
+		c.JSON(http.StatusBadRequest, H{"error": "Collection options inspection is not supported by this engine"})
+		return
 	}
+	summary, err := gov.GetCollectionOptions(c.Request.Context(), c.Query("database"), c.Query("collection"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, summary)
+}
+
+func (s *Server) handleDocCreateCollection(c *Context) {
+	docDrv, cfg, ok := s.getDocDriverAccess(c, true)
+	if !ok {
+		return
+	}
+	var req driver.DocCreateCollectionRequest
 	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Collection) == "" {
 		c.JSON(http.StatusBadRequest, H{"error": "Collection name is required"})
 		return
 	}
-	if err := docDrv.CreateCollection(c.Request.Context(), req.Database, strings.TrimSpace(req.Collection)); err != nil {
+	req.Collection = strings.TrimSpace(req.Collection)
+	start := time.Now()
+	var err error
+	if gov, ok := docDrv.(driver.DocGovernanceDriver); ok {
+		err = gov.CreateCollectionAdvanced(c.Request.Context(), req)
+	} else {
+		err = docDrv.CreateCollection(c.Request.Context(), req.Database, req.Collection)
+	}
+	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
 	}
+	s.store.AddHistory(store.HistoryEntry{
+		UserID: c.UserID(), ConnectionID: cfg.ID, ConnName: cfg.Name, DBType: cfg.Type,
+		Database: req.Database, Query: fmt.Sprintf("/* createCollection %s (%s) */", req.Collection, strings.ToLower(req.Type)),
+		ElapsedMs: time.Since(start).Milliseconds(), Status: "ok",
+	})
 	c.JSON(http.StatusOK, H{"message": "Collection created successfully"})
+}
+
+func (s *Server) handleDocModifyCollectionOptions(c *Context) {
+	docDrv, cfg, ok := s.getDocDriverAccess(c, true)
+	if !ok {
+		return
+	}
+	gov, ok := docDrv.(driver.DocGovernanceDriver)
+	if !ok {
+		c.JSON(http.StatusBadRequest, H{"error": "Collection governance options are not supported by this engine"})
+		return
+	}
+	var req driver.DocModCollectionRequest
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Collection) == "" {
+		c.JSON(http.StatusBadRequest, H{"error": "Collection name is required"})
+		return
+	}
+	req.Collection = strings.TrimSpace(req.Collection)
+	start := time.Now()
+	if err := gov.ModifyCollectionOptions(c.Request.Context(), req); err != nil {
+		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		return
+	}
+	s.store.AddHistory(store.HistoryEntry{
+		UserID: c.UserID(), ConnectionID: cfg.ID, ConnName: cfg.Name, DBType: cfg.Type,
+		Database: req.Database, Query: fmt.Sprintf("/* collMod %s */", req.Collection),
+		ElapsedMs: time.Since(start).Milliseconds(), Status: "ok",
+	})
+	c.JSON(http.StatusOK, H{"message": "Collection options updated successfully"})
 }
 
 func (s *Server) handleDocDropCollection(c *Context) {
@@ -597,24 +792,25 @@ func (s *Server) handleDocImport(c *Context) {
 
 	if strings.Contains(ct, "multipart/form-data") {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, s.maxImportBytes())
-		fh, err := c.FormFile("file")
+		part, origFilename, fields, err := c.StreamFormFile("file")
 		if err != nil {
 			c.JSON(http.StatusBadRequest, H{"error": "Please select a .json or .jsonl file to import"})
 			return
 		}
-		f, err := fh.Open()
-		if err != nil {
-			c.JSON(http.StatusBadRequest, H{"error": "Failed to read uploaded file"})
-			return
+		defer part.Close()
+		fieldOrQuery := func(key string) string {
+			if v := strings.TrimSpace(fields[key]); v != "" {
+				return v
+			}
+			return strings.TrimSpace(c.Query(key))
 		}
-		defer f.Close()
-		reader = f
-		database = strings.TrimSpace(c.PostForm("database"))
-		collection = strings.TrimSpace(c.PostForm("collection"))
-		format = strings.TrimSpace(c.PostForm("format"))
-		continueOnError = c.PostForm("continueOnError") == "true"
+		reader = part
+		database = fieldOrQuery("database")
+		collection = fieldOrQuery("collection")
+		format = fieldOrQuery("format")
+		continueOnError = strings.EqualFold(fieldOrQuery("continueOnError"), "true")
 		if format == "" {
-			lower := strings.ToLower(fh.Filename)
+			lower := strings.ToLower(origFilename)
 			if strings.HasSuffix(lower, ".jsonl") || strings.HasSuffix(lower, ".ndjson") {
 				format = "jsonl"
 			} else {
@@ -715,17 +911,18 @@ func (s *Server) handleDocCreateIndex(c *Context) {
 	if !ok {
 		return
 	}
-	var req struct {
-		Database   string `json:"database"`
-		Collection string `json:"collection"`
-		KeysJSON   string `json:"keysJson"`
-		Unique     bool   `json:"unique"`
-	}
+	var req driver.DocCreateIndexRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": "Invalid request parameters"})
 		return
 	}
-	if err := docDrv.CreateIndex(c.Request.Context(), req.Database, req.Collection, req.KeysJSON, req.Unique); err != nil {
+	var err error
+	if gov, ok := docDrv.(driver.DocGovernanceDriver); ok {
+		err = gov.CreateIndexAdvanced(c.Request.Context(), req)
+	} else {
+		err = docDrv.CreateIndex(c.Request.Context(), req.Database, req.Collection, req.KeysJSON, req.Unique)
+	}
+	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
 	}

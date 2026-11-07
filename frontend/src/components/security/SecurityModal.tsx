@@ -49,6 +49,7 @@ import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
 import type { AuditLogEntry, AuthSession, LoginBrandingConfig, LoginIconMode, SecurityStatus } from '../../types';
+import { writeTextToClipboard } from '../../utils/tableClipboard';
 
 interface Props {
   open: boolean;
@@ -243,6 +244,11 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
       setSetupInfo(null);
       setVerifyCode('');
       setGeneratedCodes([]);
+      setActionMode(null);
+      setActionPwd('');
+      setActionCode('');
+      pwdForm.resetFields();
+      setNewPwdWatch('');
       if (storeLoginBranding) setBrandingForm(storeLoginBranding);
       loadSecurityStatus();
       if (initialTab === 'sessions') loadSessions();
@@ -534,7 +540,7 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                             margin: '10px 0',
                             padding: 10,
                             borderRadius: 6,
-                            background: 'rgba(0,0,0,0.06)',
+                            background: 'rgba(128,128,128,0.12)',
                             fontFamily: 'monospace',
                             fontWeight: 700,
                           }}
@@ -547,8 +553,8 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                           <Button
                             size="small"
                             icon={<CopyOutlined />}
-                            onClick={() => {
-                              navigator.clipboard.writeText(generatedCodes.join('\n'));
+                            onClick={async () => {
+                              await writeTextToClipboard(generatedCodes.join('\n'));
                               message.success(t('All recovery codes copied'));
                             }}
                           >
@@ -602,8 +608,8 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                             <Button
                               size="small"
                               icon={<CopyOutlined />}
-                              onClick={() => {
-                                navigator.clipboard.writeText(setupInfo.secret);
+                              onClick={async () => {
+                                await writeTextToClipboard(setupInfo.secret);
                                 message.success(t('Secret key copied'));
                               }}
                             >
@@ -837,9 +843,13 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                     <Popconfirm
                       title={t('Revoke all device sessions except this browser?')}
                       onConfirm={async () => {
-                        const res = await api.revokeOtherSessions();
-                        message.success(res.message);
-                        loadSessions();
+                        try {
+                          const res = await api.revokeOtherSessions();
+                          message.success(res.message);
+                          loadSessions();
+                        } catch (err: any) {
+                          message.error(err.message);
+                        }
                       }}
                     >
                       <Button size="small" danger>
@@ -888,9 +898,13 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                           <Popconfirm
                             title={t('Revoke this device session?')}
                             onConfirm={async () => {
-                              await api.revokeSession(r.id);
-                              message.success(t('Session revoked'));
-                              loadSessions();
+                              try {
+                                await api.revokeSession(r.id);
+                                message.success(t('Session revoked'));
+                                loadSessions();
+                              } catch (err: any) {
+                                message.error(err.message);
+                              }
                             }}
                           >
                             <Button size="small" danger type="link" icon={<DeleteOutlined />}>

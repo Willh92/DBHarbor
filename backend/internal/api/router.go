@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -68,17 +69,20 @@ type RouterOptions struct {
 }
 
 type Server struct {
-	store       *store.Store
-	pool        *pool.Manager
-	tokens      *auth.TokenManager
-	protector   *auth.LoginProtector
-	updater     *version.Checker
-	desktop     DesktopConfig
-	opts        RouterOptions
-	trustedNets []*net.IPNet
-	startedAt   time.Time
-	metaCacheMu sync.RWMutex
-	metaCache   map[string]cachedAutocomplete
+	store                   *store.Store
+	pool                    *pool.Manager
+	tokens                  *auth.TokenManager
+	protector               *auth.LoginProtector
+	updater                 *version.Checker
+	desktop                 DesktopConfig
+	opts                    RouterOptions
+	trustedNets             []*net.IPNet
+	startedAt               time.Time
+	metaCacheMu             sync.RWMutex
+	metaCache               map[string]cachedAutocomplete
+	ephemeralMu             sync.Mutex
+	inFlightEphemeralByUser map[string]int
+	inFlightEphemeralDirs   map[string]bool
 }
 
 func parseTrustedProxyNets(entries []string) []*net.IPNet {
@@ -121,18 +125,26 @@ func NewRouterWithOptions(st *store.Store, pm *pool.Manager, tm *auth.TokenManag
 		opts.MaxImportMB = 256
 	}
 	srv := &Server{
-		store:       st,
-		pool:        pm,
-		tokens:      tm,
-		protector:   auth.NewLoginProtector(sec),
-		updater:     version.NewChecker(),
-		opts:        opts,
-		trustedNets: parseTrustedProxyNets(opts.TrustedProxies),
-		startedAt:   time.Now(),
-		metaCache:   make(map[string]cachedAutocomplete),
+		store:                   st,
+		pool:                    pm,
+		tokens:                  tm,
+		protector:               auth.NewLoginProtector(sec),
+		updater:                 version.NewChecker(),
+		opts:                    opts,
+		trustedNets:             parseTrustedProxyNets(opts.TrustedProxies),
+		startedAt:               time.Now(),
+		metaCache:               make(map[string]cachedAutocomplete),
+		inFlightEphemeralByUser: make(map[string]int),
+		inFlightEphemeralDirs:   make(map[string]bool),
 	}
 	if pm != nil {
 		pm.SetConnectionPreparer(srv.prepareWebConnectionConfig)
+	}
+	srv.sweepEphemeralWorkspaces(defaultEphemeralIdleTTL)
+	if st != nil {
+		st.SetMaintenanceHook(func() {
+			srv.sweepEphemeralWorkspaces(defaultEphemeralIdleTTL)
+		})
 	}
 	return srv.buildHandler()
 }
@@ -141,15 +153,25 @@ func (s *Server) prepareWebConnectionConfig(cfg driver.ConnectionConfig) driver.
 	if s.desktop.Enabled {
 		return cfg
 	}
-	clonedOpts := make(map[string]string, len(cfg.Options)+2)
+	restrictInternalIP := false
+	if cfg.Options != nil && cfg.Options["__restrict_internal_ip"] == "1" {
+		restrictInternalIP = true
+	}
+	if !s.opts.AllowPrivateNetForNonAdmin && cfg.ID != "" && s.store != nil && !s.store.IsConnectionOwnedByAdmin(cfg.ID) {
+		restrictInternalIP = true
+	}
+	clonedOpts := make(map[string]string, len(cfg.Options)+3)
 	for k, v := range cfg.Options {
-		if k == "cliPath" {
+		if k == "cliPath" || k == "__restrict_internal_ip" {
 			continue
 		}
 		clonedOpts[k] = v
 	}
 	clonedOpts["__web_mode"] = "1"
 	clonedOpts["__server_duckdb_cli"] = s.opts.DuckDBCliPath
+	if restrictInternalIP {
+		clonedOpts["__restrict_internal_ip"] = "1"
+	}
 	cfg.Options = clonedOpts
 
 	fp := strings.TrimSpace(cfg.FilePath)
@@ -182,13 +204,21 @@ func (s *Server) acquireConnDriver(c *Context, connID string) (driver.Driver, dr
 func NewDesktopRouter(st *store.Store, pm *pool.Manager, dcfg DesktopConfig) http.Handler {
 	dcfg.Enabled = true
 	srv := &Server{
-		store:     st,
-		pool:      pm,
-		updater:   version.NewChecker(),
-		desktop:   dcfg,
-		opts:      RouterOptions{MaxImportMB: 512},
-		startedAt: time.Now(),
-		metaCache: make(map[string]cachedAutocomplete),
+		store:                   st,
+		pool:                    pm,
+		updater:                 version.NewChecker(),
+		desktop:                 dcfg,
+		opts:                    RouterOptions{MaxImportMB: 512},
+		startedAt:               time.Now(),
+		metaCache:               make(map[string]cachedAutocomplete),
+		inFlightEphemeralByUser: make(map[string]int),
+		inFlightEphemeralDirs:   make(map[string]bool),
+	}
+	srv.sweepEphemeralWorkspaces(defaultEphemeralIdleTTL)
+	if st != nil {
+		st.SetMaintenanceHook(func() {
+			srv.sweepEphemeralWorkspaces(defaultEphemeralIdleTTL)
+		})
 	}
 	return srv.buildHandler()
 }
@@ -227,6 +257,7 @@ func (srv *Server) buildHandler() http.Handler {
 		c.JSON(http.StatusOK, H{"status": "ok"})
 	})
 	authed("GET /api/version", srv.handleGetVersion)
+	authed("GET /api/version/changelog", srv.handleGetChangelog)
 
 	if srv.desktop.Enabled {
 		pub("GET /__desktop_boot", srv.handleDesktopBoot)
@@ -288,6 +319,7 @@ func (srv *Server) buildHandler() http.Handler {
 	authed("GET /api/drivers", srv.handleListDrivers)
 	authed("GET /api/fs/browse", srv.handleBrowseLocalFS)
 	authed("POST /api/fs/upload-db", srv.handleUploadLocalDBFile)
+	authed("POST /api/fs/ephemeral-open", srv.handleOpenEphemeralDBFile)
 
 	// Connections
 	authed("GET /api/connections", srv.handleListConnections)
@@ -334,6 +366,7 @@ func (srv *Server) buildHandler() http.Handler {
 	authed("POST /api/conn/{id}/query", srv.handleExecuteQuery)
 	authed("GET /api/conn/{id}/autocomplete", srv.handleAutocomplete)
 	authed("GET /api/conn/{id}/export", srv.handleExport)
+	authed("GET /api/conn/{id}/file/export", srv.handleExportDatabaseFile)
 	authed("POST /api/conn/{id}/import", srv.handleImport)
 	authed("POST /api/conn/{id}/import/sql", srv.handleImportSQLText)
 
@@ -350,10 +383,16 @@ func (srv *Server) buildHandler() http.Handler {
 	authed("POST /api/conn/{id}/kv/cmd", srv.handleKVCommand)
 	authed("POST /api/conn/{id}/kv/export", srv.handleKVExportKeys)
 	authed("POST /api/conn/{id}/kv/import", srv.handleKVImportKeys)
+	authed("GET /api/conn/{id}/kv/stream-info", srv.handleKVGetStreamInfo)
+	authed("POST /api/conn/{id}/kv/stream-group", srv.handleKVManageStreamGroup)
+	authed("GET /api/conn/{id}/kv/diagnostics", srv.handleKVGetDiagnostics)
+	authed("POST /api/conn/{id}/kv/diagnostics", srv.handleKVActionDiagnostics)
 
 	// MongoDB Document endpoints
 	authed("GET /api/conn/{id}/doc/collections", srv.handleDocListCollections)
 	authed("POST /api/conn/{id}/doc/collections", srv.handleDocCreateCollection)
+	authed("GET /api/conn/{id}/doc/collections/options", srv.handleDocGetCollectionOptions)
+	authed("PUT /api/conn/{id}/doc/collections/options", srv.handleDocModifyCollectionOptions)
 	authed("DELETE /api/conn/{id}/doc/collections", srv.handleDocDropCollection)
 	authed("PUT /api/conn/{id}/doc/collections/rename", srv.handleDocRenameCollection)
 	authed("GET /api/conn/{id}/doc/export", srv.handleDocExport)
@@ -376,10 +415,19 @@ func (srv *Server) buildHandler() http.Handler {
 	assetETags := buildAssetETags(distFS)
 	var desktopIndexHTML []byte
 	var desktopIndexETag string
-	if srv.desktop.Enabled && distFS != nil {
-		desktopIndexHTML = buildDesktopIndexHTML(distFS, srv.desktop)
-		if len(desktopIndexHTML) > 0 {
-			desktopIndexETag = computeWeakETag(desktopIndexHTML)
+	var cspNonce string
+	if srv.desktop.Enabled {
+		var nonceBytes [16]byte
+		if _, err := rand.Read(nonceBytes[:]); err == nil {
+			cspNonce = hex.EncodeToString(nonceBytes[:])
+		} else {
+			cspNonce = "dbharbor-desktop-fallback-nonce"
+		}
+		if distFS != nil {
+			desktopIndexHTML = buildDesktopIndexHTML(distFS, srv.desktop, cspNonce)
+			if len(desktopIndexHTML) > 0 {
+				desktopIndexETag = computeWeakETag(desktopIndexHTML)
+			}
 		}
 	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -394,7 +442,7 @@ func (srv *Server) buildHandler() http.Handler {
 		serveSPA(w, r, distFS, assetETags, desktopIndexHTML, desktopIndexETag)
 	})
 
-	return wrapGlobalMiddleware(mux, srv.desktop.Enabled, srv.opts.CORSOrigins)
+	return wrapGlobalMiddleware(mux, srv.desktop.Enabled, srv.opts.CORSOrigins, cspNonce)
 }
 
 func (s *Server) authorizeConn(c *Context, connID string, requireWrite bool) bool {
@@ -503,13 +551,20 @@ func matchAllowedCORSOrigin(origin string, allowed []string) (string, bool) {
 	return "", false
 }
 
-func wrapGlobalMiddleware(next http.Handler, isDesktop bool, corsOrigins []string) http.Handler {
+func wrapGlobalMiddleware(next http.Handler, isDesktop bool, corsOrigins []string, cspNonce string) http.Handler {
+	cspHeader := "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self'; frame-ancestors 'self'; object-src 'none'; base-uri 'self'"
+	if isDesktop && cspNonce != "" {
+		cspHeader = fmt.Sprintf(
+			"default-src 'self'; script-src 'self' 'nonce-%s'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self'; frame-ancestors 'self'; object-src 'none'; base-uri 'self'",
+			cspNonce,
+		)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Hardened HTTP Security & Anti-Indexing Headers
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "SAMEORIGIN")
-		h.Set("Content-Security-Policy", "frame-ancestors 'self'; object-src 'none'; base-uri 'self'")
+		h.Set("Content-Security-Policy", cspHeader)
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet, noimageindex, notranslate")
 		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
@@ -657,7 +712,7 @@ func serveSPA(
 	w.WriteHeader(http.StatusNotFound)
 }
 
-func buildDesktopIndexHTML(distFS fs.FS, dcfg DesktopConfig) []byte {
+func buildDesktopIndexHTML(distFS fs.FS, dcfg DesktopConfig, cspNonce string) []byte {
 	var raw []byte
 	if gzFile, err := distFS.Open("index.html.gz"); err == nil {
 		defer gzFile.Close()
@@ -676,7 +731,8 @@ func buildDesktopIndexHTML(distFS fs.FS, dcfg DesktopConfig) []byte {
 		return nil
 	}
 	bootTag := []byte(fmt.Sprintf(
-		`<script>window.__DBHARBOR_BOOT__={"edition":"desktop","authEnabled":false,"desktopToken":%q,"darkMode":%v};</script>`,
+		`<script nonce=%q>window.__DBHARBOR_BOOT__={"edition":"desktop","authEnabled":false,"desktopToken":%q,"darkMode":%v};</script>`,
+		cspNonce,
 		dcfg.SessionCookieSecret,
 		dcfg.DarkMode,
 	))

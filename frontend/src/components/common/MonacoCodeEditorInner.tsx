@@ -5,6 +5,7 @@ import { MonacoEditorSurface } from './MonacoEditorSurface';
 export interface MonacoCodeEditorProps {
   value: string;
   language: 'sql' | 'json';
+  height?: number | string;
   darkMode?: boolean;
   readOnly?: boolean;
   onChange?: (val: string) => void;
@@ -13,7 +14,7 @@ export interface MonacoCodeEditorProps {
 export const MonacoCodeEditorInner: React.FC<MonacoCodeEditorProps> = ({
   value,
   language,
-  darkMode = false,
+  darkMode,
   readOnly = false,
   onChange,
 }) => {

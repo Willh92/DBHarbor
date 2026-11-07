@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { api, getAuthToken, setAuthToken } from '../api/client';
 import { detectInitialLocale, ensureLocaleLoaded, persistLocale, translateWithLocale, type AppLocale } from '../i18n';
 import type { DriverMeta, LoginBrandingConfig, SavedConnection, UserRole, WorkspaceTab } from '../types';
+import { clearAllEphemeralFileHandles } from '../utils/ephemeralFileHandles';
 import { getRuntimeBootMeta, isDesktopRuntime } from '../utils/runtimeMode';
 
 interface WorkbenchState {
@@ -22,6 +23,7 @@ interface WorkbenchState {
   tabs: WorkspaceTab[];
   activeTabKey: string;
   treeRefreshTick: number;
+  requestedConnId: string;
 
   setAuth: (
     token: string,
@@ -50,6 +52,7 @@ interface WorkbenchState {
   loadBootstrap: () => Promise<void>;
   reloadConnections: () => Promise<void>;
   bumpTreeRefresh: () => void;
+  requestSelectConnection: (connId: string) => void;
 
   openTab: (tab: WorkspaceTab) => void;
   updateTab: (key: string, patch: Partial<WorkspaceTab>) => void;
@@ -76,12 +79,17 @@ const VALID_TAB_KINDS = new Set([
   'db_users',
 ]);
 
-function loadPersistedSession(): { tabs: WorkspaceTab[]; activeTabKey: string } {
+function resolveSessionOwner(username: string, isDesktop: boolean): string {
+  return username || (isDesktop ? 'local' : '');
+}
+
+function loadPersistedSession(): { owner: string; tabs: WorkspaceTab[]; activeTabKey: string } {
   try {
     const raw = localStorage.getItem(TAB_SESSION_STORAGE_KEY);
-    if (!raw) return { tabs: [], activeTabKey: '' };
+    if (!raw) return { owner: '', tabs: [], activeTabKey: '' };
     const parsed = JSON.parse(raw);
-    if (!parsed || !Array.isArray(parsed.tabs)) return { tabs: [], activeTabKey: '' };
+    if (!parsed || !Array.isArray(parsed.tabs)) return { owner: '', tabs: [], activeTabKey: '' };
+    const owner = typeof parsed.owner === 'string' ? parsed.owner : '';
     const tabs: WorkspaceTab[] = parsed.tabs
       .filter(
         (t: any) =>
@@ -107,15 +115,15 @@ function loadPersistedSession(): { tabs: WorkspaceTab[]; activeTabKey: string } 
       }));
     const activeCandidate = typeof parsed.activeTabKey === 'string' ? parsed.activeTabKey : '';
     const activeTabKey = tabs.some((t) => t.key === activeCandidate) ? activeCandidate : tabs[0]?.key || '';
-    return { tabs, activeTabKey };
+    return { owner, tabs, activeTabKey };
   } catch {
-    return { tabs: [], activeTabKey: '' };
+    return { owner: '', tabs: [], activeTabKey: '' };
   }
 }
 
-function persistTabSession(tabs: WorkspaceTab[], activeTabKey: string): void {
+function persistTabSession(tabs: WorkspaceTab[], activeTabKey: string, owner: string): void {
   try {
-    if (tabs.length === 0) {
+    if (tabs.length === 0 || !owner) {
       localStorage.removeItem(TAB_SESSION_STORAGE_KEY);
       return;
     }
@@ -124,18 +132,26 @@ function persistTabSession(tabs: WorkspaceTab[], activeTabKey: string): void {
       initialSQL: t.initialSQL ? t.initialSQL.slice(0, 4096) : undefined,
     }));
     const validActive = capped.some((t) => t.key === activeTabKey) ? activeTabKey : capped[capped.length - 1]?.key || '';
-    localStorage.setItem(TAB_SESSION_STORAGE_KEY, JSON.stringify({ tabs: capped, activeTabKey: validActive }));
+    localStorage.setItem(TAB_SESSION_STORAGE_KEY, JSON.stringify({ owner, tabs: capped, activeTabKey: validActive }));
   } catch {
     // Ignore storage quota errors in restricted environments
   }
 }
 
-const initialTabSession = loadPersistedSession();
+const initialIsDesktop = isDesktopRuntime();
+const initialUsername = localStorage.getItem('dbharbor_username') || '';
+const rawInitialSession = loadPersistedSession();
+const isInitialSessionValid = initialIsDesktop
+  ? !rawInitialSession.owner || rawInitialSession.owner === 'local'
+  : Boolean(initialUsername && rawInitialSession.owner && rawInitialSession.owner === initialUsername);
+const initialTabSession = isInitialSessionValid
+  ? { tabs: rawInitialSession.tabs, activeTabKey: rawInitialSession.activeTabKey }
+  : { tabs: [], activeTabKey: '' };
 
 export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
-  isDesktop: isDesktopRuntime(),
+  isDesktop: initialIsDesktop,
   token: getAuthToken(),
-  username: localStorage.getItem('dbharbor_username') || '',
+  username: initialUsername,
   displayName: '',
   role: 'admin',
   canCreateConn: true,
@@ -152,8 +168,19 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   tabs: initialTabSession.tabs,
   activeTabKey: initialTabSession.activeTabKey,
   treeRefreshTick: 0,
+  requestedConnId: '',
 
   setAuth: (token, username, sec) => {
+    const prevUsername = get().username;
+    const switchedUser = Boolean(prevUsername && prevUsername !== username);
+    const persisted = loadPersistedSession();
+    const mismatchedPersisted = !get().isDesktop && Boolean(persisted.tabs.length > 0 && (!persisted.owner || persisted.owner !== username));
+    if (switchedUser) {
+      localStorage.removeItem(TAB_SESSION_STORAGE_KEY);
+      void clearAllEphemeralFileHandles();
+    } else if (mismatchedPersisted) {
+      localStorage.removeItem(TAB_SESSION_STORAGE_KEY);
+    }
     setAuthToken(token);
     localStorage.setItem('dbharbor_username', username);
     const nextRole: UserRole = sec?.role || 'admin';
@@ -166,6 +193,19 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       totpEnabled: sec?.totpEnabled ?? false,
       passwordChanged: sec?.passwordChanged ?? true,
       recoveryCodesRemaining: sec?.recoveryCodesRemaining ?? 0,
+      ...(switchedUser
+        ? {
+            tabs: [],
+            activeTabKey: '',
+            connections: [],
+            requestedConnId: '',
+          }
+        : mismatchedPersisted
+          ? {
+              tabs: [],
+              activeTabKey: '',
+            }
+          : {}),
     });
   },
 
@@ -186,9 +226,23 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       api.logout().catch(() => {});
     }
     setAuthToken('');
+    void clearAllEphemeralFileHandles();
     localStorage.removeItem('dbharbor_username');
-    persistTabSession([], '');
-    set({ token: '', username: '', displayName: '', role: 'admin', canCreateConn: true, tabs: [], activeTabKey: '' });
+    localStorage.removeItem(TAB_SESSION_STORAGE_KEY);
+    set({
+      token: '',
+      username: '',
+      displayName: '',
+      role: 'admin',
+      canCreateConn: true,
+      totpEnabled: false,
+      passwordChanged: true,
+      recoveryCodesRemaining: 0,
+      connections: [],
+      tabs: [],
+      activeTabKey: '',
+      requestedConnId: '',
+    });
   },
 
   toggleDarkMode: () => {
@@ -205,8 +259,11 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   },
 
   loadBootstrap: async () => {
+    const prevUsername = get().username;
+    let currentOwner = 'local';
     if (get().isDesktop) {
       const [drivers, connections] = await Promise.all([api.listDrivers(), api.listConnections()]);
+      currentOwner = 'local';
       set({
         username: 'local',
         displayName: 'Local Workspace',
@@ -224,6 +281,10 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         api.listDrivers(),
         api.listConnections(),
       ]);
+      currentOwner = meInfo.username;
+      if (prevUsername && prevUsername !== meInfo.username) {
+        void clearAllEphemeralFileHandles();
+      }
       localStorage.setItem('dbharbor_username', meInfo.username);
       const nextRole: UserRole = meInfo.role || 'admin';
       set({
@@ -238,22 +299,34 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         connections,
       });
     }
-    const { drivers, connections } = get();
+    const { drivers, connections, isDesktop } = get();
 
-    // Prune any persisted tabs referencing deleted connections and sync connection display names
-    const connMap = new Map(connections.map((c) => [c.id, c]));
-    const curTabs = get().tabs;
-    if (curTabs.length > 0) {
-      const validTabs = curTabs
-        .filter((t) => connMap.has(t.connectionId))
-        .map((t) => {
-          const c = connMap.get(t.connectionId)!;
-          return c.name !== t.connName ? { ...t, connName: c.name } : t;
-        });
-      const curActive = get().activeTabKey;
-      const nextActive = validTabs.some((t) => t.key === curActive) ? curActive : validTabs[0]?.key || '';
-      persistTabSession(validTabs, nextActive);
-      set({ tabs: validTabs, activeTabKey: nextActive });
+    // Restore & prune persisted tabs only when session owner matches current authenticated identity
+    const persisted = loadPersistedSession();
+    const isOwnerValid = isDesktop
+      ? !persisted.owner || persisted.owner === 'local'
+      : Boolean(persisted.owner && persisted.owner === currentOwner);
+
+    if (!isOwnerValid) {
+      localStorage.removeItem(TAB_SESSION_STORAGE_KEY);
+      if (get().tabs.length > 0 || get().activeTabKey) {
+        set({ tabs: [], activeTabKey: '' });
+      }
+    } else {
+      const connMap = new Map(connections.map((c) => [c.id, c]));
+      const curTabs = get().tabs.length > 0 ? get().tabs : persisted.tabs;
+      const curActive = get().activeTabKey || persisted.activeTabKey;
+      if (curTabs.length > 0) {
+        const validTabs = curTabs
+          .filter((t) => connMap.has(t.connectionId))
+          .map((t) => {
+            const c = connMap.get(t.connectionId)!;
+            return c.name !== t.connName ? { ...t, connName: c.name } : t;
+          });
+        const nextActive = validTabs.some((t) => t.key === curActive) ? curActive : validTabs[0]?.key || '';
+        persistTabSession(validTabs, nextActive, currentOwner);
+        set({ tabs: validTabs, activeTabKey: nextActive });
+      }
     }
 
     // Auto-open the first connection's overview tab if no tab is open yet so users immediately see tables & tools
@@ -285,22 +358,43 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   },
 
   bumpTreeRefresh: () => set((s) => ({ treeRefreshTick: s.treeRefreshTick + 1 })),
+  requestSelectConnection: (connId) => set({ requestedConnId: connId }),
 
   openTab: (tab) => {
+    const owner = resolveSessionOwner(get().username, get().isDesktop);
     const existing = get().tabs.find((t) => t.key === tab.key);
     if (existing) {
+      const nextPatch: Partial<WorkspaceTab> = {};
       if (tab.initialSQL && tab.initialSQL !== existing.initialSQL) {
-        const nextTabs = get().tabs.map((t) => (t.key === tab.key ? { ...t, initialSQL: tab.initialSQL } : t));
-        persistTabSession(nextTabs, tab.key);
+        nextPatch.initialSQL = tab.initialSQL;
+      }
+      if (tab.database !== undefined && tab.database !== existing.database) {
+        nextPatch.database = tab.database;
+      }
+      if (tab.schema !== undefined && tab.schema !== existing.schema) {
+        nextPatch.schema = tab.schema;
+      }
+      if (tab.table !== undefined && tab.table !== existing.table) {
+        nextPatch.table = tab.table;
+      }
+      if (tab.title && tab.title !== existing.title) {
+        nextPatch.title = tab.title;
+      }
+      if (tab.connName && tab.connName !== existing.connName) {
+        nextPatch.connName = tab.connName;
+      }
+      if (Object.keys(nextPatch).length > 0) {
+        const nextTabs = get().tabs.map((t) => (t.key === tab.key ? { ...t, ...nextPatch } : t));
+        persistTabSession(nextTabs, tab.key, owner);
         set({ tabs: nextTabs, activeTabKey: tab.key });
       } else {
-        persistTabSession(get().tabs, tab.key);
+        persistTabSession(get().tabs, tab.key, owner);
         set({ activeTabKey: tab.key });
       }
       return;
     }
     const nextTabs = [...get().tabs, tab];
-    persistTabSession(nextTabs, tab.key);
+    persistTabSession(nextTabs, tab.key, owner);
     set({ tabs: nextTabs, activeTabKey: tab.key });
   },
 
@@ -309,7 +403,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       const nextKey = patch.key || key;
       const nextTabs = s.tabs.map((t) => (t.key === key ? { ...t, ...patch } : t));
       const nextActive = s.activeTabKey === key ? nextKey : s.activeTabKey;
-      persistTabSession(nextTabs, nextActive);
+      persistTabSession(nextTabs, nextActive, resolveSessionOwner(s.username, s.isDesktop));
       return {
         tabs: nextTabs,
         activeTabKey: nextActive,
@@ -331,13 +425,13 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         nextActive = nextTabs[0].key;
       }
     }
-    persistTabSession(nextTabs, nextActive);
+    persistTabSession(nextTabs, nextActive, resolveSessionOwner(get().username, get().isDesktop));
     set({ tabs: nextTabs, activeTabKey: nextActive });
   },
 
   closeOtherTabs: (keepKey) => {
     const nextTabs = get().tabs.filter((t) => t.key === keepKey);
-    persistTabSession(nextTabs, keepKey);
+    persistTabSession(nextTabs, keepKey, resolveSessionOwner(get().username, get().isDesktop));
     set({
       tabs: nextTabs,
       activeTabKey: keepKey,
@@ -351,7 +445,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     const nextTabs = cur.slice(idx);
     const activeStillValid = nextTabs.some((t) => t.key === get().activeTabKey);
     const nextActive = activeStillValid ? get().activeTabKey : pivotKey;
-    persistTabSession(nextTabs, nextActive);
+    persistTabSession(nextTabs, nextActive, resolveSessionOwner(get().username, get().isDesktop));
     set({
       tabs: nextTabs,
       activeTabKey: nextActive,
@@ -365,7 +459,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     const nextTabs = cur.slice(0, idx + 1);
     const activeStillValid = nextTabs.some((t) => t.key === get().activeTabKey);
     const nextActive = activeStillValid ? get().activeTabKey : pivotKey;
-    persistTabSession(nextTabs, nextActive);
+    persistTabSession(nextTabs, nextActive, resolveSessionOwner(get().username, get().isDesktop));
     set({
       tabs: nextTabs,
       activeTabKey: nextActive,
@@ -373,7 +467,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   },
 
   closeAllTabs: () => {
-    persistTabSession([], '');
+    persistTabSession([], '', resolveSessionOwner(get().username, get().isDesktop));
     set({ tabs: [], activeTabKey: '' });
   },
 
@@ -385,12 +479,12 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     if (fromIdx < 0 || toIdx < 0) return;
     const [moved] = cur.splice(fromIdx, 1);
     cur.splice(toIdx, 0, moved);
-    persistTabSession(cur, get().activeTabKey);
+    persistTabSession(cur, get().activeTabKey, resolveSessionOwner(get().username, get().isDesktop));
     set({ tabs: cur });
   },
 
   setActiveTab: (key) => {
-    persistTabSession(get().tabs, key);
+    persistTabSession(get().tabs, key, resolveSessionOwner(get().username, get().isDesktop));
     set({ activeTabKey: key });
   },
 
@@ -398,7 +492,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     const nextTabs = get().tabs.filter((t) => t.connectionId !== connId);
     const activeStillValid = nextTabs.some((t) => t.key === get().activeTabKey);
     const nextActive = activeStillValid ? get().activeTabKey : nextTabs[0]?.key || '';
-    persistTabSession(nextTabs, nextActive);
+    persistTabSession(nextTabs, nextActive, resolveSessionOwner(get().username, get().isDesktop));
     set({
       tabs: nextTabs,
       activeTabKey: nextActive,

@@ -16,7 +16,7 @@ import (
 
 // Build-time overridable metadata via -ldflags.
 var (
-	Version   = "1.0.1"
+	Version   = "1.0.2"
 	Edition   = "server"  // "server" or "desktop"
 	Channel   = "release" // "release" or "preview"
 	GitCommit = "HEAD"
@@ -65,6 +65,11 @@ func EmbeddedChangelogForLocale(locale string) string {
 		}
 	}
 	return embeddedChangelog
+}
+
+// GetChangelog returns the localized built-in CHANGELOG markdown for lang (falling back to English).
+func GetChangelog(lang string) string {
+	return EmbeddedChangelogForLocale(lang)
 }
 
 // EmbeddedChangelogsMap returns all built-in localized changelogs keyed by canonical UI locale code.

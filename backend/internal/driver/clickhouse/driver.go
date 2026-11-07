@@ -1,11 +1,17 @@
 package clickhouse
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"database/sql"
+	stdsql_driver "database/sql/driver"
+	"errors"
 	"fmt"
 	"io"
+	"net"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +20,8 @@ import (
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
 )
+
+var reClickHouseTTL = regexp.MustCompile(`(?is)\bTTL\s+(.+?)(?:\bSETTINGS\b|\bCOMMENT\b|$)`)
 
 func init() {
 	driver.Register(driver.DriverMeta{
@@ -77,8 +85,22 @@ func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
 		dbName = "default"
 	}
 
+	host := strings.TrimSpace(cfg.Host)
+	if host == "" {
+		return nil, errors.New("ClickHouse host cannot be empty")
+	}
+	if cfg.Option("__web_mode", "") == "1" {
+		cleanHost, err := sqlbase.ValidateStrictHostname(host)
+		if err != nil {
+			return nil, err
+		}
+		host = cleanHost
+	} else {
+		host = strings.Trim(host, "[]")
+	}
+
 	opts := &ch.Options{
-		Addr:     []string{fmt.Sprintf("%s:%d", cfg.Host, port)},
+		Addr:     []string{net.JoinHostPort(host, strconv.Itoa(port))},
 		Protocol: proto,
 		Auth: ch.Auth{
 			Database: dbName,
@@ -88,16 +110,22 @@ func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
 		DialTimeout: 8 * time.Second,
 		Compression: &ch.Compression{Method: ch.CompressionLZ4},
 	}
+	if cfg.Option("__restrict_internal_ip", "") == "1" {
+		restricted := sqlbase.NewRestrictedDialContext(8 * time.Second)
+		opts.DialContext = func(ctx context.Context, addr string) (net.Conn, error) {
+			return restricted(ctx, "tcp", addr)
+		}
+	}
 	switch cfg.Option("tls", "false") {
 	case "true":
-		opts.TLS = &tls.Config{ServerName: cfg.Host, MinVersion: tls.VersionTLS12}
+		opts.TLS = &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
 	case "skip-verify":
 		opts.TLS = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
 	}
 
 	db := ch.OpenDB(opts)
 	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(4)
+	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(15 * time.Minute)
 	db.SetConnMaxIdleTime(3 * time.Minute)
 	return &Driver{cfg: cfg, db: db}, nil
@@ -193,10 +221,12 @@ func (d *Driver) ListObjects(ctx context.Context, database, _ string) (driver.Sc
 	defer rows.Close()
 
 	res := driver.SchemaObjects{
-		Database: database,
-		Tables:   []driver.ObjectItem{},
-		Views:    []driver.ObjectItem{},
-		Routines: []driver.ObjectItem{},
+		Database:          database,
+		Tables:            []driver.ObjectItem{},
+		Views:             []driver.ObjectItem{},
+		MaterializedViews: []driver.ObjectItem{},
+		Dictionaries:      []driver.ObjectItem{},
+		Routines:          []driver.ObjectItem{},
 	}
 	for rows.Next() {
 		var name, engine, comment string
@@ -211,10 +241,17 @@ func (d *Driver) ListObjects(ctx context.Context, database, _ string) (driver.Sc
 			DataBytes: int64(bytesCnt),
 			Comment:   comment,
 		}
-		if strings.Contains(strings.ToUpper(engine), "VIEW") {
+		switch {
+		case strings.EqualFold(engine, "MaterializedView"):
+			item.Type = "MATERIALIZED_VIEW"
+			res.MaterializedViews = append(res.MaterializedViews, item)
+		case strings.EqualFold(engine, "Dictionary"):
+			item.Type = "DICTIONARY"
+			res.Dictionaries = append(res.Dictionaries, item)
+		case strings.Contains(strings.ToUpper(engine), "VIEW"):
 			item.Type = "VIEW"
 			res.Views = append(res.Views, item)
-		} else {
+		default:
 			item.Type = "TABLE"
 			res.Tables = append(res.Tables, item)
 		}
@@ -222,28 +259,160 @@ func (d *Driver) ListObjects(ctx context.Context, database, _ string) (driver.Sc
 	return res, rows.Err()
 }
 
+func parseClickHouseProjectionsFromDDL(ddl string) []driver.ProjectionDef {
+	var out []driver.ProjectionDef
+	upper := strings.ToUpper(ddl)
+	searchFrom := 0
+	for searchFrom < len(ddl) {
+		idx := strings.Index(upper[searchFrom:], "PROJECTION ")
+		if idx < 0 {
+			break
+		}
+		pos := searchFrom + idx
+		if pos > 0 {
+			prev := upper[pos-1]
+			if (prev >= 'A' && prev <= 'Z') || (prev >= '0' && prev <= '9') || prev == '_' {
+				searchFrom = pos + len("PROJECTION ")
+				continue
+			}
+		}
+		i := pos + len("PROJECTION ")
+		for i < len(ddl) && (ddl[i] == ' ' || ddl[i] == '\t' || ddl[i] == '\r' || ddl[i] == '\n') {
+			i++
+		}
+		if i >= len(ddl) {
+			break
+		}
+		var name string
+		if ddl[i] == '`' || ddl[i] == '"' {
+			q := ddl[i]
+			i++
+			start := i
+			for i < len(ddl) && ddl[i] != q {
+				i++
+			}
+			name = ddl[start:i]
+			if i < len(ddl) {
+				i++
+			}
+		} else {
+			start := i
+			for i < len(ddl) && ddl[i] != ' ' && ddl[i] != '\t' && ddl[i] != '\r' && ddl[i] != '\n' && ddl[i] != '(' {
+				i++
+			}
+			name = ddl[start:i]
+		}
+		for i < len(ddl) && (ddl[i] == ' ' || ddl[i] == '\t' || ddl[i] == '\r' || ddl[i] == '\n') {
+			i++
+		}
+		if name == "" || i >= len(ddl) || ddl[i] != '(' {
+			searchFrom = i
+			continue
+		}
+		depth := 0
+		inSingle := false
+		inBacktick := false
+		qStart := i + 1
+		qEnd := -1
+		for j := i; j < len(ddl); j++ {
+			ch := ddl[j]
+			if inSingle {
+				if ch == '\\' && j+1 < len(ddl) {
+					j++
+					continue
+				}
+				if ch == '\'' {
+					inSingle = false
+				}
+				continue
+			}
+			if inBacktick {
+				if ch == '`' {
+					inBacktick = false
+				}
+				continue
+			}
+			switch ch {
+			case '\'':
+				inSingle = true
+			case '`':
+				inBacktick = true
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 {
+					qEnd = j
+				}
+			}
+			if qEnd >= 0 {
+				break
+			}
+		}
+		if qEnd < 0 {
+			break
+		}
+		out = append(out, driver.ProjectionDef{
+			Name:  name,
+			Query: strings.TrimSpace(ddl[qStart:qEnd]),
+		})
+		searchFrom = qEnd + 1
+	}
+	return out
+}
+
+func extractClickHouseTableTTL(engineFull, ddl string) string {
+	for _, src := range []string{engineFull, ddl} {
+		if strings.TrimSpace(src) == "" {
+			continue
+		}
+		// Inspect portion starting at ENGINE = when parsing full CREATE TABLE DDL so column TTLs inside (...) are skipped
+		target := src
+		if engIdx := strings.Index(strings.ToUpper(src), "ENGINE ="); engIdx >= 0 {
+			target = src[engIdx:]
+		} else if engIdx := strings.Index(strings.ToUpper(src), "ENGINE="); engIdx >= 0 {
+			target = src[engIdx:]
+		}
+		if m := reClickHouseTTL.FindStringSubmatch(target); len(m) == 2 {
+			ttl := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[1]), ";"))
+			if ttl != "" {
+				return ttl
+			}
+		}
+	}
+	return ""
+}
+
 func (d *Driver) GetTableStructure(ctx context.Context, database, _, table string) (driver.TableStructure, error) {
 	if database == "" {
 		database = "default"
 	}
 	st := driver.TableStructure{
-		Database:    database,
-		Table:       table,
-		Columns:     []driver.ColumnDef{},
-		Indexes:     []driver.IndexDef{},
-		ForeignKeys: []driver.ForeignKeyDef{},
-		Options:     map[string]string{},
+		Database:        database,
+		Table:           table,
+		Columns:         []driver.ColumnDef{},
+		Indexes:         []driver.IndexDef{},
+		ForeignKeys:     []driver.ForeignKeyDef{},
+		Projections:     []driver.ProjectionDef{},
+		SkippingIndexes: []driver.SkippingIndexDef{},
+		Options:         map[string]string{},
 	}
 
-	var engine, sortingKey, partitionKey, comment, createQuery string
+	var engine, engineFull, sortingKey, partitionKey, comment, createQuery string
 	_ = d.db.QueryRowContext(ctx, `
-		SELECT engine, sorting_key, partition_key, comment, create_table_query
+		SELECT engine, engine_full, sorting_key, partition_key, comment, create_table_query
 		FROM system.tables WHERE database = ? AND name = ?
-	`, database, table).Scan(&engine, &sortingKey, &partitionKey, &comment, &createQuery)
+	`, database, table).Scan(&engine, &engineFull, &sortingKey, &partitionKey, &comment, &createQuery)
+
+	if strings.TrimSpace(createQuery) == "" {
+		qTbl := sqlbase.QualifyTable(sqlbase.DialectClickHouse, database, "", table)
+		_ = d.db.QueryRowContext(ctx, "SHOW CREATE TABLE "+qTbl).Scan(&createQuery)
+	}
 
 	st.Engine = engine
 	st.Comment = comment
 	st.DDL = createQuery
+	st.TableTTL = extractClickHouseTableTTL(engineFull, createQuery)
 	st.Options["sortingKey"] = sortingKey
 	st.Options["partitionKey"] = partitionKey
 
@@ -291,6 +460,81 @@ func (d *Driver) GetTableStructure(ctx context.Context, database, _, table strin
 			IndexType: "SPARSE_PRIMARY",
 		})
 	}
+
+	// Data skipping indices
+	hasSkipBytes := true
+	skRows, skErr := d.db.QueryContext(ctx, `
+		SELECT name, coalesce(type_full, type), expr, granularity, coalesce(data_compressed_bytes, 0)
+		FROM system.data_skipping_indices
+		WHERE database = ? AND table = ?
+		ORDER BY name
+	`, database, table)
+	if skErr != nil {
+		hasSkipBytes = false
+		skRows, skErr = d.db.QueryContext(ctx, `
+			SELECT name, type, expr, granularity
+			FROM system.data_skipping_indices
+			WHERE database = ? AND table = ?
+			ORDER BY name
+		`, database, table)
+	}
+	if skErr == nil {
+		defer skRows.Close()
+		for skRows.Next() {
+			var sName, sType, sExpr string
+			var gran, diskBytes uint64
+			var scanErr error
+			if hasSkipBytes {
+				scanErr = skRows.Scan(&sName, &sType, &sExpr, &gran, &diskBytes)
+			} else {
+				scanErr = skRows.Scan(&sName, &sType, &sExpr, &gran)
+			}
+			if scanErr == nil {
+				st.SkippingIndexes = append(st.SkippingIndexes, driver.SkippingIndexDef{
+					Name:        sName,
+					Type:        sType,
+					Expression:  sExpr,
+					Granularity: int64(gran),
+					BytesOnDisk: int64(diskBytes),
+				})
+			}
+		}
+	}
+
+	// Projections (parsed from DDL + merged with active system.projection_parts)
+	projList := parseClickHouseProjectionsFromDDL(st.DDL)
+	projIndex := make(map[string]int, len(projList))
+	for i, p := range projList {
+		projIndex[p.Name] = i
+	}
+	ppRows, ppErr := d.db.QueryContext(ctx, `
+		SELECT name, coalesce(sum(rows), 0), coalesce(sum(bytes_on_disk), 0)
+		FROM system.projection_parts
+		WHERE database = ? AND table = ? AND active = 1
+		GROUP BY name
+		ORDER BY name
+	`, database, table)
+	if ppErr == nil {
+		defer ppRows.Close()
+		for ppRows.Next() {
+			var pName string
+			var pRows, pBytes uint64
+			if ppRows.Scan(&pName, &pRows, &pBytes) == nil {
+				if idx, ok := projIndex[pName]; ok {
+					projList[idx].Rows = int64(pRows)
+					projList[idx].BytesOnDisk = int64(pBytes)
+				} else {
+					projList = append(projList, driver.ProjectionDef{
+						Name:        pName,
+						Rows:        int64(pRows),
+						BytesOnDisk: int64(pBytes),
+					})
+				}
+			}
+		}
+	}
+	st.Projections = projList
+
 	return st, rows.Err()
 }
 
@@ -329,10 +573,52 @@ func (d *Driver) ApplyRowMutations(ctx context.Context, req driver.RowMutationRe
 	return sqlbase.ApplyMutations(ctx, d.db, sqlbase.DialectClickHouse, req)
 }
 
+func (d *Driver) isRestrictedWeb() bool {
+	return d.cfg.Option("__web_mode", "") == "1" && d.cfg.Option("__restrict_internal_ip", "") == "1"
+}
+
+func (d *Driver) acquireConnForDB(ctx context.Context, database string) (*sql.Conn, func(), error) {
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defaultDB := strings.TrimSpace(d.cfg.Database)
+	if defaultDB == "" {
+		defaultDB = "default"
+	}
+	targetDB := strings.TrimSpace(database)
+	if targetDB == "" || targetDB == defaultDB {
+		return conn, func() { _ = conn.Close() }, nil
+	}
+	if _, err := conn.ExecContext(ctx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectClickHouse, targetDB)); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	cleanup := func() {
+		rCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if _, rErr := conn.ExecContext(rCtx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectClickHouse, defaultDB)); rErr != nil {
+			_ = conn.Raw(func(_ any) error { return stdsql_driver.ErrBadConn })
+		}
+		_ = conn.Close()
+	}
+	return conn, cleanup, nil
+}
+
 func (d *Driver) CreateTable(ctx context.Context, req driver.CreateTableRequest) (string, error) {
+	if d.isRestrictedWeb() {
+		if err := sqlbase.ValidateClickHouseWebEngineClause(req.Engine); err != nil {
+			return "", err
+		}
+	}
 	ddl, err := sqlbase.BuildCreateTableDDL(sqlbase.DialectClickHouse, req)
 	if err != nil {
 		return "", err
+	}
+	if d.isRestrictedWeb() {
+		if err := sqlbase.ValidateClickHouseRestrictedWebSQL(ddl); err != nil {
+			return ddl, err
+		}
 	}
 	if req.PreviewOnly {
 		return ddl, nil
@@ -341,10 +627,154 @@ func (d *Driver) CreateTable(ctx context.Context, req driver.CreateTableRequest)
 	return ddl, err
 }
 
+func buildClickHouseAlterTableSQLs(req driver.AlterTableRequest) ([]string, error) {
+	if strings.TrimSpace(req.Table) == "" {
+		return nil, errors.New("table name cannot be empty")
+	}
+	tbl := sqlbase.QualifyTable(sqlbase.DialectClickHouse, req.Database, req.Schema, req.Table)
+	var stmts []string
+
+	for _, act := range req.Actions {
+		actUpper := strings.ToUpper(strings.TrimSpace(act.Action))
+		switch actUpper {
+		case "ADD_PROJECTION":
+			pName := strings.TrimSpace(act.Projection.Name)
+			pQuery := strings.TrimSuffix(strings.TrimSpace(act.Projection.Query), ";")
+			if pName == "" || pQuery == "" {
+				return nil, errors.New("projection name and SELECT query are required")
+			}
+			if len(sqlbase.SplitStatements(pQuery)) != 1 {
+				return nil, errors.New("projection query must be a single SELECT statement")
+			}
+			if err := sqlbase.ValidateReadOnlyScript(pQuery); err != nil {
+				return nil, fmt.Errorf("invalid projection query: %w", err)
+			}
+			stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ADD PROJECTION %s (%s)",
+				tbl, sqlbase.QuoteIdent(sqlbase.DialectClickHouse, pName), pQuery))
+
+		case "DROP_PROJECTION":
+			pName := strings.TrimSpace(act.Projection.Name)
+			if pName == "" {
+				pName = strings.TrimSpace(act.OldName)
+			}
+			if pName == "" {
+				return nil, errors.New("projection name is required")
+			}
+			stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s DROP PROJECTION IF EXISTS %s",
+				tbl, sqlbase.QuoteIdent(sqlbase.DialectClickHouse, pName)))
+
+		case "MATERIALIZE_PROJECTION":
+			pName := strings.TrimSpace(act.Projection.Name)
+			if pName == "" {
+				pName = strings.TrimSpace(act.OldName)
+			}
+			if pName == "" {
+				return nil, errors.New("projection name is required")
+			}
+			stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s MATERIALIZE PROJECTION %s",
+				tbl, sqlbase.QuoteIdent(sqlbase.DialectClickHouse, pName)))
+
+		case "CLEAR_PROJECTION":
+			pName := strings.TrimSpace(act.Projection.Name)
+			if pName == "" {
+				pName = strings.TrimSpace(act.OldName)
+			}
+			if pName == "" {
+				return nil, errors.New("projection name is required")
+			}
+			stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s CLEAR PROJECTION IF EXISTS %s",
+				tbl, sqlbase.QuoteIdent(sqlbase.DialectClickHouse, pName)))
+
+		case "ADD_SKIPPING_INDEX":
+			sk := act.SkippingIndex
+			sName := strings.TrimSpace(sk.Name)
+			sExpr := strings.TrimSpace(sk.Expression)
+			sType := strings.TrimSpace(sk.Type)
+			if sName == "" || sExpr == "" || sType == "" {
+				return nil, errors.New("skipping index name, expression, and type are required")
+			}
+			if err := sqlbase.ValidateSQLExpression("skipping index expression", sExpr); err != nil {
+				return nil, err
+			}
+			if err := sqlbase.ValidateSQLExpression("skipping index type", sType); err != nil {
+				return nil, err
+			}
+			gran := sk.Granularity
+			if gran <= 0 {
+				gran = 1
+			}
+			stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ADD INDEX %s (%s) TYPE %s GRANULARITY %d",
+				tbl, sqlbase.QuoteIdent(sqlbase.DialectClickHouse, sName), sExpr, sType, gran))
+
+		case "DROP_SKIPPING_INDEX":
+			sName := strings.TrimSpace(act.SkippingIndex.Name)
+			if sName == "" {
+				sName = strings.TrimSpace(act.OldName)
+			}
+			if sName == "" {
+				return nil, errors.New("skipping index name is required")
+			}
+			stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s DROP INDEX IF EXISTS %s",
+				tbl, sqlbase.QuoteIdent(sqlbase.DialectClickHouse, sName)))
+
+		case "MATERIALIZE_SKIPPING_INDEX":
+			sName := strings.TrimSpace(act.SkippingIndex.Name)
+			if sName == "" {
+				sName = strings.TrimSpace(act.OldName)
+			}
+			if sName == "" {
+				return nil, errors.New("skipping index name is required")
+			}
+			stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s MATERIALIZE INDEX %s",
+				tbl, sqlbase.QuoteIdent(sqlbase.DialectClickHouse, sName)))
+
+		case "CLEAR_SKIPPING_INDEX":
+			sName := strings.TrimSpace(act.SkippingIndex.Name)
+			if sName == "" {
+				sName = strings.TrimSpace(act.OldName)
+			}
+			if sName == "" {
+				return nil, errors.New("skipping index name is required")
+			}
+			stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s CLEAR INDEX IF EXISTS %s",
+				tbl, sqlbase.QuoteIdent(sqlbase.DialectClickHouse, sName)))
+
+		case "MODIFY_TTL":
+			if err := sqlbase.ValidateSQLExpression("table TTL expression", act.TTLExpr); err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s MODIFY TTL %s", tbl, strings.TrimSpace(act.TTLExpr)))
+
+		case "REMOVE_TTL":
+			stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s REMOVE TTL", tbl))
+
+		default:
+			subStmts, err := sqlbase.BuildAlterTableSQLs(sqlbase.DialectClickHouse, driver.AlterTableRequest{
+				Database: req.Database,
+				Schema:   req.Schema,
+				Table:    req.Table,
+				Actions:  []driver.AlterAction{act},
+			})
+			if err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, subStmts...)
+		}
+	}
+	return stmts, nil
+}
+
 func (d *Driver) AlterTable(ctx context.Context, req driver.AlterTableRequest) ([]string, error) {
-	stmts, err := sqlbase.BuildAlterTableSQLs(sqlbase.DialectClickHouse, req)
+	stmts, err := buildClickHouseAlterTableSQLs(req)
 	if err != nil {
 		return nil, err
+	}
+	if d.isRestrictedWeb() {
+		for _, s := range stmts {
+			if err := sqlbase.ValidateClickHouseRestrictedWebSQL(s); err != nil {
+				return stmts, err
+			}
+		}
 	}
 	if req.PreviewOnly {
 		return stmts, nil
@@ -362,6 +792,13 @@ func (d *Driver) ManageObject(ctx context.Context, req driver.ObjectActionReques
 	if err != nil {
 		return err
 	}
+	if d.isRestrictedWeb() {
+		for _, s := range sqls {
+			if err := sqlbase.ValidateClickHouseRestrictedWebSQL(s); err != nil {
+				return err
+			}
+		}
+	}
 	for _, s := range sqls {
 		if _, err := d.db.ExecContext(ctx, s); err != nil {
 			return err
@@ -371,22 +808,18 @@ func (d *Driver) ManageObject(ctx context.Context, req driver.ObjectActionReques
 }
 
 func (d *Driver) ExecuteSQL(ctx context.Context, database, query string, maxRows int) ([]driver.QueryResult, error) {
-	if database != "" {
-		conn, cErr := d.db.Conn(ctx)
-		if cErr == nil {
-			defer func() {
-				defaultDB := d.cfg.Database
-				if defaultDB == "" {
-					defaultDB = "default"
-				}
-				if defaultDB != database {
-					_, _ = conn.ExecContext(context.Background(), "USE "+sqlbase.QuoteIdent(sqlbase.DialectClickHouse, defaultDB))
-				}
-				_ = conn.Close()
-			}()
-			_, _ = conn.ExecContext(ctx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectClickHouse, database))
-			return sqlbase.ExecuteMultiSQLConn(ctx, conn, query, maxRows)
+	if d.isRestrictedWeb() {
+		if err := sqlbase.ValidateClickHouseRestrictedWebSQL(query); err != nil {
+			return nil, err
 		}
+	}
+	if strings.TrimSpace(database) != "" {
+		conn, release, cErr := d.acquireConnForDB(ctx, database)
+		if cErr != nil {
+			return nil, cErr
+		}
+		defer release()
+		return sqlbase.ExecuteMultiSQLConn(ctx, conn, query, maxRows)
 	}
 	return sqlbase.ExecuteMultiSQL(ctx, d.db, query, maxRows)
 }
@@ -425,6 +858,16 @@ func (d *Driver) StreamExport(ctx context.Context, req driver.ExportRequest, w i
 }
 
 func (d *Driver) BatchImport(ctx context.Context, req driver.ImportRequest) (driver.ImportResult, error) {
+	if d.isRestrictedWeb() && (strings.TrimSpace(req.Format) == "" || strings.EqualFold(strings.TrimSpace(req.Format), "sql")) && req.Reader != nil {
+		raw, err := io.ReadAll(req.Reader)
+		if err != nil {
+			return driver.ImportResult{}, err
+		}
+		if err := sqlbase.ValidateClickHouseRestrictedWebSQL(string(raw)); err != nil {
+			return driver.ImportResult{}, err
+		}
+		req.Reader = bytes.NewReader(raw)
+	}
 	return sqlbase.BatchImport(ctx, d.db, sqlbase.DialectClickHouse, req)
 }
 
@@ -453,7 +896,7 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 }
 
 // PartitionManager implementation for ClickHouse
-func (d *Driver) ListPartitions(ctx context.Context, database, table string) ([]driver.PartitionInfo, error) {
+func (d *Driver) ListPartitions(ctx context.Context, database, schema, table string) ([]driver.PartitionInfo, error) {
 	if database == "" {
 		database = "default"
 	}
@@ -474,7 +917,7 @@ func (d *Driver) ListPartitions(ctx context.Context, database, table string) ([]
 	}
 	defer rows.Close()
 
-	var list []driver.PartitionInfo
+	list := []driver.PartitionInfo{}
 	for rows.Next() {
 		var pid, pname string
 		var rCnt, bCnt, pCnt uint64
@@ -490,31 +933,77 @@ func (d *Driver) ListPartitions(ctx context.Context, database, table string) ([]
 			Active:      true,
 		})
 	}
-	if list == nil {
-		list = []driver.PartitionInfo{}
+	if err := rows.Err(); err != nil {
+		return list, err
 	}
+
+	// Detached partitions from system.detached_parts so UI can ATTACH or DROP DETACHED them
+	hasDetachedBytes := true
+	dRows, dErr := d.db.QueryContext(ctx, `
+		SELECT coalesce(partition_id, ''), count() AS parts_cnt, coalesce(sum(bytes_on_disk), 0) AS disk_bytes
+		FROM system.detached_parts
+		WHERE database = ? AND table = ? AND partition_id != ''
+		GROUP BY partition_id
+		ORDER BY partition_id DESC
+	`, database, table)
+	if dErr != nil {
+		hasDetachedBytes = false
+		dRows, dErr = d.db.QueryContext(ctx, `
+			SELECT coalesce(partition_id, ''), count() AS parts_cnt
+			FROM system.detached_parts
+			WHERE database = ? AND table = ? AND partition_id != ''
+			GROUP BY partition_id
+			ORDER BY partition_id DESC
+		`, database, table)
+	}
+	if dErr == nil {
+		defer dRows.Close()
+		for dRows.Next() {
+			var pid string
+			var pCnt, bCnt uint64
+			var scanErr error
+			if hasDetachedBytes {
+				scanErr = dRows.Scan(&pid, &pCnt, &bCnt)
+			} else {
+				scanErr = dRows.Scan(&pid, &pCnt)
+			}
+			if scanErr == nil && pid != "" {
+				list = append(list, driver.PartitionInfo{
+					ID:          pid,
+					Name:        pid,
+					BytesOnDisk: int64(bCnt),
+					PartsCount:  int64(pCnt),
+					Active:      false,
+					Detached:    true,
+				})
+			}
+		}
+	}
+
 	return list, nil
 }
 
-func (d *Driver) ManagePartition(ctx context.Context, database, table, partitionID, action string) error {
-	tbl := sqlbase.QualifyTable(sqlbase.DialectClickHouse, database, "", table)
-	safeID := sqlbase.FormatLiteralForDialect(sqlbase.DialectClickHouse, partitionID)
-	switch strings.ToUpper(action) {
+func (d *Driver) ManagePartition(ctx context.Context, req driver.PartitionActionRequest) (string, error) {
+	tbl := sqlbase.QualifyTable(sqlbase.DialectClickHouse, req.Database, req.Schema, req.Table)
+	safeID := sqlbase.FormatLiteralForDialect(sqlbase.DialectClickHouse, req.PartitionID)
+	var stmt string
+	switch strings.ToUpper(req.Action) {
 	case "DROP":
-		_, err := d.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s DROP PARTITION ID %s", tbl, safeID))
-		return err
+		stmt = fmt.Sprintf("ALTER TABLE %s DROP PARTITION ID %s", tbl, safeID)
 	case "DETACH":
-		_, err := d.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s DETACH PARTITION ID %s", tbl, safeID))
-		return err
+		stmt = fmt.Sprintf("ALTER TABLE %s DETACH PARTITION ID %s", tbl, safeID)
 	case "ATTACH":
-		_, err := d.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ATTACH PARTITION ID %s", tbl, safeID))
-		return err
+		stmt = fmt.Sprintf("ALTER TABLE %s ATTACH PARTITION ID %s", tbl, safeID)
 	case "OPTIMIZE":
-		_, err := d.db.ExecContext(ctx, fmt.Sprintf("OPTIMIZE TABLE %s PARTITION ID %s FINAL", tbl, safeID))
-		return err
+		stmt = fmt.Sprintf("OPTIMIZE TABLE %s PARTITION ID %s FINAL", tbl, safeID)
 	default:
-		return fmt.Errorf("unsupported partition action: %s", action)
+		return "", fmt.Errorf("unsupported partition action: %s", req.Action)
 	}
+	if req.PreviewOnly {
+		return stmt, nil
+	}
+	_, err := d.db.ExecContext(ctx, stmt)
+	return stmt, err
 }
 
 // MonitorProvider implementation

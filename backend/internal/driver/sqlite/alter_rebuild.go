@@ -30,10 +30,13 @@ func (d *SQLiteDriver) needsTableRebuild(ctx context.Context, req driver.AlterTa
 
 	for _, act := range req.Actions {
 		switch strings.ToUpper(strings.TrimSpace(act.Action)) {
-		case "MODIFY_COLUMN", "ADD_FOREIGN_KEY", "DROP_FOREIGN_KEY":
+		case "MODIFY_COLUMN", "ADD_FOREIGN_KEY", "DROP_FOREIGN_KEY", "ADD_CHECK", "DROP_CHECK":
 			return true
 		case "ADD_COLUMN":
 			if act.Column.IsPrimaryKey || strings.TrimSpace(act.AfterColumn) != "" {
+				return true
+			}
+			if strings.TrimSpace(act.Column.GeneratedExpr) != "" && strings.EqualFold(strings.TrimSpace(act.Column.GeneratedStorage), "STORED") {
 				return true
 			}
 		case "DROP_COLUMN":
@@ -90,6 +93,10 @@ func (d *SQLiteDriver) alterTableWithRebuild(ctx context.Context, req driver.Alt
 	if err != nil {
 		return nil, fmt.Errorf("failed to read current table structure: %w", err)
 	}
+	ddlMeta := parseSQLiteDDLMetadata(req.Table, st.DDL)
+	if ddlMeta.isVirtual || strings.HasPrefix(strings.ToUpper(st.Engine), "VIRTUAL") {
+		return nil, fmt.Errorf("SQLite virtual table %q (%s) does not support column or constraint rebuild; drop and recreate the virtual table instead", req.Table, st.Engine)
+	}
 	if len(st.Columns) == 0 {
 		return nil, fmt.Errorf("table %s not found or has no columns", req.Table)
 	}
@@ -125,6 +132,15 @@ func (d *SQLiteDriver) alterTableWithRebuild(ctx context.Context, req driver.Alt
 			RefColumns: append([]string(nil), fk.RefColumns...),
 			OnUpdate:   fk.OnUpdate,
 			OnDelete:   fk.OnDelete,
+		})
+	}
+
+	checks := make([]driver.CheckConstraintDef, 0, len(st.CheckConstraints))
+	for _, chk := range st.CheckConstraints {
+		checks = append(checks, driver.CheckConstraintDef{
+			Name:       chk.Name,
+			Expression: chk.Expression,
+			Enforced:   true,
 		})
 	}
 
@@ -347,6 +363,39 @@ func (d *SQLiteDriver) alterTableWithRebuild(ctx context.Context, req driver.Alt
 			}
 			fks = filtered
 
+		case "ADD_CHECK":
+			chk := act.Check
+			if err := sqlbase.ValidateSQLExpression("CHECK constraint expression", chk.Expression); err != nil {
+				return nil, err
+			}
+			if strings.TrimSpace(chk.Name) == "" {
+				chk.Name = fmt.Sprintf("chk_%s_%d", finalTable, len(checks)+1)
+			}
+			chk.Enforced = true
+			checks = append(checks, chk)
+
+		case "DROP_CHECK":
+			targetChk := strings.TrimSpace(act.Check.Name)
+			if targetChk == "" {
+				targetChk = strings.TrimSpace(act.OldName)
+			}
+			if targetChk == "" {
+				return nil, errors.New("check constraint name cannot be empty")
+			}
+			filtered := make([]driver.CheckConstraintDef, 0, len(checks))
+			removedChk := false
+			for _, chk := range checks {
+				if strings.EqualFold(chk.Name, targetChk) {
+					removedChk = true
+					continue
+				}
+				filtered = append(filtered, chk)
+			}
+			if !removedChk {
+				return nil, fmt.Errorf("check constraint not found: %s", targetChk)
+			}
+			checks = filtered
+
 		case "RENAME_TABLE":
 			if strings.TrimSpace(act.NewName) == "" {
 				return nil, errors.New("new table name cannot be empty")
@@ -365,21 +414,37 @@ func (d *SQLiteDriver) alterTableWithRebuild(ctx context.Context, req driver.Alt
 	}
 
 	colDefs := make([]driver.ColumnDef, len(cols))
-	destCols := make([]string, len(cols))
-	srcExprs := make([]string, len(cols))
+	destCols := make([]string, 0, len(cols))
+	srcExprs := make([]string, 0, len(cols))
 	for i, rc := range cols {
 		colDefs[i] = rc.def
-		destCols[i] = sqlbase.QuoteIdent(sqlbase.DialectSQLite, rc.def.Name)
-		srcExprs[i] = rc.srcExpr
+		if strings.TrimSpace(rc.def.GeneratedExpr) != "" {
+			// Generated columns (VIRTUAL or STORED) cannot be targeted by INSERT column lists;
+			// SQLite automatically recomputes them from colDefs in the rebuilt table.
+			continue
+		}
+		destCols = append(destCols, sqlbase.QuoteIdent(sqlbase.DialectSQLite, rc.def.Name))
+		srcExprs = append(srcExprs, rc.srcExpr)
+	}
+	if len(destCols) == 0 {
+		return nil, errors.New("SQLite table must contain at least one non-generated column")
 	}
 
 	createTmpDDL, err := sqlbase.BuildCreateTableDDL(sqlbase.DialectSQLite, driver.CreateTableRequest{
-		Table:       tmpTable,
-		Columns:     colDefs,
-		ForeignKeys: fks,
+		Table:            tmpTable,
+		Columns:          colDefs,
+		ForeignKeys:      fks,
+		CheckConstraints: checks,
+		Strict:           ddlMeta.strict,
+		WithoutRowID:     ddlMeta.withoutRowID,
 	})
 	if err != nil {
 		return nil, err
+	}
+	if d.webMode {
+		if sbErr := validateSQLiteWebSandbox(createTmpDDL); sbErr != nil {
+			return nil, sbErr
+		}
 	}
 
 	qOrig := sqlbase.QuoteIdent(sqlbase.DialectSQLite, req.Table)

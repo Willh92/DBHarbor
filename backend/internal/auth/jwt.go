@@ -17,6 +17,8 @@ const (
 	PurposeSession      = "session"
 	Purpose2FAChallenge = "2fa_challenge"
 	PurposeExportTicket = "export_ticket"
+
+	maxTokenMapEntries = 16384
 )
 
 var jwtHeaderB64 = base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
@@ -76,12 +78,14 @@ func (tm *TokenManager) Record2FAChallengeAttempt(tokenStr string, succeeded boo
 	}
 	if succeeded {
 		tm.usedTickets[sig] = nowUnix + 600
+		pruneUnixExpMap(tm.usedTickets, nowUnix, maxTokenMapEntries)
 		delete(tm.challengeFails, sig)
 		return false
 	}
 	tm.challengeFails[sig]++
 	if tm.challengeFails[sig] >= 5 {
 		tm.usedTickets[sig] = nowUnix + 600
+		pruneUnixExpMap(tm.usedTickets, nowUnix, maxTokenMapEntries)
 		delete(tm.challengeFails, sig)
 		return true
 	}
@@ -118,30 +122,19 @@ func (tm *TokenManager) RevokeSessionInMemory(sessionID string, expUnix int64) {
 	if sessionID == "" {
 		return
 	}
+	nowUnix := time.Now().Unix()
 	if expUnix <= 0 {
 		expUnix = time.Now().Add(8 * 24 * time.Hour).Unix()
 	}
 	tm.mu.Lock()
-	tm.pruneLocked(time.Now().Unix())
 	tm.revokedSessions[sessionID] = expUnix
+	tm.pruneLocked(nowUnix)
 	tm.mu.Unlock()
 }
 
 func (tm *TokenManager) pruneLocked(nowUnix int64) {
-	if len(tm.revokedSessions) > 512 {
-		for k, exp := range tm.revokedSessions {
-			if exp < nowUnix {
-				delete(tm.revokedSessions, k)
-			}
-		}
-	}
-	if len(tm.usedTickets) > 512 {
-		for k, exp := range tm.usedTickets {
-			if exp < nowUnix {
-				delete(tm.usedTickets, k)
-			}
-		}
-	}
+	pruneUnixExpMap(tm.revokedSessions, nowUnix, maxTokenMapEntries)
+	pruneUnixExpMap(tm.usedTickets, nowUnix, maxTokenMapEntries)
 }
 
 // IssueToken issues a standard session JWT (compatible helper).
@@ -256,8 +249,8 @@ func (tm *TokenManager) ParseTokenWithPurpose(tokenStr, expectedPurpose string) 
 			tm.mu.Unlock()
 			return nil, errors.New("single-use export ticket has already been used or expired")
 		}
-		tm.pruneLocked(now)
 		tm.usedTickets[parts[2]] = claims.ExpiresAt
+		tm.pruneLocked(now)
 		tm.mu.Unlock()
 	}
 

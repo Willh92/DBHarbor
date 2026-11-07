@@ -1,8 +1,40 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 
+const DIFF_STUB_ID = '\0virtual:monaco-diff-stub';
+const MULTI_DIFF_STUB_ID = '\0virtual:monaco-multi-diff-stub';
+
+function monacoDiffStubPlugin(): Plugin {
+  return {
+    name: 'monaco-diff-stub',
+    enforce: 'pre',
+    resolveId(source) {
+      const norm = source.replace(/\\/g, '/');
+      if (norm.endsWith('/widget/diffEditor/diffEditorWidget.js') || norm.endsWith('/diffEditorWidget.js')) {
+        return DIFF_STUB_ID;
+      }
+      if (
+        norm.endsWith('/widget/multiDiffEditor/multiDiffEditorWidget.js') ||
+        norm.endsWith('/multiDiffEditorWidget.js')
+      ) {
+        return MULTI_DIFF_STUB_ID;
+      }
+      return null;
+    },
+    load(id) {
+      if (id === DIFF_STUB_ID) {
+        return 'export class DiffEditorWidget { dispose() {} }';
+      }
+      if (id === MULTI_DIFF_STUB_ID) {
+        return 'export class MultiDiffEditorWidget { dispose() {} }';
+      }
+      return null;
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [monacoDiffStubPlugin(), react()],
   esbuild: {
     legalComments: 'none',
     drop: ['debugger'],
@@ -28,22 +60,17 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes('preload-helper') || id.includes('commonjsHelpers')) {
+          const norm = id.replace(/\\/g, '/');
+          if (norm.includes('preload-helper') || norm.includes('commonjsHelpers')) {
             return 'vendor-react';
           }
-          if (id.includes('node_modules/monaco-editor') || id.includes('node_modules/@monaco-editor')) {
+          if (norm.includes('node_modules/monaco-editor') || norm.includes('node_modules/@monaco-editor')) {
             return 'vendor-monaco';
           }
-          if (id.includes('node_modules/antd/es/locale/') || id.includes('node_modules/antd/locale/')) {
-            return undefined;
-          }
-          if (id.includes('@ant-design/icons-svg')) {
+          if (norm.includes('@ant-design/icons-svg')) {
             return 'vendor-icons';
           }
-          if (id.includes('node_modules/antd') || id.includes('node_modules/@ant-design') || id.includes('node_modules/rc-')) {
-            return 'vendor-antd';
-          }
-          if (id.includes('node_modules/react') || id.includes('node_modules/zustand')) {
+          if (norm.includes('node_modules/react') || norm.includes('node_modules/scheduler') || norm.includes('node_modules/zustand')) {
             return 'vendor-react';
           }
         },

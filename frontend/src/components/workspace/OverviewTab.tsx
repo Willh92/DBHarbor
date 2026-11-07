@@ -1,4 +1,4 @@
-import React, { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
 import {
   Button,
   Card,
@@ -11,6 +11,7 @@ import {
   Radio,
   Row,
   Segmented,
+  Select,
   Space,
   Statistic,
   Tag,
@@ -19,21 +20,23 @@ import {
   message,
 } from 'antd';
 import {
+  CheckCircleOutlined,
   ClearOutlined,
   CodeOutlined,
   CopyOutlined,
   DeleteOutlined,
+  DownOutlined,
   DownloadOutlined,
   EditOutlined,
-  EyeOutlined,
-  FunctionOutlined,
   MoreOutlined,
+  PauseCircleOutlined,
+  PlayCircleOutlined,
   PlaySquareOutlined,
   PlusOutlined,
   ReloadOutlined,
   SearchOutlined,
+  SyncOutlined,
   TableOutlined,
-  ThunderboltOutlined,
   ToolOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
@@ -41,15 +44,13 @@ import { api } from '../../api/client';
 import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
-import type { ObjectItem, WorkspaceTab } from '../../types';
+import type { ObjectItem, ObjectSpec, WorkspaceTab } from '../../types';
 import { formatBytes } from '../../utils/format';
 import { ResizableTable, calcSmartColumnWidth } from '../common/ResizableTable';
 import { ContextNavBar, type TransferModalMode, type TransferOpenOptions } from './ContextNavBar';
-import {
-  ROUTINE_CAPABLE_ENGINES,
-  RoutineTriggerModal,
-  TRIGGER_CAPABLE_ENGINES,
-} from './RoutineTriggerModal';
+import type { SchemaObjectType } from './SchemaObjectModal';
+
+const LazySchemaObjectModal = React.lazy(() => import('./SchemaObjectModal'));
 
 interface Props {
   tab: WorkspaceTab;
@@ -57,32 +58,58 @@ interface Props {
   onOpenTransfer: (mode: TransferModalMode, tableName?: string, opts?: TransferOpenOptions) => void;
 }
 
+type CategoryFilterKey =
+  | 'ALL'
+  | 'TABLE'
+  | 'VIEW'
+  | 'MATERIALIZED_VIEW'
+  | 'ROUTINE'
+  | 'TRIGGER'
+  | 'SEQUENCE'
+  | 'EVENT'
+  | 'PACKAGE'
+  | 'TYPE'
+  | 'SYNONYM'
+  | 'EXTENSION'
+  | 'DICTIONARY'
+  | 'DB_LINK'
+  | 'MACRO';
+
+function getCategoryForType(tp: string): CategoryFilterKey {
+  const up = (tp || 'TABLE').toUpperCase();
+  if (up === 'FUNCTION' || up === 'PROCEDURE') return 'ROUTINE';
+  if (up === 'PACKAGE_BODY') return 'PACKAGE';
+  if (up === 'TABLE_MACRO') return 'MACRO';
+  return (up as CategoryFilterKey) || 'TABLE';
+}
+
 export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable, onOpenTransfer }) => {
-  const { openTab, bumpTreeRefresh, treeRefreshTick, isDesktop, role } = useWorkbenchStore();
+  const { openTab, drivers, bumpTreeRefresh, treeRefreshTick, isDesktop, role } = useWorkbenchStore();
   const { isMobile } = useResponsive();
   const { t } = useI18n();
   const canWrite = isDesktop || role !== 'readonly';
-  const supportsRoutines = ROUTINE_CAPABLE_ENGINES.has(tab.dbType);
-  const supportsTriggers = TRIGGER_CAPABLE_ENGINES.has(tab.dbType);
+  const driverMeta = useMemo(() => drivers.find((d) => d.type === tab.dbType), [drivers, tab.dbType]);
 
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<ObjectItem[]>([]);
+  const [availableExtensions, setAvailableExtensions] = useState<ObjectItem[]>([]);
   const [filter, setFilter] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState<'ALL' | 'TABLE' | 'VIEW' | 'ROUTINE' | 'TRIGGER'>('ALL');
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilterKey>('ALL');
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
   const [batchRunning, setBatchRunning] = useState(false);
 
-  // Create / Edit View Modal
-  const [viewModalOpen, setViewModalOpen] = useState(false);
-  const [viewForm] = Form.useForm();
-  const [viewSaving, setViewSaving] = useState(false);
-
-  // Create / Edit Routine or Trigger Modal
-  const [rtModal, setRtModal] = useState<{
+  // Unified SchemaObjectModal state
+  const [schemaModal, setSchemaModal] = useState<{
     open: boolean;
-    mode: 'routine' | 'trigger';
-    editObject: { name: string; objectType: 'PROCEDURE' | 'FUNCTION' | 'TRIGGER' } | null;
-  }>({ open: false, mode: 'routine', editObject: null });
+    mode: 'create' | 'edit';
+    initialType: SchemaObjectType | string;
+    editObject: ObjectItem | null;
+  }>({
+    open: false,
+    mode: 'create',
+    initialType: 'VIEW',
+    editObject: null,
+  });
 
   // Clone / Rename Table Modal
   const [cloneTarget, setCloneTarget] = useState<ObjectItem | null>(null);
@@ -97,11 +124,27 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
     setLoading(true);
     try {
       const res = await api.listObjects(tab.connectionId, tab.database, tab.schema || '');
-      const merged = [
-        ...(res.tables || []),
-        ...(res.views || []),
-        ...(res.routines || []),
-        ...(res.triggers || []),
+      const allExts = res.extensions || [];
+      setAvailableExtensions(allExts);
+      const installedExts = allExts
+        .filter((ext) => ext.status?.toUpperCase() !== 'AVAILABLE' && ext.extra?.installed !== 'false')
+        .map((x) => ({ ...x, type: x.type || 'EXTENSION' }));
+
+      const merged: ObjectItem[] = [
+        ...(res.tables || []).map((x) => ({ ...x, type: x.type || 'TABLE' })),
+        ...(res.views || []).map((x) => ({ ...x, type: x.type || 'VIEW' })),
+        ...(res.materializedViews || []).map((x) => ({ ...x, type: x.type || 'MATERIALIZED_VIEW' })),
+        ...(res.routines || []).map((x) => ({ ...x, type: x.type || 'FUNCTION' })),
+        ...(res.triggers || []).map((x) => ({ ...x, type: x.type || 'TRIGGER' })),
+        ...(res.sequences || []).map((x) => ({ ...x, type: x.type || 'SEQUENCE' })),
+        ...(res.events || []).map((x) => ({ ...x, type: x.type || 'EVENT' })),
+        ...(res.packages || []).map((x) => ({ ...x, type: x.type || 'PACKAGE' })),
+        ...(res.types || []).map((x) => ({ ...x, type: x.type || 'TYPE' })),
+        ...(res.synonyms || []).map((x) => ({ ...x, type: x.type || 'SYNONYM' })),
+        ...installedExts,
+        ...(res.dictionaries || []).map((x) => ({ ...x, type: x.type || 'DICTIONARY' })),
+        ...(res.dbLinks || []).map((x) => ({ ...x, type: x.type || 'DB_LINK' })),
+        ...(res.macros || []).map((x) => ({ ...x, type: x.type || 'MACRO' })),
       ];
       setItems(merged);
       setSelectedKeys([]);
@@ -113,18 +156,24 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
   }, [tab.connectionId, tab.database, tab.schema]);
 
   useEffect(() => {
-    loadOverview();
+    setSelectedKeys([]);
+  }, [tab.connectionId, tab.database, tab.schema]);
+
+  useEffect(() => {
+    void loadOverview();
   }, [loadOverview, treeRefreshTick]);
 
   const handleAction = useCallback(
-    async (record: ObjectItem, action: 'TRUNCATE' | 'DROP' | 'OPTIMIZE' | 'ANALYZE') => {
+    async (record: ObjectItem, action: string, spec?: ObjectSpec) => {
       try {
         await api.objectAction(tab.connectionId, {
           database: tab.database,
           schema: tab.schema,
           objectName: record.name,
           objectType: record.type,
+          targetName: record.targetName || undefined,
           action,
+          spec,
         });
         message.success(t('Executed {action} on {name}', { action, name: record.name }));
         bumpTreeRefresh();
@@ -155,41 +204,6 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
     }
   };
 
-  const openEditView = async (vw: ObjectItem) => {
-    viewForm.setFieldsValue({ viewName: vw.name, viewSQL: '' });
-    setViewModalOpen(true);
-    try {
-      const res = await api.getObjectDDL(tab.connectionId, tab.database, tab.schema || '', 'VIEW', vw.name);
-      viewForm.setFieldsValue({ viewName: vw.name, viewSQL: res.ddl });
-    } catch (err: any) {
-      message.warning(err.message);
-    }
-  };
-
-  const handleCreateView = async () => {
-    try {
-      const vals = await viewForm.validateFields();
-      setViewSaving(true);
-      await api.objectAction(tab.connectionId, {
-        database: tab.database,
-        schema: tab.schema,
-        objectName: vals.viewName.trim(),
-        objectType: 'VIEW',
-        action: 'CREATE_VIEW',
-        viewSql: vals.viewSQL.trim(),
-      });
-      message.success(t('View {name} saved successfully', { name: vals.viewName }));
-      setViewModalOpen(false);
-      viewForm.resetFields();
-      bumpTreeRefresh();
-      await loadOverview();
-    } catch (err: any) {
-      if (!err?.errorFields) message.error(err.message);
-    } finally {
-      setViewSaving(false);
-    }
-  };
-
   const handleCloneOrRename = async () => {
     if (!cloneTarget) return;
     try {
@@ -216,32 +230,21 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
   };
 
   const deferredFilter = useDeferredValue(filter);
-  const {
-    totalTables,
-    totalViews,
-    totalRoutines,
-    totalTriggers,
-    totalRows,
-    totalSize,
-    tableNames,
-  } = useMemo(() => {
+  const { totalTables, totalViews, totalRows, totalSize, tableNames, categoryCounts } = useMemo(() => {
     let tbls = 0;
     let vws = 0;
-    let rts = 0;
-    let trgs = 0;
     let rws = 0;
     let sz = 0;
     const tNames: string[] = [];
+    const counts: Partial<Record<CategoryFilterKey, number>> = {};
     for (const i of items) {
+      const cat = getCategoryForType(i.type);
+      counts[cat] = (counts[cat] || 0) + 1;
       if (i.type === 'TABLE') {
         tbls++;
         tNames.push(i.name);
-      } else if (i.type === 'VIEW') {
+      } else if (i.type === 'VIEW' || i.type === 'MATERIALIZED_VIEW') {
         vws++;
-      } else if (i.type === 'PROCEDURE' || i.type === 'FUNCTION') {
-        rts++;
-      } else if (i.type === 'TRIGGER') {
-        trgs++;
       }
       rws += i.rows || 0;
       sz += (i.dataBytes || 0) + (i.indexBytes || 0);
@@ -249,30 +252,96 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
     return {
       totalTables: tbls,
       totalViews: vws,
-      totalRoutines: rts,
-      totalTriggers: trgs,
       totalRows: rws,
       totalSize: sz,
       tableNames: tNames,
+      categoryCounts: counts,
     };
   }, [items]);
+
+  const categoryOptions = useMemo(() => {
+    const defs: { key: CategoryFilterKey; label: string; always?: boolean }[] = [
+      { key: 'TABLE', label: t('Tables'), always: true },
+      { key: 'VIEW', label: t('Views') },
+      { key: 'MATERIALIZED_VIEW', label: t('Materialized Views') },
+      { key: 'ROUTINE', label: t('Routines') },
+      { key: 'TRIGGER', label: t('Triggers') },
+      { key: 'SEQUENCE', label: t('Sequences') },
+      { key: 'EVENT', label: t('Events') },
+      { key: 'PACKAGE', label: t('Packages') },
+      { key: 'TYPE', label: t('Types') },
+      { key: 'SYNONYM', label: t('Synonyms') },
+      { key: 'EXTENSION', label: t('Extensions') },
+      { key: 'DICTIONARY', label: t('Dictionaries') },
+      { key: 'DB_LINK', label: t('DB Links') },
+      { key: 'MACRO', label: t('Macros') },
+    ];
+    const opts: { value: CategoryFilterKey; label: string }[] = [
+      { value: 'ALL', label: `${t('All')} (${items.length})` },
+    ];
+    for (const d of defs) {
+      const cnt = categoryCounts[d.key] || 0;
+      if (d.always || cnt > 0) {
+        opts.push({ value: d.key, label: `${d.label} (${cnt})` });
+      }
+    }
+    return opts;
+  }, [items.length, categoryCounts, t]);
+
+  const creatableMenuItems = useMemo(() => {
+    const capTypes = (driverMeta?.capabilities?.objectTypes || ['VIEW']).filter((tp) => tp !== 'TABLE');
+    const labels: Record<string, string> = {
+      VIEW: t('New View'),
+      MATERIALIZED_VIEW: t('New Materialized View'),
+      SEQUENCE: t('New Sequence'),
+      FUNCTION: t('New Function'),
+      PROCEDURE: t('New Procedure'),
+      TRIGGER: t('New Trigger'),
+      EVENT: t('New Scheduled Event'),
+      TYPE: t('New Custom Type'),
+      EXTENSION: t('Install Extension'),
+      PACKAGE: t('New Package'),
+      SYNONYM: t('New Synonym'),
+      DB_LINK: t('New Database Link'),
+      DICTIONARY: t('New Dictionary'),
+      MACRO: t('New Macro'),
+    };
+    return capTypes
+      .filter((tp) => Boolean(labels[tp]))
+      .map((tp) => ({
+        key: tp,
+        icon: <PlusOutlined />,
+        label: labels[tp] || tp,
+        onClick: () =>
+          setSchemaModal({
+            open: true,
+            mode: 'create',
+            initialType: tp,
+            editObject: null,
+          }),
+      }));
+  }, [driverMeta, t]);
 
   const filtered = useMemo(() => {
     const q = deferredFilter.trim().toLowerCase();
     return items.filter((i) => {
-      if (categoryFilter === 'TABLE' && i.type !== 'TABLE') return false;
-      if (categoryFilter === 'VIEW' && i.type !== 'VIEW') return false;
-      if (categoryFilter === 'ROUTINE' && i.type !== 'PROCEDURE' && i.type !== 'FUNCTION') return false;
-      if (categoryFilter === 'TRIGGER' && i.type !== 'TRIGGER') return false;
+      if (categoryFilter !== 'ALL' && getCategoryForType(i.type) !== categoryFilter) {
+        return false;
+      }
       return q ? i.name.toLowerCase().includes(q) : true;
     });
   }, [items, deferredFilter, categoryFilter]);
 
+  const makeRowKey = useCallback(
+    (r: ObjectItem) => `${r.type}:${r.targetName || ''}:${r.name}`,
+    []
+  );
+
   const selectedObjects = useMemo(() => {
     if (selectedKeys.length === 0) return [];
     const keySet = new Set(selectedKeys.map(String));
-    return items.filter((item) => keySet.has(`${item.type}:${item.name}`));
-  }, [items, selectedKeys]);
+    return items.filter((item) => keySet.has(makeRowKey(item)));
+  }, [items, selectedKeys, makeRowKey]);
 
   const selectedTableNames = useMemo(
     () => selectedObjects.filter((o) => o.type === 'TABLE').map((o) => o.name),
@@ -291,6 +360,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
           schema: tab.schema,
           objectName: obj.name,
           objectType: obj.type,
+          targetName: obj.targetName || undefined,
           action,
         });
         succeeded++;
@@ -309,12 +379,13 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
     }
   };
 
-  const openRoutineOrTrigger = useCallback((r: ObjectItem) => {
-    if (r.type === 'TRIGGER') {
-      setRtModal({ open: true, mode: 'trigger', editObject: { name: r.name, objectType: 'TRIGGER' } });
-    } else if (r.type === 'PROCEDURE' || r.type === 'FUNCTION') {
-      setRtModal({ open: true, mode: 'routine', editObject: { name: r.name, objectType: r.type } });
-    }
+  const openObjectEditor = useCallback((r: ObjectItem) => {
+    setSchemaModal({
+      open: true,
+      mode: 'edit',
+      initialType: r.type,
+      editObject: r,
+    });
   }, []);
 
   const overviewColumns = useMemo(
@@ -322,18 +393,24 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
       {
         title: t('Object Name'),
         dataIndex: 'name',
-        width: calcSmartColumnWidth(t('Object Name'), { hasSorter: true, minBodyWidth: 200 }),
+        width: calcSmartColumnWidth(t('Object Name'), { hasSorter: true, minBodyWidth: 210 }),
         sorter: (a: ObjectItem, b: ObjectItem) => a.name.localeCompare(b.name),
         render: (name: string, r: ObjectItem) => {
-          const isDataObj = r.type === 'TABLE' || r.type === 'VIEW';
+          const isDataObj = r.type === 'TABLE' || r.type === 'VIEW' || r.type === 'MATERIALIZED_VIEW';
           const tagColor =
             r.type === 'TABLE'
               ? 'blue'
               : r.type === 'VIEW'
                 ? 'purple'
-                : r.type === 'TRIGGER'
-                  ? 'orange'
-                  : 'cyan';
+                : r.type === 'MATERIALIZED_VIEW'
+                  ? 'cyan'
+                  : r.type === 'TRIGGER'
+                    ? 'orange'
+                    : r.type === 'SEQUENCE'
+                      ? 'green'
+                      : r.type === 'EVENT'
+                        ? 'magenta'
+                        : 'geekblue';
           return (
             <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
               <Typography.Link
@@ -352,7 +429,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                       table: name,
                     });
                   } else {
-                    openRoutineOrTrigger(r);
+                    openObjectEditor(r);
                   }
                 }}
               >
@@ -361,47 +438,76 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
               <Tag color={tagColor} style={{ fontSize: 10, margin: 0 }}>
                 {r.type}
               </Tag>
+              {r.targetName && (
+                <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                  ({r.targetName})
+                </Typography.Text>
+              )}
             </div>
           );
         },
       },
       {
-        title: t('Engine'),
-        dataIndex: 'engine',
-        width: calcSmartColumnWidth(t('Engine'), { minBodyWidth: 105 }),
-        render: (v?: string) => (v ? <Tag style={{ margin: 0 }}>{v}</Tag> : '-'),
+        title: t('Status / Engine'),
+        dataIndex: 'status',
+        width: calcSmartColumnWidth(t('Status / Engine'), { minBodyWidth: 115 }),
+        render: (_: string, r: ObjectItem) => {
+          const st = (r.status || '').trim();
+          const up = st.toUpperCase();
+          const statusColor =
+            up === 'ENABLED' || up === 'VALID' || up === 'POPULATED' || up === 'LOADED'
+              ? 'success'
+              : up === 'DISABLED' || up === 'INVALID'
+                ? 'warning'
+                : 'default';
+          if (st && r.engine) {
+            return (
+              <Space size={4}>
+                <Tag color={statusColor} style={{ margin: 0 }}>{st}</Tag>
+                <Tag style={{ margin: 0 }}>{r.engine}</Tag>
+              </Space>
+            );
+          }
+          if (st) return <Tag color={statusColor} style={{ margin: 0 }}>{st}</Tag>;
+          if (r.engine) return <Tag style={{ margin: 0 }}>{r.engine}</Tag>;
+          return '-';
+        },
       },
       {
         title: t('Rows'),
         dataIndex: 'rows',
-        width: calcSmartColumnWidth(t('Rows'), { hasSorter: true, minBodyWidth: 85 }),
+        width: calcSmartColumnWidth(t('Rows'), { hasSorter: true, minBodyWidth: 80 }),
         align: 'right' as const,
         sorter: (a: ObjectItem, b: ObjectItem) => (a.rows || 0) - (b.rows || 0),
         render: (v: number, r: ObjectItem) =>
-          r.type === 'TABLE' || r.type === 'VIEW' ? v?.toLocaleString?.() ?? 0 : '-',
+          r.type === 'TABLE' || r.type === 'VIEW' || r.type === 'MATERIALIZED_VIEW'
+            ? v?.toLocaleString?.() ?? 0
+            : '-',
       },
       {
         title: t('Size'),
         dataIndex: 'dataBytes',
-        width: calcSmartColumnWidth(t('Size'), { hasSorter: true, minBodyWidth: 95 }),
+        width: calcSmartColumnWidth(t('Size'), { hasSorter: true, minBodyWidth: 90 }),
         align: 'right' as const,
         sorter: (a: ObjectItem, b: ObjectItem) => (a.dataBytes || 0) - (b.dataBytes || 0),
         render: (_: number, r: ObjectItem) =>
-          r.type === 'TABLE' ? formatBytes((r.dataBytes || 0) + (r.indexBytes || 0)) : '-',
+          r.type === 'TABLE' || r.type === 'MATERIALIZED_VIEW'
+            ? formatBytes((r.dataBytes || 0) + (r.indexBytes || 0))
+            : '-',
       },
       {
         title: t('Collation / Comment'),
         dataIndex: 'comment',
-        width: calcSmartColumnWidth(t('Collation / Comment'), { minBodyWidth: 150 }),
+        width: calcSmartColumnWidth(t('Collation / Comment'), { minBodyWidth: 145 }),
         ellipsis: true,
         render: (_: string, r: ObjectItem) => r.comment || r.collation || '-',
       },
       {
         title: t('Quick Actions'),
         key: 'actions',
-        width: isMobile ? 210 : 290,
+        width: isMobile ? 210 : 310,
         render: (_: any, r: ObjectItem) => {
-          const isDataObj = r.type === 'TABLE' || r.type === 'VIEW';
+          const isDataObj = r.type === 'TABLE' || r.type === 'VIEW' || r.type === 'MATERIALIZED_VIEW';
           const btnStyle = isMobile ? { minHeight: 32, minWidth: 32 } : undefined;
           const writeTableItems: any[] =
             canWrite && r.type === 'TABLE'
@@ -422,13 +528,13 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                     key: 'analyze',
                     icon: <ToolOutlined />,
                     label: t('Analyze Table'),
-                    onClick: () => handleAction(r, 'ANALYZE'),
+                    onClick: () => void handleAction(r, 'ANALYZE'),
                   },
                   {
                     key: 'optimize',
                     icon: <ToolOutlined />,
                     label: t('Optimize / Vacuum Table'),
-                    onClick: () => handleAction(r, 'OPTIMIZE'),
+                    onClick: () => void handleAction(r, 'OPTIMIZE'),
                   },
                   {
                     key: 'comment',
@@ -441,6 +547,52 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                   },
                 ]
               : [];
+
+          const lifecycleMenuItems: any[] = [];
+          if (canWrite) {
+            if (r.type === 'MATERIALIZED_VIEW') {
+              lifecycleMenuItems.push({
+                key: 'refresh-mv',
+                icon: <SyncOutlined />,
+                label: t('Refresh View'),
+                onClick: () => void handleAction(r, 'REFRESH'),
+              });
+            }
+            if (r.type === 'EVENT') {
+              const isDisabled = r.status?.toUpperCase() === 'DISABLED';
+              lifecycleMenuItems.push({
+                key: 'toggle-event',
+                icon: isDisabled ? <PlayCircleOutlined /> : <PauseCircleOutlined />,
+                label: isDisabled ? t('Enable') : t('Disable'),
+                onClick: () => void handleAction(r, isDisabled ? 'ENABLE' : 'DISABLE'),
+              });
+            }
+            if (r.type === 'DICTIONARY') {
+              lifecycleMenuItems.push({
+                key: 'reload-dict',
+                icon: <ReloadOutlined />,
+                label: t('Reload Dictionary'),
+                onClick: () => void handleAction(r, 'RELOAD'),
+              });
+            }
+            if (r.type === 'PACKAGE' || r.type === 'PACKAGE_BODY') {
+              lifecycleMenuItems.push({
+                key: 'compile-pkg',
+                icon: <CheckCircleOutlined />,
+                label: t('Compile'),
+                onClick: () => void handleAction(r, 'COMPILE'),
+              });
+            }
+            if (r.type === 'SEQUENCE') {
+              lifecycleMenuItems.push({
+                key: 'restart-seq',
+                icon: <ReloadOutlined />,
+                label: t('Restart Sequence'),
+                onClick: () => void handleAction(r, 'RESTART', { restartWith: 1 }),
+              });
+            }
+          }
+
           const mobileTopDataItems: any[] =
             isMobile && isDataObj
               ? [
@@ -462,14 +614,19 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                         initialSQL: `SELECT * FROM ${r.name} LIMIT 100;`,
                       }),
                   },
-                  {
-                    key: 'export',
-                    icon: <DownloadOutlined />,
-                    label: t('Export table'),
-                    onClick: () => onOpenTransfer('export', r.name),
-                  },
+                  ...(r.type === 'TABLE'
+                    ? [
+                        {
+                          key: 'export',
+                          icon: <DownloadOutlined />,
+                          label: t('Export table'),
+                          onClick: () => onOpenTransfer('export', r.name),
+                        },
+                      ]
+                    : []),
                 ]
               : [];
+
           const mobileDangerItems: any[] =
             isMobile && canWrite
               ? [
@@ -505,11 +662,17 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                   },
                 ]
               : [];
+
           const moreMenuItems: any[] = [
+            ...lifecycleMenuItems,
+            ...(lifecycleMenuItems.length > 0 && (mobileTopDataItems.length > 0 || writeTableItems.length > 0)
+              ? [{ type: 'divider' as const }]
+              : []),
             ...mobileTopDataItems,
             ...(mobileTopDataItems.length > 0 && writeTableItems.length > 0 ? [{ type: 'divider' as const }] : []),
             ...writeTableItems,
-            ...(mobileDangerItems.length > 0 && (mobileTopDataItems.length > 0 || writeTableItems.length > 0)
+            ...(mobileDangerItems.length > 0 &&
+            (lifecycleMenuItems.length > 0 || mobileTopDataItems.length > 0 || writeTableItems.length > 0)
               ? [{ type: 'divider' as const }]
               : []),
             ...mobileDangerItems,
@@ -563,9 +726,25 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                       {t('Structure')}
                     </Button>
                   ) : (
-                    <Button size="small" type="link" style={btnStyle} icon={<CodeOutlined />} onClick={() => openEditView(r)}>
-                      {canWrite ? t('Edit View SQL') : t('Inspect DDL')}
+                    <Button
+                      size="small"
+                      type="link"
+                      style={btnStyle}
+                      icon={<CodeOutlined />}
+                      onClick={() => openObjectEditor(r)}
+                    >
+                      {canWrite ? t('Edit / DDL') : t('Inspect DDL')}
                     </Button>
+                  )}
+                  {!isMobile && canWrite && r.type === 'MATERIALIZED_VIEW' && (
+                    <Tooltip title={t('Refresh View')}>
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<SyncOutlined />}
+                        onClick={() => void handleAction(r, 'REFRESH')}
+                      />
+                    </Tooltip>
                   )}
                   {!isMobile && (
                     <Tooltip title={t('Open SQL Console for this table')}>
@@ -590,7 +769,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                       />
                     </Tooltip>
                   )}
-                  {!isMobile && (
+                  {!isMobile && r.type === 'TABLE' && (
                     <Tooltip title={t('Export table')}>
                       <Button
                         size="small"
@@ -602,15 +781,61 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                   )}
                 </>
               ) : (
-                <Button
-                  size="small"
-                  type="link"
-                  style={btnStyle}
-                  icon={<EditOutlined />}
-                  onClick={() => openRoutineOrTrigger(r)}
-                >
-                  {canWrite ? t('Edit SQL') : t('Inspect DDL')}
-                </Button>
+                <>
+                  <Button
+                    size="small"
+                    type="link"
+                    style={btnStyle}
+                    icon={<EditOutlined />}
+                    onClick={() => openObjectEditor(r)}
+                  >
+                    {canWrite ? t('Edit / DDL') : t('Inspect DDL')}
+                  </Button>
+                  {!isMobile && canWrite && r.type === 'EVENT' && (
+                    <Button
+                      size="small"
+                      type="link"
+                      icon={
+                        r.status?.toUpperCase() === 'DISABLED' ? <PlayCircleOutlined /> : <PauseCircleOutlined />
+                      }
+                      onClick={() =>
+                        void handleAction(r, r.status?.toUpperCase() === 'DISABLED' ? 'ENABLE' : 'DISABLE')
+                      }
+                    >
+                      {r.status?.toUpperCase() === 'DISABLED' ? t('Enable') : t('Disable')}
+                    </Button>
+                  )}
+                  {!isMobile && canWrite && r.type === 'DICTIONARY' && (
+                    <Button
+                      size="small"
+                      type="link"
+                      icon={<ReloadOutlined />}
+                      onClick={() => void handleAction(r, 'RELOAD')}
+                    >
+                      {t('Reload')}
+                    </Button>
+                  )}
+                  {!isMobile && canWrite && (r.type === 'PACKAGE' || r.type === 'PACKAGE_BODY') && (
+                    <Button
+                      size="small"
+                      type="link"
+                      icon={<CheckCircleOutlined />}
+                      onClick={() => void handleAction(r, 'COMPILE')}
+                    >
+                      {t('Compile')}
+                    </Button>
+                  )}
+                  {!isMobile && canWrite && r.type === 'SEQUENCE' && (
+                    <Button
+                      size="small"
+                      type="link"
+                      icon={<ReloadOutlined />}
+                      onClick={() => void handleAction(r, 'RESTART', { restartWith: 1 })}
+                    >
+                      {t('Restart')}
+                    </Button>
+                  )}
+                </>
               )}
 
               {!isMobile && canWrite && r.type === 'TABLE' && (
@@ -637,7 +862,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
               {!isMobile && canWrite && r.type === 'TABLE' && (
                 <Popconfirm
                   title={t('Truncate all rows in table {name}?', { name: r.name })}
-                  onConfirm={() => handleAction(r, 'TRUNCATE')}
+                  onConfirm={() => void handleAction(r, 'TRUNCATE')}
                 >
                   <Tooltip title={t('Truncate table')}>
                     <Button size="small" type="text" danger icon={<ClearOutlined />} />
@@ -647,7 +872,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
               {!isMobile && canWrite && (
                 <Popconfirm
                   title={t('Danger: Permanently drop {name}?', { name: r.name })}
-                  onConfirm={() => handleAction(r, 'DROP')}
+                  onConfirm={() => void handleAction(r, 'DROP')}
                 >
                   <Tooltip title={t('Drop object')}>
                     <Button size="small" type="text" danger icon={<DeleteOutlined />} />
@@ -672,18 +897,22 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
       onOpenTransfer,
       cloneForm,
       handleAction,
-      openRoutineOrTrigger,
+      openObjectEditor,
     ]
   );
 
   return (
-    <div style={{ padding: isMobile ? '6px 8px' : '12px 16px', height: '100%', minWidth: 0, overflowY: 'auto' }}>
+    <div style={{ padding: isMobile ? '6px 8px' : '12px 16px', height: '100%', minWidth: 0, overflowY: 'auto', overflowX: 'hidden' }}>
       <ContextNavBar tab={tab} activeSection="overview" onOpenTransfer={onOpenTransfer} />
 
       <Row gutter={[isMobile ? 8 : 12, isMobile ? 6 : 10]} className="dbharbor-kpi-row" style={{ marginBottom: isMobile ? 8 : 12 }}>
         <Col xs={12} md={6}>
           <Card size="small">
-            <Statistic title={t('Tables')} value={totalTables} suffix={totalViews > 0 ? `/ ${totalViews}` : ''} />
+            <Statistic
+              title={totalViews > 0 ? `${t('Tables')} / ${t('Views')}` : t('Tables')}
+              value={totalTables}
+              suffix={totalViews > 0 ? `/ ${totalViews}` : ''}
+            />
           </Card>
         </Col>
         <Col xs={12} md={6}>
@@ -698,11 +927,18 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
         </Col>
         <Col xs={12} md={6}>
           <Card size="small">
-            <Statistic
-              title={t('Current Context')}
-              value={`${tab.database}${tab.schema ? '.' + tab.schema : ''}`}
-              valueStyle={{ fontSize: isMobile ? 14 : 16 }}
-            />
+            <div title={`${tab.database}${tab.schema ? '.' + tab.schema : ''}`} style={{ minWidth: 0, overflow: 'hidden' }}>
+              <Statistic
+                title={t('Current Context')}
+                value={`${tab.database}${tab.schema ? '.' + tab.schema : ''}`}
+                valueStyle={{
+                  fontSize: isMobile ? 14 : 16,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              />
+            </div>
           </Card>
         </Col>
       </Row>
@@ -729,50 +965,17 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
               >
                 {t('Create Table')}
               </Button>
-              <Dropdown
-                trigger={['click']}
-                menu={{
-                  items: [
-                    {
-                      key: 'new-view',
-                      icon: <EyeOutlined />,
-                      label: t('Create View'),
-                      onClick: () => {
-                        viewForm.resetFields();
-                        setViewModalOpen(true);
-                      },
-                    },
-                    ...(supportsRoutines
-                      ? [
-                          {
-                            key: 'new-routine',
-                            icon: <FunctionOutlined />,
-                            label: t('New Routine'),
-                            onClick: () => setRtModal({ open: true, mode: 'routine', editObject: null }),
-                          },
-                        ]
-                      : []),
-                    ...(supportsTriggers
-                      ? [
-                          {
-                            key: 'new-trigger',
-                            icon: <ThunderboltOutlined />,
-                            label: t('New Trigger'),
-                            onClick: () => setRtModal({ open: true, mode: 'trigger', editObject: null }),
-                          },
-                        ]
-                      : []),
-                  ],
-                }}
-              >
-                <Button
-                  size={isMobile ? 'small' : 'middle'}
-                  style={isMobile ? { height: 34, paddingInline: 10 } : undefined}
-                  icon={<PlusOutlined />}
-                >
-                  {t('New Object')}
-                </Button>
-              </Dropdown>
+              {creatableMenuItems.length > 0 && (
+                <Dropdown trigger={['click']} menu={{ items: creatableMenuItems }}>
+                  <Button
+                    size={isMobile ? 'small' : 'middle'}
+                    style={isMobile ? { height: 34, paddingInline: 10 } : undefined}
+                    icon={<PlusOutlined />}
+                  >
+                    {t('New Object')} <DownOutlined style={{ fontSize: 10 }} />
+                  </Button>
+                </Dropdown>
+              )}
             </>
           )}
           {!isMobile && (
@@ -813,38 +1016,47 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
             size={isMobile ? 'small' : 'middle'}
             style={isMobile ? { width: 34, height: 34, padding: 0 } : undefined}
             icon={<ReloadOutlined />}
-            onClick={loadOverview}
+            onClick={() => void loadOverview()}
             aria-label={t('Refresh')}
           >
             {isMobile ? '' : t('Refresh')}
           </Button>
         </Space>
 
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, maxWidth: '100%', width: isMobile ? '100%' : undefined, alignItems: 'center' }}>
-          <div style={{ maxWidth: '100%', overflowX: 'auto' }}>
-            <Segmented
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 6,
+            maxWidth: '100%',
+            width: isMobile ? '100%' : undefined,
+            alignItems: 'center',
+          }}
+        >
+          {isMobile || categoryOptions.length > 5 ? (
+            <Select
               size={isMobile ? 'middle' : 'small'}
               value={categoryFilter}
-              onChange={(val) => setCategoryFilter(val as any)}
-              options={[
-                { value: 'ALL', label: `${t('All')} (${items.length})` },
-                { value: 'TABLE', label: `${t('Tables')} (${totalTables})` },
-                ...(totalViews > 0 || canWrite ? [{ value: 'VIEW', label: `${t('Views')} (${totalViews})` }] : []),
-                ...(totalRoutines > 0 || (canWrite && supportsRoutines)
-                  ? [{ value: 'ROUTINE', label: `${t('Routines')} (${totalRoutines})` }]
-                  : []),
-                ...(totalTriggers > 0 || (canWrite && supportsTriggers)
-                  ? [{ value: 'TRIGGER', label: `${t('Triggers')} (${totalTriggers})` }]
-                  : []),
-              ]}
+              onChange={(val) => setCategoryFilter(val)}
+              options={categoryOptions}
+              style={{ minWidth: isMobile ? 140 : 185, flex: isMobile ? 1 : undefined }}
             />
-          </div>
+          ) : (
+            <div style={{ maxWidth: '100%', overflowX: 'auto' }}>
+              <Segmented
+                size="small"
+                value={categoryFilter}
+                onChange={(val) => setCategoryFilter(val as CategoryFilterKey)}
+                options={categoryOptions}
+              />
+            </div>
+          )}
           <Input
-            size="middle"
+            size={isMobile ? 'middle' : 'small'}
             allowClear
             prefix={<SearchOutlined />}
             placeholder={t('Filter objects...')}
-            style={{ width: isMobile ? '100%' : 210, maxWidth: '100%', height: isMobile ? 34 : undefined }}
+            style={{ width: isMobile ? '100%' : 200, maxWidth: '100%', height: isMobile ? 34 : undefined }}
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
           />
@@ -887,13 +1099,13 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                   size="small"
                   icon={<ToolOutlined />}
                   loading={batchRunning}
-                  onClick={() => handleBatchMaintenance('OPTIMIZE')}
+                  onClick={() => void handleBatchMaintenance('OPTIMIZE')}
                 >
                   {t('Optimize Selected')}
                 </Button>
                 <Popconfirm
                   title={t('Truncate {count} selected table(s)?', { count: selectedTableNames.length })}
-                  onConfirm={() => handleBatchMaintenance('TRUNCATE')}
+                  onConfirm={() => void handleBatchMaintenance('TRUNCATE')}
                 >
                   <Button size="small" danger icon={<ClearOutlined />} loading={batchRunning}>
                     {t('Truncate Selected')}
@@ -904,7 +1116,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
             {canWrite && (
               <Popconfirm
                 title={t('Danger: Drop {count} selected object(s) permanently?', { count: selectedObjects.length })}
-                onConfirm={() => handleBatchMaintenance('DROP')}
+                onConfirm={() => void handleBatchMaintenance('DROP')}
               >
                 <Button size="small" danger icon={<DeleteOutlined />} loading={batchRunning}>
                   {t('Drop Selected')}
@@ -919,7 +1131,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
       )}
 
       <ResizableTable<ObjectItem>
-        rowKey={(r) => `${r.type}:${r.name}`}
+        rowKey={makeRowKey}
         size="small"
         loading={loading}
         wrapClassName={isMobile ? 'dbharbor-mobile-table' : undefined}
@@ -934,64 +1146,40 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
         columns={overviewColumns}
       />
 
-      {/* Create / Edit View Modal */}
-      <Modal
-        open={viewModalOpen}
-        title={t('Create Database View (CREATE VIEW)')}
-        width="min(680px, 95vw)"
-        onCancel={() => setViewModalOpen(false)}
-        onOk={canWrite ? handleCreateView : () => setViewModalOpen(false)}
-        confirmLoading={viewSaving}
-        okText={canWrite ? t('Save View') : t('Close')}
-      >
-        <Form form={viewForm} layout="vertical">
-          <Form.Item
-            name="viewName"
-            label={t('View Name')}
-            rules={[{ required: true, message: t('Please enter view name') }]}
-          >
-            <Input readOnly={!canWrite} placeholder="e.g. v_active_orders" />
-          </Form.Item>
-          <Form.Item
-            name="viewSQL"
-            label={t('SELECT Definition SQL')}
-            rules={[{ required: true, message: t('Please enter SELECT definition SQL') }]}
-          >
-            <Input.TextArea
-              rows={7}
-              readOnly={!canWrite}
-              style={{ fontFamily: 'monospace', fontSize: 12 }}
-              placeholder="SELECT id, customer_id, total_amount FROM orders WHERE status = 'PAID'"
-            />
-          </Form.Item>
-        </Form>
-      </Modal>
-
-      {/* Create / Edit Routine or Trigger Modal */}
-      <RoutineTriggerModal
-        open={rtModal.open}
-        mode={rtModal.mode}
-        connectionId={tab.connectionId}
-        connName={tab.connName}
-        dbType={tab.dbType}
-        database={tab.database}
-        schema={tab.schema}
-        availableTables={tableNames}
-        editObject={rtModal.editObject}
-        canWrite={canWrite}
-        onClose={() => setRtModal((prev) => ({ ...prev, open: false }))}
-        onSaved={() => {
-          bumpTreeRefresh();
-          loadOverview();
-        }}
-      />
+      {/* Unified Lazy SchemaObjectModal */}
+      {schemaModal.open && (
+        <Suspense fallback={null}>
+          <LazySchemaObjectModal
+            open={schemaModal.open}
+            mode={schemaModal.mode}
+            initialType={schemaModal.initialType}
+            connId={tab.connectionId}
+            dbType={tab.dbType}
+            database={tab.database}
+            schema={tab.schema}
+            tables={tableNames}
+            availableExtensions={availableExtensions}
+            capabilities={driverMeta?.capabilities}
+            canWrite={canWrite}
+            isDesktop={isDesktop}
+            userRole={role}
+            editObject={schemaModal.editObject}
+            onClose={() => setSchemaModal((prev) => ({ ...prev, open: false }))}
+            onSuccess={() => {
+              bumpTreeRefresh();
+              void loadOverview();
+            }}
+          />
+        </Suspense>
+      )}
 
       {/* Edit Table Comment Modal */}
       <Modal
         open={Boolean(commentTarget)}
         title={`${t('Edit Table Comment')} - ${commentTarget?.name || ''}`}
+        width="min(520px, calc(100vw - 16px))"
         onCancel={() => setCommentTarget(null)}
-        onOk={handleSaveComment}
+        onOk={() => void handleSaveComment()}
         okText={t('Save')}
       >
         <Input.TextArea
@@ -1006,8 +1194,9 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
       <Modal
         open={Boolean(cloneTarget)}
         title={`${t('Clone or rename table')} - ${cloneTarget?.name || ''}`}
+        width="min(560px, calc(100vw - 16px))"
         onCancel={() => setCloneTarget(null)}
-        onOk={handleCloneOrRename}
+        onOk={() => void handleCloneOrRename()}
         confirmLoading={cloneSaving}
         okText={t('Execute Now')}
       >

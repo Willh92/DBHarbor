@@ -144,6 +144,199 @@ function formatSelectedRows(
   return [cols.map(esc).join(','), ...selectedRows.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\r\n');
 }
 
+interface CellStateHub {
+  subscribe: (rk: string, colName: string, fn: () => void) => () => void;
+  isEditing: (rk: string, colName: string) => boolean;
+  isFocused: (rk: string, colName: string) => boolean;
+  isDirty: (rk: string, colName: string) => boolean;
+  setEditing: (next: { rowKey: string; col: string } | null) => void;
+  setFocused: (next: { rowKey: string; col: string } | null) => void;
+  getDisplayedColumns: () => QueryColumn[];
+  setBackup: (b: { rowKey: string; col: string; prevVal: any } | null) => void;
+  getBackup: () => { rowKey: string; col: string; prevVal: any } | null;
+  onCellChange: (rk: string, colName: string, val: any) => void;
+  onPasteCells: (clip: string, rk: string, colName: string) => void;
+  onCheckDissolve: (rk: string, relatedTarget?: EventTarget | null) => void;
+  onRemoveNewRow: (rk: string) => void;
+}
+
+const GridDataCell = React.memo<{
+  rk: string;
+  col: QueryColumn;
+  colIdx: number;
+  isPK: boolean;
+  val: any;
+  record: Record<string, any>;
+  canWrite: boolean;
+  isMobile: boolean;
+  hub: CellStateHub;
+  t: (key: string, params?: Record<string, string | number>) => string;
+}>(({ rk, col, colIdx, isPK, val, record, canWrite, isMobile, hub, t }) => {
+  const [, setTick] = useState(0);
+
+  useEffect(() => {
+    return hub.subscribe(rk, col.name, () => setTick((n) => n + 1));
+  }, [hub, rk, col.name]);
+
+  const isEditing = canWrite && hub.isEditing(rk, col.name);
+  const isDirty = hub.isDirty(rk, col.name);
+  const isNew = canWrite && rk.startsWith('new_');
+  const isFocused = hub.isFocused(rk, col.name);
+
+  if (isEditing || isNew) {
+    const strVal = val === null ? '' : String(val ?? '');
+    const isMultiline = isEditing && (strVal.includes('\n') || strVal.length > 80);
+
+    if (isMultiline) {
+      return (
+        <Input.TextArea
+          size="small"
+          autoFocus
+          autoSize={{ minRows: 2, maxRows: 6 }}
+          value={strVal}
+          style={{ fontFamily: 'monospace', fontSize: 12 }}
+          onChange={(e) => hub.onCellChange(rk, col.name, e.target.value)}
+          onBlur={(e) => {
+            hub.setEditing(null);
+            hub.onCheckDissolve(rk, e.relatedTarget);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              e.stopPropagation();
+              const bk = hub.getBackup();
+              if (bk && bk.rowKey === rk && bk.col === col.name) {
+                hub.onCellChange(rk, col.name, bk.prevVal);
+              }
+              hub.setEditing(null);
+              hub.onCheckDissolve(rk, null);
+            } else if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+              e.preventDefault();
+              hub.setEditing(null);
+            }
+          }}
+        />
+      );
+    }
+
+    return (
+      <Input
+        size="small"
+        autoFocus={isEditing}
+        value={strVal}
+        placeholder={val === null ? 'NULL' : isNew && isPK ? t('(Auto / PK)') : ''}
+        onChange={(e) => hub.onCellChange(rk, col.name, e.target.value)}
+        onPaste={(e) => {
+          const clip = e.clipboardData?.getData('text/plain') || '';
+          if (clip.includes('\t') || clip.includes('\n')) {
+            e.preventDefault();
+            hub.setEditing(null);
+            hub.onPasteCells(clip, rk, col.name);
+          }
+        }}
+        onBlur={(e) => {
+          if (!isNew) hub.setEditing(null);
+          hub.onCheckDissolve(rk, e.relatedTarget);
+        }}
+        onPressEnter={() => hub.setEditing(null)}
+        onKeyDown={(e) => {
+          const dispCols = hub.getDisplayedColumns();
+          if (e.key === 'Tab' && dispCols.length > 1) {
+            const nextIdx = e.shiftKey ? colIdx - 1 : colIdx + 1;
+            if (nextIdx >= 0 && nextIdx < dispCols.length) {
+              e.preventDefault();
+              const nextCol = dispCols[nextIdx].name;
+              hub.setBackup({ rowKey: rk, col: nextCol, prevVal: record[nextCol] });
+              hub.setEditing({ rowKey: rk, col: nextCol });
+              hub.setFocused({ rowKey: rk, col: nextCol });
+            }
+          } else if (e.altKey && !e.shiftKey && e.key.toLowerCase() === 'n' && col.nullable) {
+            e.preventDefault();
+            e.stopPropagation();
+            hub.onCellChange(rk, col.name, null);
+            hub.setEditing(null);
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!isNew) {
+              const bk = hub.getBackup();
+              if (bk && bk.rowKey === rk && bk.col === col.name) {
+                hub.onCellChange(rk, col.name, bk.prevVal);
+              }
+              hub.setEditing(null);
+            } else if (record.__fromFiller && !record.__touched) {
+              hub.setEditing(null);
+              hub.onRemoveNewRow(rk);
+            } else {
+              hub.setEditing(null);
+            }
+          }
+        }}
+        suffix={
+          col.nullable && (!isMobile || isEditing || isFocused) ? (
+            <Tag
+              style={{ cursor: 'pointer', margin: 0, fontSize: 10 }}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                hub.onCellChange(rk, col.name, null);
+                hub.setEditing(null);
+              }}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                hub.onCellChange(rk, col.name, null);
+                hub.setEditing(null);
+              }}
+            >
+              {isMobile ? 'NULL' : t('Set NULL')}
+            </Tag>
+          ) : undefined
+        }
+      />
+    );
+  }
+
+  return (
+    <span
+      data-raw-copy={formatRawCellText(val)}
+      onDoubleClick={() => {
+        if (!canWrite) return;
+        hub.setBackup({ rowKey: rk, col: col.name, prevVal: val });
+        hub.setEditing({ rowKey: rk, col: col.name });
+      }}
+      style={{
+        display: 'block',
+        minHeight: 22,
+        lineHeight: '22px',
+        cursor: canWrite ? 'pointer' : 'default',
+        padding: '0 4px',
+        borderRadius: 4,
+        background: isDirty
+          ? 'rgba(250, 173, 20, 0.22)'
+          : isFocused
+            ? 'rgba(22, 119, 255, 0.08)'
+            : 'transparent',
+        border: isDirty
+          ? '1px solid #faad14'
+          : isFocused
+            ? '1px solid rgba(22, 119, 255, 0.35)'
+            : '1px solid transparent',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      }}
+      title={canWrite ? t('Double-click to edit cell') : formatRawCellText(val)}
+    >
+      {val === null ? (
+        <Tag style={{ fontSize: 10, opacity: 0.65, margin: 0, lineHeight: '16px' }}>NULL</Tag>
+      ) : (
+        String(val)
+      )}
+    </span>
+  );
+});
+
 export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }) => {
   const { t } = useI18n();
   const { isMobile } = useResponsive();
@@ -190,15 +383,48 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
   const [batchVal, setBatchVal] = useState<string>('');
   const [batchSetNull, setBatchSetNull] = useState<boolean>(false);
 
-  // Inline editing, active cell focus & pending mutations
-  const [editingCell, setEditingCell] = useState<{ rowKey: string; col: string } | null>(null);
-  const [focusedCell, setFocusedCell] = useState<{ rowKey: string; col: string } | null>(null);
-  const [dirtyUpdates, setDirtyUpdates] = useState<Record<string, Record<string, any>>>({});
+  // Inline editing, active cell focus & pending mutations (per-cell pub/sub avoids full-table re-renders)
+  const editingCellRef = useRef<{ rowKey: string; col: string } | null>(null);
+  const focusedCellRef = useRef<{ rowKey: string; col: string } | null>(null);
+  const dirtyUpdatesRef = useRef<Record<string, Record<string, any>>>({});
+  const cellListenersRef = useRef<Map<string, Set<() => void>>>(new Map());
+  const [hasFocusedCell, setHasFocusedCell] = useState(false);
+  const [dirtyRowCount, setDirtyRowCount] = useState(0);
   const [newRows, setNewRows] = useState<Record<string, any>[]>([]);
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [previewSQLs, setPreviewSQLs] = useState<string[]>([]);
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  const notifyCell = useCallback((rk: string, colName: string) => {
+    const subs = cellListenersRef.current.get(`${rk}\0${colName}`);
+    if (subs) {
+      subs.forEach((fn) => fn());
+    }
+  }, []);
+
+  const updateEditingCell = useCallback(
+    (next: { rowKey: string; col: string } | null) => {
+      const prev = editingCellRef.current;
+      if (prev?.rowKey === next?.rowKey && prev?.col === next?.col) return;
+      editingCellRef.current = next;
+      if (prev) notifyCell(prev.rowKey, prev.col);
+      if (next) notifyCell(next.rowKey, next.col);
+    },
+    [notifyCell]
+  );
+
+  const updateFocusedCell = useCallback(
+    (next: { rowKey: string; col: string } | null) => {
+      const prev = focusedCellRef.current;
+      if (prev?.rowKey === next?.rowKey && prev?.col === next?.col) return;
+      focusedCellRef.current = next;
+      setHasFocusedCell(Boolean(next));
+      if (prev) notifyCell(prev.rowKey, prev.col);
+      if (next) notifyCell(next.rowKey, next.col);
+    },
+    [notifyCell]
+  );
 
   // Single virtual-anchor context menu state (zero extra DOM nodes per cell)
   const [ctxMenu, setCtxMenu] = useState<{
@@ -264,12 +490,15 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
           return obj;
         });
         setRows(mapped);
-        setOriginalRows(mapped.map((r) => ({ ...r })));
-        setDirtyUpdates({});
+        setOriginalRows(mapped);
+        dirtyUpdatesRef.current = {};
+        setDirtyRowCount(0);
         setNewRows([]);
         setSelectedRowKeys([]);
-        setEditingCell(null);
-        setFocusedCell(null);
+        setInspectRow(null);
+        editingCellRef.current = null;
+        focusedCellRef.current = null;
+        setHasFocusedCell(false);
       } catch (err: any) {
         if (err?.name !== 'AbortError') {
           message.error(err.message);
@@ -286,6 +515,11 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
   useEffect(() => {
     setHiddenCols([]);
     setColFilterSearch('');
+    setSearchConds([]);
+    setShowSearchBuilder(false);
+    setMobileFilterOpen(false);
+    setInspectRow(null);
+    setInspectSearch('');
     setPage(1);
     setWhereInput('');
     setAppliedFilter('');
@@ -347,7 +581,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
       return clean;
     });
 
-    const updates = Object.entries(dirtyUpdates).map(([rowKey, changes]) => {
+    const updates = Object.entries(dirtyUpdatesRef.current).map(([rowKey, changes]) => {
       const idx = rows.findIndex((r) => r.__rowKey === rowKey);
       const orig = originalRows[idx] || rows[idx];
       return {
@@ -377,7 +611,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
     };
   };
 
-  const pendingChangeCount = Object.keys(dirtyUpdates).length + activeNewRows.length;
+  const pendingChangeCount = dirtyRowCount + activeNewRows.length;
 
   const handleCellChange = useCallback(
     (rowKey: string, colName: string, value: any) => {
@@ -392,23 +626,28 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
       const idx = rowsRef.current.findIndex((r) => r.__rowKey === rowKey);
       const origVal = originalRowsRef.current[idx]?.[colName];
 
-      setDirtyUpdates((prev) => {
-        const curRowPatch = { ...(prev[rowKey] || {}) };
-        if (origVal === value || (origVal !== null && value !== null && String(origVal) === String(value))) {
-          delete curRowPatch[colName];
-        } else {
-          curRowPatch[colName] = value;
-        }
-        const next = { ...prev };
-        if (Object.keys(curRowPatch).length === 0) {
-          delete next[rowKey];
-        } else {
-          next[rowKey] = curRowPatch;
-        }
-        return next;
-      });
+      const prevMap = dirtyUpdatesRef.current;
+      const wasDirty = Boolean(prevMap[rowKey] && colName in prevMap[rowKey]);
+      const curRowPatch = { ...(prevMap[rowKey] || {}) };
+      if (origVal === value || (origVal !== null && value !== null && String(origVal) === String(value))) {
+        delete curRowPatch[colName];
+      } else {
+        curRowPatch[colName] = value;
+      }
+      const next = { ...prevMap };
+      if (Object.keys(curRowPatch).length === 0) {
+        delete next[rowKey];
+      } else {
+        next[rowKey] = curRowPatch;
+      }
+      dirtyUpdatesRef.current = next;
+      const nowDirty = Boolean(next[rowKey] && colName in next[rowKey]);
+      if (wasDirty !== nowDirty) {
+        notifyCell(rowKey, colName);
+      }
+      setDirtyRowCount(Object.keys(next).length);
     },
-    [canWrite]
+    [canWrite, notifyCell]
   );
 
   const handleAddRowInline = () => {
@@ -426,8 +665,8 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
     setNewRows((prev) => (atBottom ? [...prev, rowObj] : [rowObj, ...prev]));
     const firstEditable = displayedColumns.find((c) => !primaryKeys.includes(c.name)) || displayedColumns[0];
     if (firstEditable) {
-      setEditingCell({ rowKey: newKey, col: firstEditable.name });
-      setFocusedCell({ rowKey: newKey, col: firstEditable.name });
+      updateEditingCell({ rowKey: newKey, col: firstEditable.name });
+      updateFocusedCell({ rowKey: newKey, col: firstEditable.name });
     }
   };
 
@@ -446,8 +685,8 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
           visibleColumns.every((c) => r[c.name] === '' || r[c.name] === undefined)
       );
       if (existingUntouched) {
-        setEditingCell({ rowKey: existingUntouched.__rowKey, col: targetCol });
-        setFocusedCell({ rowKey: existingUntouched.__rowKey, col: targetCol });
+        updateEditingCell({ rowKey: existingUntouched.__rowKey, col: targetCol });
+        updateFocusedCell({ rowKey: existingUntouched.__rowKey, col: targetCol });
         return;
       }
 
@@ -462,10 +701,10 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
         rowObj[c.name] = '';
       });
       setNewRows((prev) => [...prev, rowObj]);
-      setEditingCell({ rowKey: newKey, col: targetCol });
-      setFocusedCell({ rowKey: newKey, col: targetCol });
+      updateEditingCell({ rowKey: newKey, col: targetCol });
+      updateFocusedCell({ rowKey: newKey, col: targetCol });
     },
-    [canWrite, displayedColumns, primaryKeys, visibleColumns]
+    [canWrite, displayedColumns, primaryKeys, visibleColumns, updateEditingCell, updateFocusedCell]
   );
 
   const checkDissolveFillerRow = useCallback(
@@ -495,15 +734,16 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
 
   const openBatchEditModal = useCallback(() => {
     if (!canWrite || selectedRowKeys.length === 0 || visibleColumns.length === 0) return;
+    const fc = focusedCellRef.current;
     const defaultCol =
-      (focusedCell && visibleColumns.some((c) => c.name === focusedCell.col) ? focusedCell.col : '') ||
+      (fc && visibleColumns.some((c) => c.name === fc.col) ? fc.col : '') ||
       visibleColumns.find((c) => !primaryKeys.includes(c.name))?.name ||
       visibleColumns[0].name;
     setBatchCol(defaultCol);
     setBatchVal('');
     setBatchSetNull(false);
     setBatchModalOpen(true);
-  }, [canWrite, selectedRowKeys.length, visibleColumns, focusedCell, primaryKeys]);
+  }, [canWrite, selectedRowKeys.length, visibleColumns, primaryKeys]);
 
   const handleApplyBatchEdit = useCallback(() => {
     if (!canWrite || !batchCol || selectedRowKeys.length === 0) return;
@@ -587,7 +827,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
         return false;
       }
 
-      const targetAnchor = anchor ?? focusedCell;
+      const targetAnchor = anchor ?? focusedCellRef.current;
       const maxMatrixCols = parsed.matrix.reduce((m, r) => Math.max(m, r.length), 0);
       const shouldOverwrite =
         mode === 'overwrite_cells' ||
@@ -690,7 +930,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
       );
       return true;
     },
-    [canWrite, displayedColumns, visibleColumns, focusedCell, combinedDataSource, handleCellChange, primaryKeys, t]
+    [canWrite, displayedColumns, visibleColumns, combinedDataSource, handleCellChange, primaryKeys, t]
   );
 
   const openPasteDialog = async (defaultMode: 'new_rows' | 'overwrite_cells') => {
@@ -714,7 +954,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
       try {
         const txt = await navigator.clipboard.readText();
         if (txt && txt.trim()) {
-          applyClipboardPaste(txt, preferredMode, focusedCell);
+          applyClipboardPaste(txt, preferredMode, focusedCellRef.current);
           return;
         }
       } catch {
@@ -771,8 +1011,9 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
     const clauses = searchConds
       .filter((c) => c.column)
       .map((c) => {
+        const qCol = quoteIdentForEngine(tab.dbType, c.column);
         if (c.op === 'IS NULL' || c.op === 'IS NOT NULL') {
-          return `${c.column} ${c.op}`;
+          return `${qCol} ${c.op}`;
         }
         if (c.op === 'IN') {
           const items = c.value
@@ -780,9 +1021,9 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
             .map((s) => s.trim())
             .filter(Boolean)
             .map(escapeSQLVal);
-          return items.length > 0 ? `${c.column} IN (${items.join(', ')})` : '';
+          return items.length > 0 ? `${qCol} IN (${items.join(', ')})` : '';
         }
-        return `${c.column} ${c.op} ${escapeSQLVal(c.value)}`;
+        return `${qCol} ${c.op} ${escapeSQLVal(c.value)}`;
       })
       .filter(Boolean);
 
@@ -870,12 +1111,13 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
       const keySet = new Set(selectedRowKeys.map(String));
       return combinedDataSource.filter((r) => keySet.has(String(r.__rowKey)));
     }
-    if (focusedCell) {
-      const found = combinedDataSource.find((r) => r.__rowKey === focusedCell.rowKey);
+    const fc = focusedCellRef.current;
+    if (fc) {
+      const found = combinedDataSource.find((r) => r.__rowKey === fc.rowKey);
       if (found) return [found];
     }
     return combinedDataSource;
-  }, [selectedRowKeys, focusedCell, combinedDataSource]);
+  }, [selectedRowKeys, combinedDataSource]);
 
   const handleCopyRows = useCallback(
     (mode: 'tsv' | 'tsv_header' | 'csv' | 'json' | 'sql', explicitRows?: Record<string, any>[]) => {
@@ -895,11 +1137,12 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
     (e: React.ClipboardEvent<HTMLDivElement>) => {
       const active = document.activeElement;
       if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+      const fc = focusedCellRef.current;
       const targetRows =
         selectedRowKeys.length > 0
           ? combinedDataSource.filter((r) => selectedRowKeys.includes(r.__rowKey))
-          : focusedCell
-            ? combinedDataSource.filter((r) => r.__rowKey === focusedCell.rowKey)
+          : fc
+            ? combinedDataSource.filter((r) => r.__rowKey === fc.rowKey)
             : [];
       if (targetRows.length === 0) return;
       const colNames = displayedColumns.map((c) => c.name);
@@ -908,7 +1151,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
       e.preventDefault();
       message.success(t('Copied {count} rows as {mode}', { count: targetRows.length, mode: 'TSV' }));
     },
-    [selectedRowKeys, focusedCell, combinedDataSource, displayedColumns, t]
+    [selectedRowKeys, combinedDataSource, displayedColumns, t]
   );
 
   const commitRef = useRef(handleCommitChanges);
@@ -930,7 +1173,17 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
   // - F5: refresh data
   useEffect(() => {
     if (!isActiveTab) return;
+    const hasOpenOverlay = () =>
+      pasteModalOpen ||
+      insertModalOpen ||
+      batchModalOpen ||
+      previewModalOpen ||
+      mobileFilterOpen ||
+      Boolean(inspectRow) ||
+      Boolean(document.querySelector('.ant-modal-wrap:not([style*="display: none"]), .ant-drawer-open'));
+
     const onKeyDown = (e: KeyboardEvent) => {
+      if (hasOpenOverlay()) return;
       const active = document.activeElement;
       const inInput = Boolean(
         active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || (active as HTMLElement).isContentEditable)
@@ -950,8 +1203,9 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
           if (selectedRowKeys.length > 0) {
             e.preventDefault();
             copyRowsRef.current('tsv');
-          } else if (focusedCell) {
-            const row = combinedDataSource.find((r) => r.__rowKey === focusedCell.rowKey);
+          } else if (focusedCellRef.current) {
+            const fcKey = focusedCellRef.current.rowKey;
+            const row = combinedDataSource.find((r) => r.__rowKey === fcKey);
             if (row) {
               e.preventDefault();
               copyRowsRef.current('tsv', [row]);
@@ -965,7 +1219,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
     };
 
     const onPaste = (e: ClipboardEvent) => {
-      if (!canWrite || pasteModalOpen || insertModalOpen) return;
+      if (!canWrite || hasOpenOverlay()) return;
       const active = document.activeElement;
       const inInput = Boolean(
         active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || (active as HTMLElement).isContentEditable)
@@ -988,11 +1242,14 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
     pendingChangeCount,
     saving,
     selectedRowKeys,
-    focusedCell,
     combinedDataSource,
     canWrite,
     pasteModalOpen,
     insertModalOpen,
+    batchModalOpen,
+    previewModalOpen,
+    mobileFilterOpen,
+    inspectRow,
   ]);
 
   const gridWrapRef = useRef<HTMLDivElement | null>(null);
@@ -1058,6 +1315,53 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
   const rowIndexColWidth = isMobile
     ? (newRows.length > 0 ? 92 : 66) + Math.max(0, rowIndexDigits - 2) * 7
     : 76 + Math.max(0, rowIndexDigits - 4) * 7;
+
+  const displayedColsRef = useRef(displayedColumns);
+  displayedColsRef.current = displayedColumns;
+  const checkDissolveRef = useRef(checkDissolveFillerRow);
+  checkDissolveRef.current = checkDissolveFillerRow;
+  const handleCellChangeRef = useRef(handleCellChange);
+  handleCellChangeRef.current = handleCellChange;
+
+  const cellHub = useMemo<CellStateHub>(
+    () => ({
+      subscribe: (rk, colName, fn) => {
+        const key = `${rk}\0${colName}`;
+        let set = cellListenersRef.current.get(key);
+        if (!set) {
+          set = new Set();
+          cellListenersRef.current.set(key, set);
+        }
+        set.add(fn);
+        return () => {
+          const cur = cellListenersRef.current.get(key);
+          if (cur) {
+            cur.delete(fn);
+            if (cur.size === 0) cellListenersRef.current.delete(key);
+          }
+        };
+      },
+      isEditing: (rk, colName) =>
+        editingCellRef.current?.rowKey === rk && editingCellRef.current?.col === colName,
+      isFocused: (rk, colName) =>
+        focusedCellRef.current?.rowKey === rk && focusedCellRef.current?.col === colName,
+      isDirty: (rk, colName) =>
+        Boolean(dirtyUpdatesRef.current[rk] && colName in dirtyUpdatesRef.current[rk]),
+      setEditing: (next) => updateEditingCell(next),
+      setFocused: (next) => updateFocusedCell(next),
+      getDisplayedColumns: () => displayedColsRef.current,
+      setBackup: (b) => {
+        editBackupRef.current = b;
+      },
+      getBackup: () => editBackupRef.current,
+      onCellChange: (rk, colName, val) => handleCellChangeRef.current(rk, colName, val),
+      onPasteCells: (clip, rk, colName) =>
+        pasteRef.current(clip, 'overwrite_cells', { rowKey: rk, col: colName }),
+      onCheckDissolve: (rk, rel) => checkDissolveRef.current(rk, rel),
+      onRemoveNewRow: (rk) => setNewRows((prev) => prev.filter((r) => r.__rowKey !== rk)),
+    }),
+    [updateEditingCell, updateFocusedCell]
+  );
 
   const tableColumns = useMemo(
     () => [
@@ -1319,7 +1623,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                     cellLongPressTimerRef.current = window.setTimeout(() => {
                       cellLongPressTimerRef.current = null;
                       cellLongPressFiredRef.current = true;
-                      setFocusedCell({ rowKey: record.__rowKey, col: col.name });
+                      updateFocusedCell({ rowKey: record.__rowKey, col: col.name });
                       setCtxMenu({
                         open: true,
                         x: cx,
@@ -1365,24 +1669,26 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                   return;
                 }
                 const rk = record.__rowKey;
+                const fc = focusedCellRef.current;
+                const ec = editingCellRef.current;
                 if (
                   isMobile &&
                   canWrite &&
-                  focusedCell?.rowKey === rk &&
-                  focusedCell?.col === col.name &&
-                  !(editingCell?.rowKey === rk && editingCell?.col === col.name) &&
+                  fc?.rowKey === rk &&
+                  fc?.col === col.name &&
+                  !(ec?.rowKey === rk && ec?.col === col.name) &&
                   !String(rk).startsWith('new_')
                 ) {
                   editBackupRef.current = { rowKey: rk, col: col.name, prevVal: record[col.name] };
-                  setEditingCell({ rowKey: rk, col: col.name });
+                  updateEditingCell({ rowKey: rk, col: col.name });
                   return;
                 }
-                setFocusedCell({ rowKey: rk, col: col.name });
+                updateFocusedCell({ rowKey: rk, col: col.name });
               },
               onContextMenu: (e: React.MouseEvent) => {
                 e.preventDefault();
                 if (isMobile && cellLongPressFiredRef.current) return;
-                setFocusedCell({ rowKey: record.__rowKey, col: col.name });
+                updateFocusedCell({ rowKey: record.__rowKey, col: col.name });
                 setCtxMenu({
                   open: true,
                   x: e.clientX,
@@ -1423,175 +1729,19 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
               return null;
             }
 
-            const rk = record.__rowKey;
-            const isEditing = canWrite && editingCell?.rowKey === rk && editingCell?.col === col.name;
-            const isDirty = Boolean(dirtyUpdates[rk] && col.name in dirtyUpdates[rk]);
-            const isNew = canWrite && String(rk).startsWith('new_');
-            const isFocused = focusedCell?.rowKey === rk && focusedCell?.col === col.name;
-
-            if (isEditing || isNew) {
-              const strVal = val === null ? '' : String(val ?? '');
-              const isMultiline = isEditing && (strVal.includes('\n') || strVal.length > 80);
-
-              if (isMultiline) {
-                return (
-                  <Input.TextArea
-                    size="small"
-                    autoFocus
-                    autoSize={{ minRows: 2, maxRows: 6 }}
-                    value={strVal}
-                    style={{ fontFamily: 'monospace', fontSize: 12 }}
-                    onChange={(e) => handleCellChange(rk, col.name, e.target.value)}
-                    onBlur={(e) => {
-                      setEditingCell(null);
-                      checkDissolveFillerRow(rk, e.relatedTarget);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Escape') {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        if (
-                          editBackupRef.current &&
-                          editBackupRef.current.rowKey === rk &&
-                          editBackupRef.current.col === col.name
-                        ) {
-                          handleCellChange(rk, col.name, editBackupRef.current.prevVal);
-                        }
-                        setEditingCell(null);
-                        checkDissolveFillerRow(rk, null);
-                      } else if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-                        e.preventDefault();
-                        setEditingCell(null);
-                      }
-                    }}
-                  />
-                );
-              }
-
-              return (
-                <Input
-                  size="small"
-                  autoFocus={isEditing}
-                  value={strVal}
-                  placeholder={
-                    val === null
-                      ? 'NULL'
-                      : isNew && isPK
-                        ? t('(Auto / PK)')
-                        : ''
-                  }
-                  onChange={(e) => handleCellChange(rk, col.name, e.target.value)}
-                  onPaste={(e) => {
-                    const clip = e.clipboardData?.getData('text/plain') || '';
-                    // Multi-column or multi-row paste inside an active cell spreads across columns & rows cleanly
-                    if (clip.includes('\t') || clip.includes('\n')) {
-                      e.preventDefault();
-                      setEditingCell(null);
-                      applyClipboardPaste(clip, 'overwrite_cells', { rowKey: rk, col: col.name });
-                    }
-                  }}
-                  onBlur={(e) => {
-                    if (!isNew) setEditingCell(null);
-                    checkDissolveFillerRow(rk, e.relatedTarget);
-                  }}
-                  onPressEnter={() => setEditingCell(null)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Tab' && displayedColumns.length > 1) {
-                      const nextIdx = e.shiftKey ? colIdx - 1 : colIdx + 1;
-                      if (nextIdx >= 0 && nextIdx < displayedColumns.length) {
-                        e.preventDefault();
-                        const nextCol = displayedColumns[nextIdx].name;
-                        editBackupRef.current = { rowKey: rk, col: nextCol, prevVal: record[nextCol] };
-                        setEditingCell({ rowKey: rk, col: nextCol });
-                        setFocusedCell({ rowKey: rk, col: nextCol });
-                      }
-                    } else if (e.altKey && !e.shiftKey && e.key.toLowerCase() === 'n' && col.nullable) {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      handleCellChange(rk, col.name, null);
-                      setEditingCell(null);
-                    } else if (e.key === 'Escape') {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      if (!isNew) {
-                        if (
-                          editBackupRef.current &&
-                          editBackupRef.current.rowKey === rk &&
-                          editBackupRef.current.col === col.name
-                        ) {
-                          handleCellChange(rk, col.name, editBackupRef.current.prevVal);
-                        }
-                        setEditingCell(null);
-                      } else if (record.__fromFiller && !record.__touched) {
-                        setEditingCell(null);
-                        setNewRows((prev) => prev.filter((r) => r.__rowKey !== rk));
-                      } else {
-                        setEditingCell(null);
-                      }
-                    }
-                  }}
-                  suffix={
-                    col.nullable && (!isMobile || isEditing || isFocused) ? (
-                      <Tag
-                        style={{ cursor: 'pointer', margin: 0, fontSize: 10 }}
-                        onPointerDown={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          handleCellChange(rk, col.name, null);
-                          setEditingCell(null);
-                        }}
-                        onMouseDown={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          handleCellChange(rk, col.name, null);
-                          setEditingCell(null);
-                        }}
-                      >
-                        {isMobile ? 'NULL' : t('Set NULL')}
-                      </Tag>
-                    ) : undefined
-                  }
-                />
-              );
-            }
-
             return (
-              <span
-                data-raw-copy={formatRawCellText(val)}
-                onDoubleClick={() => {
-                  if (!canWrite) return;
-                  editBackupRef.current = { rowKey: rk, col: col.name, prevVal: val };
-                  setEditingCell({ rowKey: rk, col: col.name });
-                }}
-                style={{
-                  display: 'block',
-                  minHeight: 22,
-                  lineHeight: '22px',
-                  cursor: canWrite ? 'pointer' : 'default',
-                  padding: '0 4px',
-                  borderRadius: 4,
-                  background: isDirty
-                    ? 'rgba(250, 173, 20, 0.22)'
-                    : isFocused
-                      ? 'rgba(22, 119, 255, 0.08)'
-                      : 'transparent',
-                  border: isDirty
-                    ? '1px solid #faad14'
-                    : isFocused
-                      ? '1px solid rgba(22, 119, 255, 0.35)'
-                      : '1px solid transparent',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-                title={canWrite ? t('Double-click to edit cell') : formatRawCellText(val)}
-              >
-                {val === null ? (
-                  <Tag style={{ fontSize: 10, opacity: 0.65, margin: 0, lineHeight: '16px' }}>NULL</Tag>
-                ) : (
-                  String(val)
-                )}
-              </span>
+              <GridDataCell
+                rk={String(record.__rowKey)}
+                col={col}
+                colIdx={colIdx}
+                isPK={isPK}
+                val={val}
+                record={record}
+                canWrite={canWrite}
+                isMobile={isMobile}
+                hub={cellHub}
+                t={t}
+              />
             );
           },
         };
@@ -1600,9 +1750,6 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
     [
       displayedColumns,
       primaryKeys,
-      editingCell,
-      focusedCell,
-      dirtyUpdates,
       page,
       pageSize,
       rowIndexColWidth,
@@ -1612,10 +1759,10 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
       isMobile,
       combinedDataSource.length,
       t,
-      handleCellChange,
-      applyClipboardPaste,
+      cellHub,
+      updateEditingCell,
+      updateFocusedCell,
       materializeFillerRow,
-      checkDissolveFillerRow,
     ]
   );
 
@@ -1712,8 +1859,10 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
         label: isNull
           ? `${t('Filter')}: ${col.name} IS NULL`
           : `${t('Filter')}: ${col.name} = ${String(cellVal).slice(0, 24)}`,
-        onClick: () =>
-          applyQuickWhereClause(isNull ? `${col.name} IS NULL` : `${col.name} = ${escapeSQLVal(String(cellVal))}`),
+        onClick: () => {
+          const qCol = quoteIdentForEngine(tab.dbType, col.name);
+          applyQuickWhereClause(isNull ? `${qCol} IS NULL` : `${qCol} = ${escapeSQLVal(String(cellVal))}`);
+        },
       },
       {
         key: 'filter-neq',
@@ -1721,10 +1870,12 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
         label: isNull
           ? `${t('Filter')}: ${col.name} IS NOT NULL`
           : `${t('Filter')}: ${col.name} != ${String(cellVal).slice(0, 24)}`,
-        onClick: () =>
+        onClick: () => {
+          const qCol = quoteIdentForEngine(tab.dbType, col.name);
           applyQuickWhereClause(
-            isNull ? `${col.name} IS NOT NULL` : `${col.name} != ${escapeSQLVal(String(cellVal))}`
-          ),
+            isNull ? `${qCol} IS NOT NULL` : `${qCol} != ${escapeSQLVal(String(cellVal))}`
+          );
+        },
       },
       {
         key: 'inspect-row',
@@ -1743,7 +1894,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
           label: t('Edit Cell'),
           onClick: () => {
             editBackupRef.current = { rowKey: rec.__rowKey, col: col.name, prevVal: cellVal };
-            setEditingCell({ rowKey: rec.__rowKey, col: col.name });
+            updateEditingCell({ rowKey: rec.__rowKey, col: col.name });
           },
         },
         ...(col.nullable
@@ -1975,9 +2126,9 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                          icon: <SnippetsOutlined />,
                          label: t('Paste Rows'),
                          onClick: () =>
-                           focusedCell ? openPasteDialog('overwrite_cells') : triggerToolbarPaste('new_rows'),
+                           hasFocusedCell ? openPasteDialog('overwrite_cells') : triggerToolbarPaste('new_rows'),
                        },
-                       ...(focusedCell
+                       ...(hasFocusedCell
                          ? [
                              {
                                key: 'paste_cells',
@@ -1991,7 +2142,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                          key: 'paste_modal',
                          icon: <SnippetsOutlined />,
                          label: t('Paste...'),
-                         onClick: () => openPasteDialog(focusedCell ? 'overwrite_cells' : 'new_rows'),
+                         onClick: () => openPasteDialog(hasFocusedCell ? 'overwrite_cells' : 'new_rows'),
                        },
                     ],
                   }}
@@ -2655,7 +2806,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
         width="min(680px, 95vw)"
         onCancel={() => setPasteModalOpen(false)}
         onOk={() => {
-          if (applyClipboardPaste(pasteText, pasteMode, focusedCell)) {
+          if (applyClipboardPaste(pasteText, pasteMode, focusedCellRef.current)) {
             setPasteModalOpen(false);
             setPasteText('');
           }
@@ -2669,7 +2820,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
             style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: 6 }}
           >
             <Radio value="new_rows">{t('Insert as New Staged Row(s)')}</Radio>
-            <Radio value="overwrite_cells" disabled={!focusedCell}>
+            <Radio value="overwrite_cells" disabled={!hasFocusedCell}>
               {t('Overwrite Starting from Active Cell')}
             </Radio>
           </Radio.Group>
@@ -2893,8 +3044,9 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                                 : `${t('Filter')}: ${c.name} = ${strVal.slice(0, 24)}`
                             }
                             onClick={() => {
+                              const qCol = quoteIdentForEngine(tab.dbType, c.name);
                               applyQuickWhereClause(
-                                isNullVal ? `${c.name} IS NULL` : `${c.name} = ${escapeSQLVal(strVal)}`
+                                isNullVal ? `${qCol} IS NULL` : `${qCol} = ${escapeSQLVal(strVal)}`
                               );
                               setInspectRow(null);
                             }}
@@ -2909,8 +3061,9 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                                 : `${t('Filter')}: ${c.name} != ${strVal.slice(0, 24)}`
                             }
                             onClick={() => {
+                              const qCol = quoteIdentForEngine(tab.dbType, c.name);
                               applyQuickWhereClause(
-                                isNullVal ? `${c.name} IS NOT NULL` : `${c.name} != ${escapeSQLVal(strVal)}`
+                                isNullVal ? `${qCol} IS NOT NULL` : `${qCol} != ${escapeSQLVal(strVal)}`
                               );
                               setInspectRow(null);
                             }}

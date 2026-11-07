@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"dbharbor/backend/internal/driver"
-	"dbharbor/backend/internal/driver/dbprivs"
 	"dbharbor/backend/internal/driver/sqlbase"
+	"dbharbor/backend/internal/driver/sqlmeta"
 	"dbharbor/backend/internal/store"
 )
 
@@ -263,7 +263,7 @@ func (s *Server) handleListObjects(c *Context) {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
 	}
-	dbprivs.EnrichRoutinesAndTriggers(c.Request.Context(), cfg.Type, sqlDrv, &objs)
+	sqlmeta.EnrichSchemaObjects(c.Request.Context(), cfg.Type, sqlDrv, &objs)
 	c.JSON(http.StatusOK, objs)
 }
 
@@ -281,14 +281,20 @@ func (s *Server) handleGetTableStructure(c *Context) {
 }
 
 func (s *Server) handleCreateTable(c *Context) {
-	sqlDrv, cfg, ok := s.getSQLDriverAccess(c, true)
-	if !ok {
-		return
-	}
 	var req driver.CreateTableRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": "Invalid request parameters"})
 		return
+	}
+	sqlDrv, cfg, ok := s.getSQLDriverAccess(c, !req.PreviewOnly)
+	if !ok {
+		return
+	}
+	if !s.desktop.Enabled && !c.IsAdmin() && !s.opts.AllowPrivateNetForNonAdmin && strings.EqualFold(cfg.Type, "clickhouse") {
+		if err := sqlbase.ValidateClickHouseWebEngineClause(req.Engine); err != nil {
+			c.JSON(http.StatusForbidden, H{"error": err.Error()})
+			return
+		}
 	}
 	start := time.Now()
 	ddl, err := sqlDrv.CreateTable(c.Request.Context(), req)
@@ -307,14 +313,24 @@ func (s *Server) handleCreateTable(c *Context) {
 }
 
 func (s *Server) handleAlterTable(c *Context) {
-	sqlDrv, cfg, ok := s.getSQLDriverAccess(c, true)
-	if !ok {
-		return
-	}
 	var req driver.AlterTableRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": "Invalid request parameters"})
 		return
+	}
+	sqlDrv, cfg, ok := s.getSQLDriverAccess(c, !req.PreviewOnly)
+	if !ok {
+		return
+	}
+	if !s.desktop.Enabled && !c.IsAdmin() && !s.opts.AllowPrivateNetForNonAdmin && strings.EqualFold(cfg.Type, "clickhouse") {
+		for _, act := range req.Actions {
+			if strings.TrimSpace(act.Projection.Query) != "" {
+				if err := sqlbase.ValidateClickHouseRestrictedWebSQL(act.Projection.Query); err != nil {
+					c.JSON(http.StatusForbidden, H{"error": err.Error()})
+					return
+				}
+			}
+		}
 	}
 	start := time.Now()
 	stmts, err := sqlDrv.AlterTable(c.Request.Context(), req)
@@ -334,27 +350,38 @@ func (s *Server) handleAlterTable(c *Context) {
 }
 
 func (s *Server) handleObjectAction(c *Context) {
-	sqlDrv, cfg, ok := s.getSQLDriverAccess(c, true)
-	if !ok {
-		return
-	}
 	var req driver.ObjectActionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": "Invalid request parameters"})
 		return
 	}
-	start := time.Now()
-	if err := sqlDrv.ManageObject(c.Request.Context(), req); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+	sqlDrv, cfg, ok := s.getSQLDriverAccess(c, !req.PreviewOnly)
+	if !ok {
 		return
 	}
-	s.invalidateConnCache(cfg.ID)
-	s.store.AddHistory(store.HistoryEntry{
-		UserID: c.UserID(), ConnectionID: cfg.ID, ConnName: cfg.Name, DBType: cfg.Type,
-		Database: req.Database, Query: fmt.Sprintf("/* %s %s %s */", req.Action, req.ObjectType, req.ObjectName),
-		ElapsedMs: time.Since(start).Milliseconds(), Status: "ok",
-	})
-	c.JSON(http.StatusOK, H{"message": "Operation completed successfully"})
+	req.WebMode = !s.desktop.Enabled
+	req.IsAdmin = s.desktop.Enabled || c.Principal.Role == store.RoleAdmin
+	req.AllowPrivIP = s.desktop.Enabled || c.Principal.Role == store.RoleAdmin || s.opts.AllowPrivateNetForNonAdmin
+
+	start := time.Now()
+	sqls, err := sqlmeta.ExecuteObjectAction(c.Request.Context(), cfg.Type, sqlDrv, req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, H{"error": err.Error(), "sqls": sqls})
+		return
+	}
+	if !req.PreviewOnly {
+		s.invalidateConnCache(cfg.ID)
+		histQuery := fmt.Sprintf("/* %s %s %s */", req.Action, req.ObjectType, req.ObjectName)
+		if len(sqls) > 0 {
+			histQuery = strings.Join(sqls, ";\n")
+		}
+		s.store.AddHistory(store.HistoryEntry{
+			UserID: c.UserID(), ConnectionID: cfg.ID, ConnName: cfg.Name, DBType: cfg.Type,
+			Database: req.Database, Query: histQuery,
+			ElapsedMs: time.Since(start).Milliseconds(), Status: "ok",
+		})
+	}
+	c.JSON(http.StatusOK, H{"message": "Operation completed successfully", "sqls": sqls})
 }
 
 func (s *Server) handleBrowseData(c *Context) {
@@ -453,7 +480,7 @@ func (s *Server) handleListPartitions(c *Context) {
 		c.JSON(http.StatusOK, H{"partitions": []driver.PartitionInfo{}})
 		return
 	}
-	parts, err := pm.ListPartitions(c.Request.Context(), c.Query("database"), c.Query("table"))
+	parts, err := pm.ListPartitions(c.Request.Context(), c.Query("database"), c.Query("schema"), c.Query("table"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
@@ -463,10 +490,15 @@ func (s *Server) handleListPartitions(c *Context) {
 
 func (s *Server) handleManagePartition(c *Context) {
 	connID := c.Param("id")
-	if !s.authorizeConn(c, connID, true) {
+	var req driver.PartitionActionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, H{"error": "Invalid request parameters"})
 		return
 	}
-	drv, _, err := s.acquireConnDriver(c, connID)
+	if !s.authorizeConn(c, connID, !req.PreviewOnly) {
+		return
+	}
+	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
@@ -476,21 +508,20 @@ func (s *Server) handleManagePartition(c *Context) {
 		c.JSON(http.StatusBadRequest, H{"error": "Partition management is not supported by this database engine"})
 		return
 	}
-	var req struct {
-		Database    string `json:"database"`
-		Table       string `json:"table"`
-		PartitionID string `json:"partitionId"`
-		Action      string `json:"action"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": "Invalid request parameters"})
+	start := time.Now()
+	stmt, err := pm.ManagePartition(c.Request.Context(), req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, H{"error": err.Error(), "sql": stmt})
 		return
 	}
-	if err := pm.ManagePartition(c.Request.Context(), req.Database, req.Table, req.PartitionID, req.Action); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
-		return
+	if !req.PreviewOnly && stmt != "" {
+		s.invalidateConnCache(connID)
+		s.store.AddHistory(store.HistoryEntry{
+			UserID: c.UserID(), ConnectionID: cfg.ID, ConnName: cfg.Name, DBType: cfg.Type,
+			Database: req.Database, Query: stmt, ElapsedMs: time.Since(start).Milliseconds(), Status: "ok",
+		})
 	}
-	c.JSON(http.StatusOK, H{"message": "Partition operation completed successfully"})
+	c.JSON(http.StatusOK, H{"message": "Partition operation completed successfully", "sql": stmt})
 }
 
 func (s *Server) handleExecuteQuery(c *Context) {
@@ -510,6 +541,12 @@ func (s *Server) handleExecuteQuery(c *Context) {
 	if !c.CanWrite() {
 		if err := sqlbase.ValidateReadOnlyScript(req.Query); err != nil {
 			c.JSON(http.StatusForbidden, H{"error": "Read-only mode: " + err.Error()})
+			return
+		}
+	}
+	if !s.desktop.Enabled && !c.IsAdmin() && !s.opts.AllowPrivateNetForNonAdmin && strings.EqualFold(cfg.Type, "clickhouse") {
+		if err := sqlbase.ValidateClickHouseRestrictedWebSQL(req.Query); err != nil {
+			c.JSON(http.StatusForbidden, H{"error": err.Error()})
 			return
 		}
 	}
@@ -606,7 +643,7 @@ func (s *Server) handleAutocomplete(c *Context) {
 }
 
 func (s *Server) handleExport(c *Context) {
-	sqlDrv, _, ok := s.getSQLDriverAccess(c, false)
+	sqlDrv, cfg, ok := s.getSQLDriverAccess(c, false)
 	if !ok {
 		return
 	}
@@ -616,6 +653,12 @@ func (s *Server) handleExport(c *Context) {
 	if customSQL != "" && !c.CanWrite() {
 		if err := sqlbase.ValidateReadOnlyScript(customSQL); err != nil {
 			c.JSON(http.StatusForbidden, H{"error": "Read-only mode: " + err.Error()})
+			return
+		}
+	}
+	if customSQL != "" && !s.desktop.Enabled && !c.IsAdmin() && !s.opts.AllowPrivateNetForNonAdmin && strings.EqualFold(cfg.Type, "clickhouse") {
+		if err := sqlbase.ValidateClickHouseRestrictedWebSQL(customSQL); err != nil {
+			c.JSON(http.StatusForbidden, H{"error": err.Error()})
 			return
 		}
 	}
@@ -692,21 +735,23 @@ func (s *Server) handleImport(c *Context) {
 		return
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, s.maxImportBytes())
-	fileHeader, err := c.FormFile("file")
+	part, origFilename, fields, err := c.StreamFormFile("file")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": "Please upload a data file to import"})
 		return
 	}
-	f, err := fileHeader.Open()
-	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": "Failed to read uploaded file"})
-		return
-	}
-	defer f.Close()
+	defer part.Close()
 
-	format := strings.ToLower(strings.TrimSpace(c.PostForm("format")))
+	fieldOrQuery := func(key string) string {
+		if v := strings.TrimSpace(fields[key]); v != "" {
+			return v
+		}
+		return strings.TrimSpace(c.Query(key))
+	}
+
+	format := strings.ToLower(fieldOrQuery("format"))
 	if format == "" {
-		lower := strings.ToLower(fileHeader.Filename)
+		lower := strings.ToLower(origFilename)
 		switch {
 		case strings.HasSuffix(lower, ".sql"):
 			format = "sql"
@@ -719,15 +764,15 @@ func (s *Server) handleImport(c *Context) {
 		}
 	}
 
-	database := c.PostForm("database")
-	table := c.PostForm("table")
+	database := fieldOrQuery("database")
+	table := fieldOrQuery("table")
 	res, err := sqlDrv.BatchImport(c.Request.Context(), driver.ImportRequest{
 		Database:        database,
-		Schema:          c.PostForm("schema"),
+		Schema:          fieldOrQuery("schema"),
 		Table:           table,
 		Format:          format,
-		ContinueOnError: c.PostForm("continueOnError") == "true",
-		Reader:          f,
+		ContinueOnError: strings.EqualFold(fieldOrQuery("continueOnError"), "true"),
+		Reader:          part,
 	})
 	status := "ok"
 	errMsg := ""
@@ -739,7 +784,7 @@ func (s *Server) handleImport(c *Context) {
 	s.store.AddHistory(store.HistoryEntry{
 		UserID: c.UserID(), ConnectionID: cfg.ID, ConnName: cfg.Name, DBType: cfg.Type,
 		Database:  database,
-		Query:     fmt.Sprintf("/* IMPORT %s file=%s rows=%d */", strings.ToUpper(format), fileHeader.Filename, res.ImportedRows),
+		Query:     fmt.Sprintf("/* IMPORT %s file=%s rows=%d */", strings.ToUpper(format), origFilename, res.ImportedRows),
 		ElapsedMs: res.ElapsedMs, Status: status, ErrorMsg: errMsg,
 	})
 	if err != nil {
@@ -763,6 +808,12 @@ func (s *Server) handleImportSQLText(c *Context) {
 	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.SQL) == "" {
 		c.JSON(http.StatusBadRequest, H{"error": "SQL script content cannot be empty"})
 		return
+	}
+	if !s.desktop.Enabled && !c.IsAdmin() && !s.opts.AllowPrivateNetForNonAdmin && strings.EqualFold(cfg.Type, "clickhouse") {
+		if err := sqlbase.ValidateClickHouseRestrictedWebSQL(req.SQL); err != nil {
+			c.JSON(http.StatusForbidden, H{"error": err.Error()})
+			return
+		}
 	}
 
 	res, err := sqlDrv.BatchImport(c.Request.Context(), driver.ImportRequest{

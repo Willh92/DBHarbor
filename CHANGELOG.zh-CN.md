@@ -4,6 +4,29 @@
 
 DBHarbor 的所有重要版本变更均记录于此文件，并与 GitHub 仓库 [Willh92/DBHarbor](https://github.com/Willh92/DBHarbor.git) 保持同步。
 
+## [v1.0.2] - 2026-11-07
+
+> **版本形态边界说明**：**原生桌面窗体版 (`dbharbor-desktop-*` / `DBHarbor.app`)** 始终采用**无用户账户体系的纯本地免登录模式**并保有完整本机文件访问权限；浏览器端临时单文件数据库工作区（`<DataDir>/ephemeral_workspaces/`）与非管理员按用户隔离目录（`<DataDir>/local_databases/u_<hash>/`）**仅适用于 Web 服务版 (`dbharbor-*`)**。
+
+### 14 引擎特有对象全量 CRUD、Web 浏览器直开本地单文件库、侧栏折叠与状态隔离、深度安全与体积内存优化
+- **Web 浏览器直开本地单文件数据库 (`SQLite 3` & `DuckDB`) *(仅 Web 服务版)***：
+  - Web 服务版侧栏与新建连接弹窗新增拖拽及一键 **“打开本地库 (`Open Local DB`)”**（`POST /api/connections/ephemeral-singlefile`），无需访问服务器宿主机目录即可直接载入浏览器本机 `.db` / `.sqlite` / `.sqlite3` / `.duckdb` / `.ddb` 文件进行可视化查询、改表与编辑。
+  - 上传文件按登录用户独立隔离在 `0700` `<DataDir>/ephemeral_workspaces/` 沙箱内并强制校验二进制文件头魔数（`SQLite format 3\0` / `DUCK`），导出前自动刷盘（`PRAGMA wal_checkpoint(TRUNCATE)` / `CHECKPOINT`），在 Chromium 内核浏览器支持通过 File System Access API **一键直接写回覆盖本机原文件**，全浏览器支持一键下载最新库文件快照（`GET /api/connections/{id}/download-file`），并内置并发安全配额与 12 小时闲置自动清理。
+- **14 类数据库引擎特有元素可视化 CRUD 与 NoSQL 深度治理 (`sqlmeta` + `SchemaObjectModal`)**：
+  - **MySQL / MariaDB / OceanBase / TiDB**：新增 **定时事件 (`Scheduled Events`)**（`ONE TIME` / `EVERY` 调度、启停状态、`ON COMPLETION PRESERVE`）、**序列 (`Sequences`，MariaDB 10.3+ / TiDB)**、**表分区 (`ADD` / `DROP` / `TRUNCATE PARTITION`)**、**生成列 (`VIRTUAL` / `STORED`)** 与 **`CHECK` 约束** 可视化增删改查及实时 DDL 预览。
+  - **PostgreSQL / 人大金仓 KingbaseES**：新增 **序列 (`Sequences`)**、**物化视图 (`Materialized Views` 含一键 `REFRESH [CONCURRENTLY]`)**、**扩展插件 (`Extensions`)**、**自定义类型 (`ENUM` / `DOMAIN`)**、**声明式表分区 (`ATTACH` / `DETACH`)**、**生成列** 与 **`CHECK` 约束** 可视化管理。
+  - **ClickHouse**：新增 **投影 (`Projections`：新建 / 物化 `MATERIALIZE` / 清理 / 删除)**、**跳数索引 (`Data Skipping Indexes`：`minmax`、`set`、`bloom_filter`、`tokenbf_v1`、`ngrambf_v1` 含粒度与物化)**、**物化视图 (`Materialized Views`)**、**表级 `TTL` 策略管理**、**外部字典 (`Dictionaries`)** 与 **SQL 自定义函数 (`CREATE FUNCTION ... AS (...) -> expr`)** 全生命周期管理。
+  - **Oracle / 达梦 DM8 与 SQL Server**：新增 **程序包 (`PACKAGE` 包头 + `PACKAGE BODY` 包体双页签编辑与重编译)**、**序列 (`Sequences`)**、**物化视图 (`DBMS_MVIEW.REFRESH`)**、**同义词 (`PRIVATE` / `PUBLIC Synonyms`)**、**数据库链接 (`DB Links`，Web 服务版仅限管理员)**、**表分区**、**虚拟列/计算列 (`Computed Columns`)** 与 **`CHECK` 约束** 可视化管理。
+  - **DuckDB 与 SQLite 3**：DuckDB 支持多 Schema 切换与新建（`main`、`temp` 与自定义 Schema）、**序列 (`Sequences`)** 及 **标量/表宏 (`Scalar / Table Macros`)**；SQLite 3 支持 **`FTS5` 全文检索 / `RTree` 虚拟表** 可视化创建与只读 **`PRAGMA` 诊断及完整性体检面板**（`PRAGMA quick_check`、`foreign_key_check`）。
+  - **MongoDB 与 Redis**：MongoDB 支持新建普通集合、**只读聚合视图 (`Views`)**、**时序集合 (`Time-Series`)** 与 **固定大小集合 (`Capped`)**，支持 **`$jsonSchema` 文档校验规则 (`collMod`)** 与 **TTL / Partial / Sparse / Unique 高级索引**；Redis 支持 **Stream 消费者组治理**（`XINFO`、`XGROUP CREATE / SETID / DESTROY`、`XPENDING` + `XACK`）、**慢日志 (`Slowlog`)**、**运行参数 (`CONFIG GET`)** 与 **Pub/Sub 频道探测及消息发布**。
+- **左侧对象树默认全折叠、一键展开/折叠开关与全工作台状态严格隔离**：
+  - 左侧导航栏所有对象分类（数据表、视图、物化视图、函数、触发器、事件、序列、包、类型、扩展、同义词、DB Link、字典等）在首次加载及切换连接/数据库/Schema 时**默认全部折叠**，并在搜索框旁提供多语言 **“全部展开 / 全部折叠”** 快捷开关。
+  - 彻底修复按数组下标/分类名复用的折叠串位 Bug，并全面隔离侧栏缓存、`OverviewTab`、`TableStructureTab`、`TableDataTab`、`SqlConsoleTab`、`DbUsersTab`、`RedisBrowserTab`、`MongoCollectionTab`、弹窗状态以及多账号切换时 `localStorage` 标签页/SQL 草稿状态。
+- **纵深安全加固、并发可靠性、内存占用与安装包体积瘦身**：
+  - **无损包体积与首屏资源瘦身**：新增构建期纯 Go Oracle 驱动 `go-ora` 236 张字符集表 Gzip 压缩覆盖器（`cmd/gen-overlay`，保留 100% Oracle 字符集兼容性的同时使全平台 12 个二进制与 Docker 镜像**单包直降 `-11.20 MB`**），并按需拆分前端重型代码块（首屏预加载 JS 体积降低 **`-78.6%`**）。
+  - **内存峰值与并发可靠性优化**：文件上传改用流式 `MultipartReader` 直写磁盘（内存占用 `< 64 KiB`），数据网格引入 `CellStateHub` 精细化单元格订阅（行渲染内存降低 `-50%`），DuckDB CLI 增加按文件互斥锁、事务化 `ApplyRowMutations` 与流式 `COPY ... TO` 导出，PostgreSQL 子库连接池仅淘汰空闲句柄，临时库清理器增加活跃上传/连接保护锁。
+  - **沙箱、SSRF 与深色模式修复**：DuckDB Web 沙箱强制启用 `-safe` 安全模式并通过 `stdin` 传递 SQL 拦截点命令注入；SQLite Web 沙箱升级为词法级扫描拦截注释/引号绕过的 `ATTACH` 与文件函数并封堵 `?`/`#` DSN 参数注入；Web 非管理员本地库按用户哈希子目录 `<DataDir>/local_databases/u_<hash>/` 严格隔离；只读 SQL 守卫解包识别 MariaDB `/*M!...*/` 可执行注释；Oracle / 达梦等远程驱动全面接入拨号期防 DNS 重绑定 SSRF 校验与 IPv6 `net.JoinHostPort`；修复深色模式下打开对象编辑弹窗导致全局 Monaco 编辑器变白的问题。
+
 ## [v1.0.1] - 2026-11-07
 
 > **版本形态边界说明**：**原生桌面窗体版 (`dbharbor-desktop-*` / `DBHarbor.app`)** 始终采用**无用户账户体系的纯本地免登录模式**；下方持久化服务端配置（`<DataDir>/config.json`）、首次管理员初始化向导、登录页品牌定制、管理员应急找回模式（`recovery` / `-recover-admin`）以及本地文件与内网沙箱隔离**仅适用于 Web 服务版 (`dbharbor-*`)**。

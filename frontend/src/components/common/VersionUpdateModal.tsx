@@ -224,8 +224,22 @@ export const VersionUpdateModal: React.FC<Props> = ({
       (initialCheckResult?.channel === 'preview' || initialBuildInfo?.channel === 'preview' ? 'preview' : 'release')
   );
   const [checking, setChecking] = useState(false);
+  const [lazyChangelogs, setLazyChangelogs] = useState<Record<string, string>>({});
   const [autoRemind, setAutoRemind] = useState<boolean>(() => getAutoUpdateRemindEnabled());
   const [skippedVer, setSkippedVer] = useState<string>(() => getSkippedUpdateVersion());
+
+  const ensureLazyChangelog = async (lg: AppLocale, verInfo?: BuildVersionInfo | null) => {
+    const info = verInfo || buildInfo || initialBuildInfo;
+    if (info?.embeddedChangelogs?.[lg] || lazyChangelogs[lg]) return;
+    try {
+      const res = await api.getChangelog(lg);
+      if (res?.markdown) {
+        setLazyChangelogs((prev) => ({ ...prev, [lg]: res.markdown }));
+      }
+    } catch {
+      // ignore offline/fallback error
+    }
+  };
 
   const runCheck = async (force: boolean, targetLang?: AppLocale, targetChannel?: UpdateChannel) => {
     const ch = targetChannel || channel;
@@ -235,6 +249,9 @@ export const VersionUpdateModal: React.FC<Props> = ({
       const [ver, upd] = await Promise.all([api.getVersion(lg), api.checkUpdate(force, lg, ch)]);
       setBuildInfo(ver);
       setCheckData(upd);
+      if (!ver?.embeddedChangelogs?.[lg] && !ver?.embeddedChangelog) {
+        ensureLazyChangelog(lg, ver);
+      }
       if (!getSavedUpdateChannel() && (upd.channel === 'preview' || upd.channel === 'release')) {
         setChannel(upd.channel);
       }
@@ -269,12 +286,14 @@ export const VersionUpdateModal: React.FC<Props> = ({
   const handleChangelogLangChange = (val: string | number) => {
     const nextLang = val as AppLocale;
     setChangelogLang(nextLang);
-    // Immediate 0ms switch using built-in localized changelog map while syncing online in background
-    const instantLocal = buildInfo?.embeddedChangelogs?.[nextLang];
+    // Immediate 0ms switch using built-in or lazy-cached localized changelog map while syncing online in background
+    const instantLocal = buildInfo?.embeddedChangelogs?.[nextLang] || lazyChangelogs[nextLang];
     if (instantLocal && checkData?.changelogSource === 'embedded') {
       setCheckData((prev) =>
         prev ? { ...prev, changelogLang: nextLang, changelogMarkdown: instantLocal } : prev
       );
+    } else if (!instantLocal) {
+      ensureLazyChangelog(nextLang);
     }
     runCheck(false, nextLang, channel);
   };
@@ -285,6 +304,9 @@ export const VersionUpdateModal: React.FC<Props> = ({
       setAutoRemind(getAutoUpdateRemindEnabled());
       setSkippedVer(getSkippedUpdateVersion());
       if (initialBuildInfo && !buildInfo) setBuildInfo(initialBuildInfo);
+      if (!initialBuildInfo?.embeddedChangelogs?.[locale] && !initialBuildInfo?.embeddedChangelog) {
+        ensureLazyChangelog(locale, initialBuildInfo);
+      }
       runCheck(false, locale, channel);
     }
   }, [open, locale]);
@@ -292,9 +314,11 @@ export const VersionUpdateModal: React.FC<Props> = ({
   const srcBadge = SOURCE_LABELS[checkData?.changelogSource || 'embedded'] || SOURCE_LABELS.embedded;
   const repoUrl = checkData?.repoUrl || buildInfo?.repoUrl || 'https://github.com/Willh92/DBHarbor';
   const activeMarkdown =
-    (checkData?.changelogSource === 'embedded' && buildInfo?.embeddedChangelogs?.[changelogLang]) ||
+    (checkData?.changelogSource === 'embedded' &&
+      (buildInfo?.embeddedChangelogs?.[changelogLang] || lazyChangelogs[changelogLang])) ||
     checkData?.changelogMarkdown ||
     buildInfo?.embeddedChangelogs?.[changelogLang] ||
+    lazyChangelogs[changelogLang] ||
     buildInfo?.embeddedChangelog ||
     t('No changelog available');
 
@@ -308,6 +332,8 @@ export const VersionUpdateModal: React.FC<Props> = ({
         </Space>
       }
       width="min(820px, calc(100vw - 24px))"
+      style={isMobile ? { top: 10 } : undefined}
+      styles={{ body: { maxHeight: isMobile ? 'calc(100dvh - 140px)' : 'calc(100dvh - 180px)', overflowY: 'auto' } }}
       onCancel={onClose}
       footer={null}
       destroyOnClose
@@ -329,7 +355,7 @@ export const VersionUpdateModal: React.FC<Props> = ({
                 {t('Current Version')}:
               </Typography.Text>
               <Tag color="geekblue" style={{ fontWeight: 700, margin: 0 }}>
-                {checkData?.currentVersion || buildInfo?.displayVersion || 'v1.0.1'}
+                {checkData?.currentVersion || buildInfo?.displayVersion || 'v1.0.2'}
               </Tag>
               {buildInfo?.edition === 'desktop' && (
                 <Tag color="purple" style={{ margin: 0 }}>

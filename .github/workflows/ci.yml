@@ -59,8 +59,8 @@ jobs:
       - name: Cross-compile host & sample targets (Server + Desktop GUI)
         run: |
           node scripts/build.mjs --skip-fe
-          GOOS=windows GOARCH=amd64 go -C backend build -trimpath -ldflags="-s -w -H=windowsgui" -o /tmp/dbharbor-desktop-win.exe ./cmd/dbharbor-desktop
-          GOOS=darwin GOARCH=arm64 go -C backend build -trimpath -ldflags="-s -w" -o /tmp/dbharbor-desktop-mac ./cmd/dbharbor-desktop
+          GOOS=windows GOARCH=amd64 go -C backend build -trimpath -modfile=../.toolchain/build-overlay/go.slim.mod -ldflags="-s -w -H=windowsgui" -o /tmp/dbharbor-desktop-win.exe ./cmd/dbharbor-desktop
+          GOOS=darwin GOARCH=arm64 go -C backend build -trimpath -modfile=../.toolchain/build-overlay/go.slim.mod -ldflags="-s -w" -o /tmp/dbharbor-desktop-mac ./cmd/dbharbor-desktop
           rm -f /tmp/dbharbor-desktop-win.exe /tmp/dbharbor-desktop-mac
 
       - name: Run Go unit, security, Unix socket & desktop E2E tests

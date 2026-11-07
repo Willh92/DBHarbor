@@ -4,6 +4,7 @@ import type {
   AuthSession,
   AuthStatusResponse,
   BuildVersionInfo,
+  CheckConstraintDef,
   CollectionSummary,
   ColumnDef,
   ConnectionFormPayload,
@@ -15,19 +16,24 @@ import type {
   DesktopExportResult,
   DocIndexInfo,
   DriverMeta,
+  EphemeralOpenResponse,
   ExportedConnectionProfile,
   ForeignKeyDef,
   HistoryEntry,
   ImportResult,
   IndexDef,
   KVBackupPayload,
+  KVConfigItem,
   KVEntryDetail,
   KVKeySummary,
+  KVSlowlogEntry,
+  KVStreamInfo,
   LocalFSBrowseResponse,
   LoginBrandingConfig,
   LoginResponse,
   ManagedUser,
   MonitorSnapshot,
+  ObjectActionPayload,
   PartitionInfo,
   QueryResult,
   SavedConnection,
@@ -346,6 +352,11 @@ export const api = {
       params: lang ? { lang } : undefined,
       skipAuthRedirect: true,
     }),
+  getChangelog: (lang?: string) =>
+    request<{ lang: string; markdown: string }>('/version/changelog', {
+      params: { lang: lang || detectInitialLocale() },
+      skipAuthRedirect: true,
+    }),
   checkUpdate: (force = false, lang?: string, channel?: UpdateChannel) => {
     const locale = lang || detectInitialLocale();
     const resolvedChannel = channel || getSavedUpdateChannel();
@@ -382,6 +393,61 @@ export const api = {
       method: 'POST',
       body: fd,
     });
+  },
+  openEphemeralDBFile: (file: File, driverType: 'auto' | 'sqlite' | 'duckdb' = 'auto') => {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (driverType && driverType !== 'auto') {
+      fd.append('driverType', driverType);
+    }
+    return request<EphemeralOpenResponse>('/fs/ephemeral-open', {
+      method: 'POST',
+      body: fd,
+    });
+  },
+  fetchEphemeralDBFileBlob: async (connId: string): Promise<Blob> => {
+    const locale = detectInitialLocale();
+    const headers: Record<string, string> = {
+      'Accept-Language': locale,
+    };
+    const desktopToken = getRuntimeBootMeta().desktopToken;
+    if (desktopToken) {
+      headers['X-DBHarbor-Desktop'] = desktopToken;
+    }
+    const token = getAuthToken();
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    const res = await fetch(`/api/conn/${encodeURIComponent(connId)}/file/export`, {
+      method: 'GET',
+      headers,
+      credentials: 'same-origin',
+    });
+    if (!res.ok) {
+      if (res.status === 401 && !isDesktopRuntime()) {
+        setAuthToken('');
+        window.dispatchEvent(new CustomEvent('dbharbor:unauthorized'));
+      }
+      const text = await res.text();
+      let errMsg = `Export failed (HTTP ${res.status})`;
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed?.error) errMsg = parsed.error;
+      } catch {
+        if (text) errMsg = text;
+      }
+      throw new ApiError(errMsg, res.status);
+    }
+    return res.blob();
+  },
+  triggerEphemeralDBFileDownload: async (connId: string): Promise<void> => {
+    const { ticket } = await request<{ ticket: string }>('/auth/ticket', { method: 'POST' });
+    const a = document.createElement('a');
+    a.href = `/api/conn/${encodeURIComponent(connId)}/file/export?ticket=${encodeURIComponent(ticket)}`;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   },
 
   listDrivers: async () => {
@@ -480,11 +546,16 @@ export const api = {
       columns: ColumnDef[];
       indexes?: IndexDef[];
       foreignKeys?: ForeignKeyDef[];
+      checkConstraints?: CheckConstraintDef[];
       engine?: string;
       orderBy?: string;
       partitionBy?: string;
       charset?: string;
       comment?: string;
+      strict?: boolean;
+      withoutRowId?: boolean;
+      virtualModule?: string;
+      virtualArgs?: string;
       previewOnly?: boolean;
     }
   ) => {
@@ -514,20 +585,8 @@ export const api = {
 
   objectAction: (
     connId: string,
-    payload: {
-      database: string;
-      schema?: string;
-      objectName: string;
-      objectType: string;
-      action: string;
-      targetName?: string;
-      viewSQL?: string;
-      viewSql?: string;
-      routineSql?: string;
-      replaceExisting?: boolean;
-      comment?: string;
-    }
-  ) => request<{ message: string }>(`/conn/${connId}/object/action`, { method: 'POST', body: payload }),
+    payload: ObjectActionPayload & { viewSQL?: string }
+  ) => request<{ message: string; sqls?: string[] }>(`/conn/${connId}/object/action`, { method: 'POST', body: payload }),
 
   // Data Browse & Mutations
   browseData: (
@@ -580,18 +639,39 @@ export const api = {
       { method: 'POST', body: payload }
     ),
 
-  // ClickHouse Partitions
-  listPartitions: async (connId: string, database: string, table: string) => {
+  // Cross-Engine Table Partitions
+  listPartitions: async (connId: string, database: string, table: string, schema = '') => {
     const data = await request<{ partitions: PartitionInfo[] }>(`/conn/${connId}/table/partitions`, {
-      params: { database, table },
+      params: { database, schema: schema || undefined, table },
     });
     return data.partitions || [];
   },
-  managePartition: (connId: string, database: string, table: string, partitionId: string, action: string) =>
-    request<{ message: string }>(`/conn/${connId}/table/partitions/action`, {
+  managePartition: (
+    connId: string,
+    databaseOrPayload:
+      | string
+      | {
+          database: string;
+          schema?: string;
+          table: string;
+          partitionId: string;
+          action: string;
+          expression?: string;
+          previewOnly?: boolean;
+        },
+    table?: string,
+    partitionId?: string,
+    action?: string
+  ) => {
+    const body =
+      typeof databaseOrPayload === 'string'
+        ? { database: databaseOrPayload, table: table || '', partitionId: partitionId || '', action: action || '' }
+        : databaseOrPayload;
+    return request<{ message: string; sql?: string }>(`/conn/${connId}/table/partitions/action`, {
       method: 'POST',
-      body: { database, table, partitionId, action },
-    }),
+      body,
+    });
+  },
 
   // SQL Console & Autocomplete
   executeQuery: (connId: string, database: string, query: string, maxRows = 1000, signal?: AbortSignal) =>
@@ -734,6 +814,39 @@ export const api = {
       method: 'POST',
       body: payload,
     }),
+  kvStreamInfo: (connId: string, db: number, key: string) =>
+    request<KVStreamInfo>(`/conn/${connId}/kv/stream-info`, { params: { db, key } }),
+  kvStreamGroup: (
+    connId: string,
+    payload: {
+      db: number;
+      key: string;
+      action: 'CREATE' | 'SETID' | 'DESTROY' | 'DELCONSUMER';
+      group: string;
+      startId?: string;
+      consumer?: string;
+    }
+  ) =>
+    request<{ message: string }>(`/conn/${connId}/kv/stream-group`, {
+      method: 'POST',
+      body: payload,
+    }),
+  kvGetDiagnostics: (connId: string, params: { kind: 'slowlog' | 'config'; count?: number; pattern?: string }) =>
+    request<{ slowlog?: KVSlowlogEntry[]; config?: KVConfigItem[] }>(`/conn/${connId}/kv/diagnostics`, { params }),
+  kvDiagnosticsAction: (
+    connId: string,
+    payload: {
+      action: 'RESET_SLOWLOG' | 'SET_CONFIG' | 'PUBLISH';
+      key?: string;
+      value?: string;
+      channel?: string;
+      message?: string;
+    }
+  ) =>
+    request<{ message: string; receivers?: number }>(`/conn/${connId}/kv/diagnostics`, {
+      method: 'POST',
+      body: payload,
+    }),
 
   // MongoDB Document
   docListCollections: async (connId: string, database: string) => {
@@ -742,10 +855,58 @@ export const api = {
     });
     return data.collections || [];
   },
-  docCreateCollection: (connId: string, database: string, collection: string) =>
-    request<{ message: string }>(`/conn/${connId}/doc/collections`, {
+  docGetCollectionOptions: (connId: string, database: string, collection: string) =>
+    request<CollectionSummary>(`/conn/${connId}/doc/collections/options`, {
+      params: { database, collection },
+    }),
+  docCreateCollection: (
+    connId: string,
+    databaseOrPayload:
+      | string
+      | {
+          database: string;
+          collection: string;
+          type?: string;
+          capped?: boolean;
+          maxBytes?: number;
+          maxDocs?: number;
+          viewOn?: string;
+          pipelineJson?: string;
+          timeField?: string;
+          metaField?: string;
+          granularity?: string;
+          expireAfterSeconds?: number;
+          validatorJson?: string;
+          validationLevel?: string;
+          validationAction?: string;
+        },
+    collection?: string
+  ) => {
+    const body =
+      typeof databaseOrPayload === 'string'
+        ? { database: databaseOrPayload, collection: collection || '' }
+        : databaseOrPayload;
+    return request<{ message: string }>(`/conn/${connId}/doc/collections`, {
       method: 'POST',
-      body: { database, collection },
+      body,
+    });
+  },
+  docUpdateCollectionOptions: (
+    connId: string,
+    payload: {
+      database: string;
+      collection: string;
+      viewOn?: string;
+      pipelineJson?: string;
+      validatorJson?: string;
+      validationLevel?: string;
+      validationAction?: string;
+      expireAfterSeconds?: number;
+    }
+  ) =>
+    request<{ message: string }>(`/conn/${connId}/doc/collections/options`, {
+      method: 'PUT',
+      body: payload,
     }),
   docDropCollection: (connId: string, database: string, collection: string) =>
     request<{ message: string }>(`/conn/${connId}/doc/collections`, {
@@ -852,11 +1013,33 @@ export const api = {
     });
     return data.indexes || [];
   },
-  docCreateIndex: (connId: string, database: string, collection: string, keysJson: string, unique: boolean) =>
-    request<{ message: string }>(`/conn/${connId}/doc/indexes`, {
+  docCreateIndex: (
+    connId: string,
+    databaseOrPayload:
+      | string
+      | {
+          database: string;
+          collection: string;
+          name?: string;
+          keysJson: string;
+          unique?: boolean;
+          sparse?: boolean;
+          expireAfterSeconds?: number;
+          partialFilterJson?: string;
+        },
+    collection?: string,
+    keysJson?: string,
+    unique?: boolean
+  ) => {
+    const body =
+      typeof databaseOrPayload === 'string'
+        ? { database: databaseOrPayload, collection: collection || '', keysJson: keysJson || '{}', unique: !!unique }
+        : databaseOrPayload;
+    return request<{ message: string }>(`/conn/${connId}/doc/indexes`, {
       method: 'POST',
-      body: { database, collection, keysJson, unique },
-    }),
+      body,
+    });
+  },
   docDropIndex: (connId: string, database: string, collection: string, name: string) =>
     request<{ message: string }>(`/conn/${connId}/doc/indexes`, {
       method: 'DELETE',

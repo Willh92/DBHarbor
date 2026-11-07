@@ -56,205 +56,6 @@ func releaseBufWriter(bw *bufio.Writer) {
 	exportBufPool.Put(bw)
 }
 
-var forbiddenReadOnlyKeywords = map[string]struct{}{
-	"INSERT": {}, "UPDATE": {}, "DELETE": {}, "MERGE": {}, "UPSERT": {}, "REPLACE": {},
-	"CREATE": {}, "ALTER": {}, "DROP": {}, "TRUNCATE": {}, "RENAME": {},
-	"GRANT": {}, "REVOKE": {}, "CALL": {}, "EXEC": {}, "EXECUTE": {},
-	"COPY": {}, "ATTACH": {}, "DETACH": {}, "VACUUM": {}, "INTO": {},
-}
-
-var forbiddenReadOnlyFunctions = map[string]struct{}{
-	"PG_TERMINATE_BACKEND": {}, "PG_CANCEL_BACKEND": {}, "PG_RELOAD_CONF": {}, "PG_ROTATE_LOGFILE": {},
-	"PG_READ_FILE": {}, "PG_READ_BINARY_FILE": {}, "PG_LS_DIR": {}, "PG_STAT_FILE": {},
-	"LO_IMPORT": {}, "LO_EXPORT": {}, "LO_UNLINK": {}, "LO_CREATE": {}, "LO_FROM_BYTEA": {}, "LO_PUT": {},
-	"LOAD_EXTENSION": {}, "READFILE": {}, "WRITEFILE": {}, "FTS3_TOKENIZER": {},
-}
-
-var forbiddenPragmaNames = map[string]struct{}{
-	"WAL_CHECKPOINT": {}, "SHRINK_MEMORY": {}, "OPTIMIZE": {},
-	"INCREMENTAL_VACUUM": {}, "WRITABLE_SCHEMA": {},
-	"KEY": {}, "REKEY": {}, "HEXKEY": {}, "ACTIVATE_EXTENSIONS": {},
-}
-
-func tokenizeSQLForReadOnlyGuard(stmt string) (tokens []string, hasAssignment bool) {
-	n := len(stmt)
-	i := 0
-	isIdentChar := func(b byte) bool {
-		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '$'
-	}
-	for i < n {
-		c := stmt[i]
-		// Whitespace
-		if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
-			i++
-			continue
-		}
-		// Line comments: -- or #
-		if c == '#' || (c == '-' && i+1 < n && stmt[i+1] == '-') {
-			for i < n && stmt[i] != '\n' {
-				i++
-			}
-			continue
-		}
-		// Block comments: /* ... */ (note: MySQL conditional comments /*! ... */ are parsed inside so hidden DML is caught!)
-		if c == '/' && i+1 < n && stmt[i+1] == '*' {
-			if i+2 < n && stmt[i+2] == '!' {
-				// MySQL executable comment: step inside so tokens within /*! ... */ are inspected!
-				i += 3
-				for i < n && stmt[i] >= '0' && stmt[i] <= '9' {
-					i++
-				}
-				continue
-			}
-			i += 2
-			for i+1 < n && !(stmt[i] == '*' && stmt[i+1] == '/') {
-				i++
-			}
-			i += 2
-			continue
-		}
-		if c == '*' && i+1 < n && stmt[i+1] == '/' {
-			i += 2
-			continue
-		}
-		// Quoted strings / identifiers: '...', "...", `...`, [...]
-		if c == '\'' || c == '"' || c == '`' {
-			quote := c
-			i++
-			for i < n {
-				if stmt[i] == '\\' && quote != '`' {
-					i += 2
-					continue
-				}
-				if stmt[i] == quote {
-					if i+1 < n && stmt[i+1] == quote {
-						i += 2
-						continue
-					}
-					i++
-					break
-				}
-				i++
-			}
-			continue
-		}
-		if c == '[' {
-			i++
-			for i < n && stmt[i] != ']' {
-				i++
-			}
-			i++
-			continue
-		}
-		// Dollar-quoted strings in PostgreSQL: $$...$$ or $tag$...$tag$
-		if c == '$' && (i+1 < n && (stmt[i+1] == '$' || (stmt[i+1] >= 'a' && stmt[i+1] <= 'z') || (stmt[i+1] >= 'A' && stmt[i+1] <= 'Z') || stmt[i+1] == '_')) {
-			endTag := strings.IndexByte(stmt[i+1:], '$')
-			if endTag >= 0 {
-				tag := stmt[i : i+endTag+2]
-				closeIdx := strings.Index(stmt[i+len(tag):], tag)
-				if closeIdx >= 0 {
-					i += len(tag) + closeIdx + len(tag)
-					continue
-				}
-			}
-		}
-		if c == '=' {
-			hasAssignment = true
-			i++
-			continue
-		}
-		if isIdentChar(c) {
-			start := i
-			for i < n && isIdentChar(stmt[i]) {
-				i++
-			}
-			// Only collect non-numeric-leading words
-			if !(c >= '0' && c <= '9') {
-				tokens = append(tokens, strings.ToUpper(stmt[start:i]))
-			}
-			continue
-		}
-		i++
-	}
-	return tokens, hasAssignment
-}
-
-// IsReadOnlySafeStatement validates that a single SQL statement is strictly read-only.
-func IsReadOnlySafeStatement(stmt string) (bool, string) {
-	tokens, hasAssign := tokenizeSQLForReadOnlyGuard(stmt)
-	if len(tokens) == 0 {
-		return true, ""
-	}
-	first := tokens[0]
-
-	checkNoForbidden := func() (bool, string) {
-		for idx, tok := range tokens {
-			if _, bad := forbiddenReadOnlyKeywords[tok]; bad {
-				return false, fmt.Sprintf("keyword %q is not permitted in read-only mode", tok)
-			}
-			if _, badFn := forbiddenReadOnlyFunctions[tok]; badFn {
-				return false, fmt.Sprintf("function %q is not permitted in read-only mode", tok)
-			}
-			// Block locking reads: FOR UPDATE / FOR SHARE / FOR NO KEY UPDATE / FOR KEY SHARE
-			if tok == "FOR" && idx+1 < len(tokens) {
-				next := tokens[idx+1]
-				if next == "UPDATE" || next == "SHARE" || next == "NO" || next == "KEY" {
-					return false, "locking SELECT clauses (FOR UPDATE / FOR SHARE) are not permitted in read-only mode"
-				}
-			}
-		}
-		return true, ""
-	}
-
-	switch first {
-	case "SELECT", "SHOW", "DESCRIBE", "DESC", "VALUES", "TABLE":
-		return checkNoForbidden()
-	case "WITH":
-		hasSelect := false
-		for _, tok := range tokens {
-			if tok == "SELECT" || tok == "VALUES" || tok == "TABLE" {
-				hasSelect = true
-				break
-			}
-		}
-		if !hasSelect {
-			return false, "WITH statement must end in a read-only SELECT query"
-		}
-		return checkNoForbidden()
-	case "EXPLAIN":
-		return checkNoForbidden()
-	case "PRAGMA":
-		if hasAssign {
-			return false, "mutating PRAGMA assignments are not permitted in read-only mode"
-		}
-		if len(tokens) >= 2 {
-			if _, bad := forbiddenPragmaNames[tokens[1]]; bad {
-				return false, fmt.Sprintf("PRAGMA %s is not permitted in read-only mode", tokens[1])
-			}
-		}
-		return checkNoForbidden()
-	default:
-		return false, fmt.Sprintf("statement %q is not permitted in read-only mode", first)
-	}
-}
-
-// ValidateReadOnlyScript validates every statement in a potentially multi-statement SQL script.
-func ValidateReadOnlyScript(script string) error {
-	stmts := SplitStatements(script)
-	if len(stmts) == 0 {
-		if ok, reason := IsReadOnlySafeStatement(script); !ok {
-			return errors.New(reason)
-		}
-		return nil
-	}
-	for _, stmt := range stmts {
-		if ok, reason := IsReadOnlySafeStatement(stmt); !ok {
-			return errors.New(reason)
-		}
-	}
-	return nil
-}
-
 // IsProtectedSystemDatabase prevents accidental deletion of built-in engine catalogs.
 func IsProtectedSystemDatabase(dbType, name string) bool {
 	lower := strings.ToLower(strings.TrimSpace(name))
@@ -276,23 +77,9 @@ func IsProtectedSystemDatabase(dbType, name string) bool {
 }
 
 func IsQueryStatement(stmt string) bool {
-	s := strings.TrimSpace(stmt)
-	for {
-		if strings.HasPrefix(s, "--") || strings.HasPrefix(s, "#") {
-			if idx := strings.IndexByte(s, '\n'); idx >= 0 {
-				s = strings.TrimSpace(s[idx+1:])
-				continue
-			}
-			return false
-		}
-		if strings.HasPrefix(s, "/*") {
-			if idx := strings.Index(s, "*/"); idx >= 0 {
-				s = strings.TrimSpace(s[idx+2:])
-				continue
-			}
-			return false
-		}
-		break
+	s := strings.TrimSpace(StripLeadingSQLComments(stmt))
+	if s == "" {
+		return false
 	}
 	upper := strings.ToUpper(s)
 	prefixes := []string{"SELECT", "SHOW", "DESCRIBE", "DESC ", "EXPLAIN", "WITH", "PRAGMA", "VALUES", "TABLE "}
@@ -309,31 +96,13 @@ func IsQueryStatement(stmt string) bool {
 
 // IsDDLStatement reports whether stmt mutates schema metadata so caches can be invalidated.
 func IsDDLStatement(stmt string) bool {
-	s := strings.TrimSpace(stmt)
-	for {
-		if strings.HasPrefix(s, "--") || strings.HasPrefix(s, "#") {
-			if idx := strings.IndexByte(s, '\n'); idx >= 0 {
-				s = strings.TrimSpace(s[idx+1:])
-				continue
-			}
-			return false
-		}
-		if strings.HasPrefix(s, "/*") {
-			if idx := strings.Index(s, "*/"); idx >= 0 {
-				s = strings.TrimSpace(s[idx+2:])
-				continue
-			}
-			return false
-		}
-		break
+	kw := leadingSQLKeyword(stmt)
+	switch kw {
+	case "CREATE", "ALTER", "DROP", "RENAME", "TRUNCATE":
+		return true
+	default:
+		return false
 	}
-	upper := strings.ToUpper(s)
-	for _, p := range []string{"CREATE ", "ALTER ", "DROP ", "RENAME ", "TRUNCATE "} {
-		if strings.HasPrefix(upper, p) {
-			return true
-		}
-	}
-	return false
 }
 
 const maxQueryResultBytes = 32 << 20 // 32 MiB ceiling for interactive query result sets
@@ -341,6 +110,7 @@ const maxQueryResultBytes = 32 << 20 // 32 MiB ceiling for interactive query res
 func approxRowBytes(row []any) int {
 	n := 24
 	for _, v := range row {
+		n += 24 // 64-bit Go interface + string/boxed value header overhead per cell
 		switch x := v.(type) {
 		case nil:
 			n += 8
@@ -360,9 +130,18 @@ func ExecuteSingleQuery(ctx context.Context, db *sql.DB, stmt string, maxRows in
 }
 
 func ExecuteSingleQueryConn(ctx context.Context, q Queryer, stmt string, maxRows int) (driver.QueryResult, error) {
+	remainingBytes := maxQueryResultBytes
+	return executeSingleQueryWithBudget(ctx, q, stmt, maxRows, &remainingBytes)
+}
+
+func executeSingleQueryWithBudget(ctx context.Context, q Queryer, stmt string, maxRows int, remainingBytes *int) (driver.QueryResult, error) {
 	start := time.Now()
 	if maxRows <= 0 {
 		maxRows = 1000
+	}
+	if remainingBytes == nil {
+		b := maxQueryResultBytes
+		remainingBytes = &b
 	}
 
 	if IsQueryStatement(stmt) {
@@ -426,7 +205,6 @@ func ExecuteSingleQueryConn(ctx context.Context, q Queryer, stmt string, maxRows
 			initCap = maxRows
 		}
 		data := make([][]any, 0, initCap)
-		totalBytes := 0
 		truncated := false
 		truncatedByMem := false
 		for rows.Next() {
@@ -445,12 +223,15 @@ func ExecuteSingleQueryConn(ctx context.Context, q Queryer, stmt string, maxRows
 				rowOut[i] = NormalizeValueFast(v, scanMeta[i])
 			}
 			rowBytes := approxRowBytes(rowOut)
-			if len(data) > 0 && totalBytes+rowBytes > maxQueryResultBytes {
+			if rowBytes > *remainingBytes && (len(data) > 0 || *remainingBytes < maxQueryResultBytes) {
 				truncated = true
 				truncatedByMem = true
 				break
 			}
-			totalBytes += rowBytes
+			*remainingBytes -= rowBytes
+			if *remainingBytes < 0 {
+				*remainingBytes = 0
+			}
 			data = append(data, rowOut)
 		}
 		if err := rows.Err(); err != nil {
@@ -499,9 +280,10 @@ func ExecuteMultiSQLConn(ctx context.Context, q Queryer, script string, maxRows 
 	if len(stmts) == 0 {
 		return []driver.QueryResult{}, nil
 	}
+	remainingBytes := maxQueryResultBytes
 	results := make([]driver.QueryResult, 0, len(stmts))
 	for _, stmt := range stmts {
-		r, err := ExecuteSingleQueryConn(ctx, q, stmt, maxRows)
+		r, err := executeSingleQueryWithBudget(ctx, q, stmt, maxRows, &remainingBytes)
 		if err != nil {
 			return results, fmt.Errorf("statement execution failed [%s]: %w", truncateStr(stmt, 120), err)
 		}
@@ -993,30 +775,7 @@ func streamTableSQLInserts(ctx context.Context, db *sql.DB, d Dialect, targetTbl
 }
 
 func leadingSQLKeyword(stmt string) string {
-	s := stmt
-	for len(s) > 0 {
-		// Trim leading ASCII whitespace
-		i := 0
-		for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n') {
-			i++
-		}
-		s = s[i:]
-		if strings.HasPrefix(s, "--") {
-			if nl := strings.IndexByte(s, '\n'); nl >= 0 {
-				s = s[nl+1:]
-				continue
-			}
-			return ""
-		}
-		if strings.HasPrefix(s, "/*") {
-			if end := strings.Index(s[2:], "*/"); end >= 0 {
-				s = s[2+end+2:]
-				continue
-			}
-			return ""
-		}
-		break
-	}
+	s := StripLeadingSQLComments(stmt)
 	end := 0
 	for end < len(s) && ((s[end] >= 'a' && s[end] <= 'z') || (s[end] >= 'A' && s[end] <= 'Z') || s[end] == '_') {
 		end++

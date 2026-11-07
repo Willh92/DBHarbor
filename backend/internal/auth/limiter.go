@@ -19,8 +19,8 @@ const (
 	maxFailAttempts   = 5
 	failWindow        = 10 * time.Minute
 	lockoutDuration   = 15 * time.Minute
-	maxLimiterEntries = 8192
-	maxCaptchaNonces  = 4096
+	maxLimiterEntries = 16384
+	maxCaptchaNonces  = 16384
 	captchaAlphabet   = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 )
 
@@ -33,12 +33,12 @@ type attemptRecord struct {
 // LoginProtector enforces brute-force rate limiting, progressive IP + account lockouts,
 // and single-use HMAC-signed offline SVG captcha challenges.
 type LoginProtector struct {
-	secret       []byte
-	mu           sync.Mutex
-	byKey        map[string]*attemptRecord
-	byIP         map[string]*attemptRecord
-	byUser       map[string]*attemptRecord
-	issuedNonces map[string]int64 // nonce -> exp unix (single-use consumption)
+	secret     []byte
+	mu         sync.Mutex
+	byKey      map[string]*attemptRecord
+	byIP       map[string]*attemptRecord
+	byUser     map[string]*attemptRecord
+	usedNonces map[string]int64 // spent nonce -> exp unix (single-use anti-replay)
 }
 
 type CheckStatus struct {
@@ -52,11 +52,11 @@ func NewLoginProtector(secret []byte) *LoginProtector {
 	cp := make([]byte, len(secret))
 	copy(cp, secret)
 	return &LoginProtector{
-		secret:       cp,
-		byKey:        make(map[string]*attemptRecord),
-		byIP:         make(map[string]*attemptRecord),
-		byUser:       make(map[string]*attemptRecord),
-		issuedNonces: make(map[string]int64),
+		secret:     cp,
+		byKey:      make(map[string]*attemptRecord),
+		byIP:       make(map[string]*attemptRecord),
+		byUser:     make(map[string]*attemptRecord),
+		usedNonces: make(map[string]int64),
 	}
 }
 
@@ -229,16 +229,48 @@ func pruneAttemptMapLocked(m map[string]*attemptRecord, now time.Time) {
 			delete(m, k)
 		}
 	}
-	if len(m) > maxLimiterEntries {
-		// Evict oldest entries if map still exceeds hard cap under spoofed flood
-		excess := len(m) - maxLimiterEntries
-		for k := range m {
-			delete(m, k)
-			excess--
-			if excess <= 0 {
-				break
+	for len(m) > maxLimiterEntries {
+		// Evict oldest entry (earliest firstFailAt) when map exceeds hard cap
+		var oldestKey string
+		var oldestAt time.Time
+		first := true
+		for k, r := range m {
+			if first || r.firstFailAt.Before(oldestAt) {
+				oldestKey = k
+				oldestAt = r.firstFailAt
+				first = false
 			}
 		}
+		if first {
+			break
+		}
+		delete(m, oldestKey)
+	}
+}
+
+func pruneUnixExpMap(m map[string]int64, nowUnix int64, maxEntries int) {
+	if len(m) > 512 || len(m) > maxEntries {
+		for k, exp := range m {
+			if exp < nowUnix {
+				delete(m, k)
+			}
+		}
+	}
+	for len(m) > maxEntries {
+		var oldestKey string
+		var oldestExp int64
+		first := true
+		for k, exp := range m {
+			if first || exp < oldestExp {
+				oldestKey = k
+				oldestExp = exp
+				first = false
+			}
+		}
+		if first {
+			break
+		}
+		delete(m, oldestKey)
 	}
 }
 
@@ -246,28 +278,11 @@ func (lp *LoginProtector) pruneLocked(now time.Time) {
 	pruneAttemptMapLocked(lp.byKey, now)
 	pruneAttemptMapLocked(lp.byIP, now)
 	pruneAttemptMapLocked(lp.byUser, now)
-
-	if len(lp.issuedNonces) > maxCaptchaNonces/2 {
-		nowUnix := now.Unix()
-		for n, exp := range lp.issuedNonces {
-			if exp < nowUnix {
-				delete(lp.issuedNonces, n)
-			}
-		}
-		if len(lp.issuedNonces) >= maxCaptchaNonces {
-			excess := len(lp.issuedNonces) - (maxCaptchaNonces - 256)
-			for n := range lp.issuedNonces {
-				delete(lp.issuedNonces, n)
-				excess--
-				if excess <= 0 {
-					break
-				}
-			}
-		}
-	}
+	pruneUnixExpMap(lp.usedNonces, now.Unix(), maxCaptchaNonces)
 }
 
 // GenerateCaptcha produces a single-use HMAC-signed challenge token and a distorted offline SVG image data URL.
+// Stateless at issuance time so unauthenticated GET floods cannot evict valid unspent challenges.
 func (lp *LoginProtector) GenerateCaptcha() (captchaToken string, imageDataURL string, err error) {
 	var rnd [16]byte
 	if _, err := io.ReadFull(rand.Reader, rnd[:]); err != nil {
@@ -279,13 +294,7 @@ func (lp *LoginProtector) GenerateCaptcha() (captchaToken string, imageDataURL s
 	}
 	code := string(chars[:])
 	nonce := hex.EncodeToString(rnd[5:13])
-	now := time.Now()
-	exp := now.Add(3 * time.Minute).Unix()
-
-	lp.mu.Lock()
-	lp.pruneLocked(now)
-	lp.issuedNonces[nonce] = exp
-	lp.mu.Unlock()
+	exp := time.Now().Add(3 * time.Minute).Unix()
 
 	sig := lp.signCaptcha(nonce, code, exp)
 	captchaToken = fmt.Sprintf("%s.%d.%s", nonce, exp, sig)
@@ -324,6 +333,9 @@ func (lp *LoginProtector) VerifyCaptcha(captchaToken, answer string) bool {
 		return false
 	}
 	nonce := parts[0]
+	if nonce == "" || len(nonce) > 64 {
+		return false
+	}
 	exp, err := strconv.ParseInt(parts[1], 10, 64)
 	nowUnix := time.Now().Unix()
 	if err != nil || nowUnix > exp {
@@ -338,14 +350,15 @@ func (lp *LoginProtector) VerifyCaptcha(captchaToken, answer string) bool {
 		return false
 	}
 
-	// Single-use nonce consumption: each generated CAPTCHA can only be redeemed once
+	// Single-use spent-nonce tracking: only valid HMAC-signed unexpired tokens enter usedNonces
 	lp.mu.Lock()
-	issuedExp, exists := lp.issuedNonces[nonce]
-	if exists {
-		delete(lp.issuedNonces, nonce)
+	defer lp.mu.Unlock()
+	if usedExp, exists := lp.usedNonces[nonce]; exists && usedExp >= nowUnix {
+		return false
 	}
-	lp.mu.Unlock()
-	return exists && issuedExp >= nowUnix
+	lp.usedNonces[nonce] = exp
+	pruneUnixExpMap(lp.usedNonces, nowUnix, maxCaptchaNonces)
+	return true
 }
 
 func (lp *LoginProtector) signCaptcha(nonce, code string, exp int64) string {

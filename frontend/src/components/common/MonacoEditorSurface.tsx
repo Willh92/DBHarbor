@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { useWorkbenchStore } from '../../store/useWorkbenchStore';
 import { clearSQLModelAutocomplete, monaco } from '../../utils/monacoSetup';
 
 let modelInstanceSeq = 0;
@@ -20,7 +21,7 @@ export interface MonacoEditorSurfaceProps {
 export const MonacoEditorSurface: React.FC<MonacoEditorSurfaceProps> = ({
   value,
   language,
-  darkMode = false,
+  darkMode,
   readOnly = false,
   compactGutter = false,
   fontSize = 13,
@@ -30,6 +31,8 @@ export const MonacoEditorSurface: React.FC<MonacoEditorSurfaceProps> = ({
   onChange,
   onMount,
 }) => {
+  const storeDarkMode = useWorkbenchStore((s) => s.darkMode);
+  const effectiveDarkMode = darkMode ?? storeDarkMode;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const modelRef = useRef<monaco.editor.ITextModel | null>(null);
@@ -49,11 +52,11 @@ export const MonacoEditorSurface: React.FC<MonacoEditorSurfaceProps> = ({
     const model = monaco.editor.createModel(value ?? '', language, uri);
     modelRef.current = model;
 
-    monaco.editor.setTheme(darkMode ? 'vs-dark' : 'vs');
+    monaco.editor.setTheme(effectiveDarkMode ? 'vs-dark' : 'vs');
 
     const editor = monaco.editor.create(el, {
       model,
-      theme: darkMode ? 'vs-dark' : 'vs',
+      theme: effectiveDarkMode ? 'vs-dark' : 'vs',
       readOnly,
       minimap: { enabled: false },
       fontSize,
@@ -125,8 +128,8 @@ export const MonacoEditorSurface: React.FC<MonacoEditorSurfaceProps> = ({
   }, [language]);
 
   useEffect(() => {
-    monaco.editor.setTheme(darkMode ? 'vs-dark' : 'vs');
-  }, [darkMode]);
+    monaco.editor.setTheme(effectiveDarkMode ? 'vs-dark' : 'vs');
+  }, [effectiveDarkMode]);
 
   useEffect(() => {
     const ed = editorRef.current;

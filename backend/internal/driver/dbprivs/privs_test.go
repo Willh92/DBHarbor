@@ -98,3 +98,33 @@ func TestEmbeddedLocalizedChangelogs(t *testing.T) {
 		t.Fatal("expected localized embedded changelogs to have distinct language contents")
 	}
 }
+
+func TestRedisACLRulesAndOraclePasswordInjectionGuards(t *testing.T) {
+	for _, badRule := range []string{">leakedpass ~* +@read", "<oldpass", "nopass ~*", "resetpass", "#deadbeef"} {
+		req := ActionRequest{
+			Action:    "ALTER_USER",
+			Username:  "svc_user",
+			ACLPreset: "custom",
+			ACLRules:  badRule,
+		}
+		if _, err := BuildStatements("redis", req); err == nil {
+			t.Fatalf("expected BuildStatements to reject Redis ACLRules %q", badRule)
+		}
+		if _, err := BuildRedactedStatements("redis", req); err == nil {
+			t.Fatalf("expected BuildRedactedStatements to reject Redis ACLRules %q", badRule)
+		}
+	}
+
+	for _, engine := range []string{"oracle", "dameng"} {
+		for _, badPass := range []string{`bad"quote`, "bad\nline", "bad\rret", "bad\x00nul"} {
+			if _, err := BuildStatements(engine, ActionRequest{
+				Action:   "CREATE_USER",
+				Username: "SEC_USER",
+				Password: badPass,
+			}); err == nil {
+				t.Fatalf("expected %s CREATE_USER to reject password %q", engine, badPass)
+			}
+		}
+	}
+}
+

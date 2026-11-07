@@ -113,7 +113,7 @@ export const ServerMonitorTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
               render: (_: any, r: SessionItem) => (
                 <Popconfirm title={t('Kill session {id}?', { id: r.id })} onConfirm={() => handleKill(r.id)}>
                   <Button size="small" danger type="link" icon={<StopOutlined />}>
-                    Kill
+                    {t('Kill')}
                   </Button>
                 </Popconfirm>
               ),

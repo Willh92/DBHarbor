@@ -27,23 +27,41 @@ func (s *Server) handleGetVersion(c *Context) {
 	if lang == "" {
 		lang = c.Request.Header.Get("Accept-Language")
 	}
+	resp := H{
+		"version":           info.Version,
+		"displayVersion":    info.DisplayVersion,
+		"edition":           edition,
+		"channel":           info.Channel,
+		"authEnabled":       !s.desktop.Enabled,
+		"license":           info.License,
+		"gitCommit":         info.GitCommit,
+		"buildTime":         info.BuildTime,
+		"goVersion":         info.GoVersion,
+		"os":                info.OS,
+		"arch":              info.Arch,
+		"repoUrl":           info.RepoURL,
+		"gitUrl":            info.GitURL,
+		"releasesUrl":       info.ReleasesURL,
+		"embeddedChangelog": "",
+	}
+	if c.Query("includeChangelog") == "1" {
+		resp["embeddedChangelog"] = version.EmbeddedChangelogForLocale(lang)
+		resp["embeddedChangelogs"] = version.EmbeddedChangelogsMap()
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func (s *Server) handleGetChangelog(c *Context) {
+	lang := strings.TrimSpace(c.Query("lang"))
+	if lang == "" {
+		lang = strings.TrimSpace(c.Request.Header.Get("Accept-Language"))
+	}
+	if lang == "" {
+		lang = "en-US"
+	}
 	c.JSON(http.StatusOK, H{
-		"version":            info.Version,
-		"displayVersion":     info.DisplayVersion,
-		"edition":            edition,
-		"channel":            info.Channel,
-		"authEnabled":        !s.desktop.Enabled,
-		"license":            info.License,
-		"gitCommit":          info.GitCommit,
-		"buildTime":          info.BuildTime,
-		"goVersion":          info.GoVersion,
-		"os":                 info.OS,
-		"arch":               info.Arch,
-		"repoUrl":            info.RepoURL,
-		"gitUrl":             info.GitURL,
-		"releasesUrl":        info.ReleasesURL,
-		"embeddedChangelog":  version.EmbeddedChangelogForLocale(lang),
-		"embeddedChangelogs": version.EmbeddedChangelogsMap(),
+		"lang":     lang,
+		"markdown": version.GetChangelog(lang),
 	})
 }
 
@@ -666,6 +684,13 @@ func (s *Server) handleTestConnection(c *Context) {
 		c.JSON(http.StatusForbidden, H{"error": "Permission denied: your account is not authorized to create new connections"})
 		return
 	}
+	cfg.Options = store.StripReservedConnectionOptions(cfg.Options)
+	if !s.desktop.Enabled && !s.opts.AllowPrivateNetForNonAdmin && !c.IsAdmin() {
+		if cfg.Options == nil {
+			cfg.Options = make(map[string]string, 1)
+		}
+		cfg.Options["__restrict_internal_ip"] = "1"
+	}
 	cfg.FilePath = s.normalizeConnectionFilePathForWebUser(c, cfg.FilePath)
 	if status, errMsg := s.validateConnectionFilePath(c, cfg.Type, cfg.FilePath); status != http.StatusOK {
 		c.JSON(status, H{"error": errMsg})
@@ -730,6 +755,7 @@ func (s *Server) handleCreateConnection(c *Context) {
 		c.JSON(http.StatusBadRequest, H{"error": "Invalid connection payload"})
 		return
 	}
+	req.Options = store.StripReservedConnectionOptions(req.Options)
 	req.FilePath = s.normalizeConnectionFilePathForWebUser(c, req.FilePath)
 	if status, errMsg := s.validateConnectionFilePath(c, req.Type, req.FilePath); status != http.StatusOK {
 		c.JSON(status, H{"error": errMsg})
@@ -769,6 +795,10 @@ func (s *Server) handleUpdateConnection(c *Context) {
 		c.JSON(http.StatusForbidden, H{"error": "Permission denied: only an administrator or the connection owner can modify this connection"})
 		return
 	}
+	if existingCfg, gErr := s.store.GetDecryptedConnection(id); gErr == nil && store.IsEphemeralConnection(existingCfg.Options) {
+		c.JSON(http.StatusForbidden, H{"error": "Temporary browser-loaded database sessions cannot be reconfigured"})
+		return
+	}
 	var req struct {
 		driver.ConnectionConfig
 		KeepExistingSecret bool   `json:"keepExistingSecret"`
@@ -778,6 +808,7 @@ func (s *Server) handleUpdateConnection(c *Context) {
 		c.JSON(http.StatusBadRequest, H{"error": "Invalid connection payload"})
 		return
 	}
+	req.Options = store.StripReservedConnectionOptions(req.Options)
 	req.FilePath = s.normalizeConnectionFilePathForWebUser(c, req.FilePath)
 	if status, errMsg := s.validateConnectionFilePath(c, req.Type, req.FilePath); status != http.StatusOK {
 		c.JSON(status, H{"error": errMsg})
@@ -818,6 +849,10 @@ func (s *Server) handleDuplicateConnection(c *Context) {
 	}
 	if !c.Principal.CanCreateConn {
 		c.JSON(http.StatusForbidden, H{"error": "Permission denied: your account is not authorized to duplicate or create connections"})
+		return
+	}
+	if !s.store.CanEditConnection(c.Principal, id) {
+		c.JSON(http.StatusForbidden, H{"error": "Permission denied: only an administrator or the connection owner can duplicate this connection"})
 		return
 	}
 	saved, err := s.store.DuplicateConnection(id, c.Principal)
@@ -873,15 +908,17 @@ func (s *Server) handleImportConnections(c *Context) {
 		return
 	}
 	for i := range profiles {
+		profiles[i].Options = store.StripReservedConnectionOptions(profiles[i].Options)
 		profiles[i].FilePath = s.normalizeConnectionFilePathForWebUser(c, profiles[i].FilePath)
 		if status, errMsg := s.validateConnectionFilePath(c, profiles[i].Type, profiles[i].FilePath); status != http.StatusOK {
 			c.JSON(status, H{"error": errMsg})
 			return
 		}
 		if status, errMsg := s.validateRemoteEndpointForWebUser(c, driver.ConnectionConfig{
-			Type: profiles[i].Type,
-			Host: profiles[i].Host,
-			Port: profiles[i].Port,
+			Type:    profiles[i].Type,
+			Host:    profiles[i].Host,
+			Port:    profiles[i].Port,
+			Options: store.StripReservedConnectionOptions(profiles[i].Options),
 		}); status != http.StatusOK {
 			c.JSON(status, H{"error": errMsg})
 			return
@@ -914,11 +951,16 @@ func (s *Server) handleDeleteConnection(c *Context) {
 		c.JSON(http.StatusForbidden, H{"error": "Permission denied: only an administrator or the connection owner can delete this connection"})
 		return
 	}
-	s.pool.Evict(id)
+	existingCfg, _ := s.store.GetDecryptedConnection(id)
+	s.pool.EvictAndWait(id, 1500*time.Millisecond)
 	s.invalidateConnCache(id)
 	if err := s.store.DeleteConnection(id); err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
 		return
+	}
+	if store.IsEphemeralConnection(existingCfg.Options) {
+		s.cleanupEphemeralWorkspace(existingCfg)
+		_ = s.store.ClearHistoryForUser("", id)
 	}
 	c.JSON(http.StatusOK, H{"message": "Connection deleted"})
 }

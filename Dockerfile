@@ -10,7 +10,7 @@ RUN npm run build && node -e "const fs=require('fs'),path=require('path'),zlib=r
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS backend-builder
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
-ARG VERSION=1.0.1
+ARG VERSION=1.0.2
 ARG CHANNEL=release
 ARG GIT_COMMIT=release
 WORKDIR /workspace/backend
@@ -20,8 +20,10 @@ RUN go mod download
 COPY backend/ ./
 COPY CHANGELOG*.md ./internal/version/
 COPY --from=frontend-builder /workspace/frontend/dist ./webdist/dist
-RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
-    -ldflags="-s -w -X dbharbor/backend/internal/version.Version=${VERSION} -X dbharbor/backend/internal/version.Channel=${CHANNEL} -X dbharbor/backend/internal/version.GitCommit=${GIT_COMMIT} -X dbharbor/backend/internal/version.Edition=server" \
+RUN BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    && go run ./cmd/gen-overlay -out /tmp/slim/go.slim.mod \
+    && GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -modfile=/tmp/slim/go.slim.mod \
+    -ldflags="-s -w -X dbharbor/backend/internal/version.Version=${VERSION} -X dbharbor/backend/internal/version.Channel=${CHANNEL} -X dbharbor/backend/internal/version.GitCommit=${GIT_COMMIT} -X dbharbor/backend/internal/version.BuildTime=${BUILD_TIME} -X dbharbor/backend/internal/version.Edition=server" \
     -o /out/dbharbor ./cmd/dbharbor
 
 # Stage 3: Minimal Non-Root Runtime Image

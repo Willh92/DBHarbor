@@ -4,6 +4,29 @@
 
 DBHarbor の主な変更履歴は本ファイルに記録され、GitHub リポジトリ [Willh92/DBHarbor](https://github.com/Willh92/DBHarbor.git) と同期されます。
 
+## [v1.0.2] - 2026-11-07
+
+> **エディション適用範囲の注意**：**デスクトップ GUI 版 (`dbharbor-desktop-*` / `DBHarbor.app`)** は引き続き**ユーザーアカウント機能を持たないログイン不要の純粋なローカルモード**で動作し、ホスト上のローカルファイルへフルアクセスできます。ブラウザからの一時ローカル単一ファイル DB ワークスペース（`<DataDir>/ephemeral_workspaces/`）およびユーザー別 `<DataDir>/local_databases/u_<hash>/` サンドボックス制限は **Web サーバー版 (`dbharbor-*`) 専用**です。
+
+### 14 DB エンジン固有オブジェクト CRUD・ブラウザからの一時ローカル DB 開設・サイドバー状態分離・セキュリティ＆バイナリサイズ最適化
+- **ブラウザからの一時ローカル単一ファイル DB (`SQLite 3` & `DuckDB`) *(Web サーバー版のみ)***：
+  - Web サーバー版のサイドバーおよび接続モーダルにドラッグ＆ドロップ対応の **「ローカル DB を開く (`Open Local DB`)」**（`POST /api/connections/ephemeral-singlefile`）を追加。サーバー側のパス権限なしで手元の `.db` / `.sqlite` / `.sqlite3` / `.duckdb` / `.ddb` ファイルをブラウザから直接開いてクエリ・編集できます。
+  - ファイルはユーザー別の `0700` `<DataDir>/ephemeral_workspaces/` に分離保存され、マジックヘッダー検証（`SQLite format 3\0` / `DUCK`）を実施。エクスポート前に `WAL` / `CHECKPOINT` をフラッシュし、Chromium 系ブラウザでは File System Access API による**元のローカルファイルへの直接上書き保存**、全ブラウザで最新スナップショットのダウンロード（`GET /api/connections/{id}/download-file`）、並行安全な容量クォータ制限、12 時間アイドル自動クリーンアップを備えています。
+- **14 種類の DB エンジン固有スキーマ要素 CRUD & NoSQL 高度管理 (`sqlmeta` + `SchemaObjectModal`)**：
+  - **MySQL / MariaDB / OceanBase / TiDB**：**スケジュールイベント (`Scheduled Events`)**（`ONE TIME` / `EVERY`、有効/無効切替、`ON COMPLETION PRESERVE`）、**シーケンス (`Sequences`：MariaDB 10.3+ / TiDB)**、**テーブルパーティション (`ADD` / `DROP` / `TRUNCATE PARTITION`)**、**生成カラム (`VIRTUAL` / `STORED`)**、**`CHECK` 制約**のビジュアル作成・編集・削除と DDL プレビューに対応。
+  - **PostgreSQL / KingbaseES**：**シーケンス**、**マテリアライズドビュー**（ワンクリック `REFRESH MATERIALIZED VIEW [CONCURRENTLY]` 対応）、**拡張機能 (`Extensions`)**、**カスタム型 (`ENUM` / `DOMAIN`)**、**宣言的パーティション (`ATTACH` / `DETACH`)**、**生成カラム**、**`CHECK` 制約**のビジュアル管理を追加。
+  - **ClickHouse**：**プロジェクション (`Projections`：追加 / `MATERIALIZE` / クリア / 削除)**、**データスキップインデックス (`minmax`、`set`、`bloom_filter`、`tokenbf_v1`、`ngrambf_v1`)**、**マテリアライズドビュー**、**テーブル `TTL` 管理**、**外部辞書 (`Dictionaries`)**、**SQL UDF (`CREATE FUNCTION ... AS (...) -> expr`)** の完全 CRUD を追加。
+  - **Oracle / Dameng DM8 & SQL Server**：**パッケージ (`PACKAGE` 仕様部 + `PACKAGE BODY` 本体部の 2 タブ編集＆再コンパイル)**、**シーケンス**、**マテリアライズドビュー (`DBMS_MVIEW.REFRESH`)**、**シノニム (`PRIVATE` / `PUBLIC`)**、**データベースリンク (`DB Links`、Web 版では管理者限定)**、**パーティション**、**仮想/計算カラム (`Computed Columns`)**、**`CHECK` 制約**に対応。
+  - **DuckDB & SQLite 3**：DuckDB のマルチスキーマ切替・作成、**シーケンス**、**スカラー/テーブルマクロ (`Macros`)** に対応。SQLite 3 の **`FTS5` / `RTree` 仮想テーブル** 作成および読み取り専用の **`PRAGMA`・整合性インスペクタ**（`PRAGMA quick_check`、`foreign_key_check`）を追加。
+  - **MongoDB & Redis**：MongoDB の通常コレクション・**読み取り専用ビュー (`Views`)**・**時系列コレクション (`Time-Series`)**・**Capped コレクション**作成、**`$jsonSchema` バリデータ (`collMod`)**、**TTL / Partial / Sparse / Unique インデックス**に対応。Redis の **Stream コンシューマーグループ管理**（`XINFO`、`XGROUP CREATE / SETID / DESTROY`、`XPENDING` + `XACK`）、**スローログ (`Slowlog`)**、**実行時設定 (`CONFIG GET`)**、**Pub/Sub チャンネル監視・配信**を追加。
+- **サイドバーのデフォルト全折りたたみ・一括展開/折りたたみスイッチ & 完全な状態分離**：
+  - 左サイドバーの全オブジェクトカテゴリを初回表示および接続/DB/スキーマ切替時に**デフォルトで全折りたたみ**とし、検索バー横に多言語対応の **「すべて展開 / すべて折りたたむ」** トグルボタンを追加。
+  - 接続・データベース・スキーマ・ログインユーザー間でのサイドバー展開状態、シングルトンタブ、モーダル入力値、および `localStorage` のタブ/SQL 下書きの状態混入を完全に解消。
+- **多層セキュリティ・並行安全性・メモリ使用量 & バイナリサイズの徹底最適化**：
+  - **無損失バイナリ＆フロントエンド軽量化**：純 Go Oracle ドライバ `go-ora` の 236 文字セットテーブルをビルド時に Gzip 圧縮するオーバーレイ生成器（`cmd/gen-overlay`）を導入し、Oracle 文字セット互換性を 100% 維持したまま全 12 ターゲットバイナリと Docker イメージを **1 バイナリあたり `-11.20 MB` 削減**。フロントエンドの初期プリロード JS も **`-78.6%` 削減**。
+  - **メモリ＆並行処理の強化**：マルチパートアップロードをストリーミング直書き化（RAM `< 64 KiB`）、`CellStateHub` によるデータグリッド行メモリ `-50%` 削減、DuckDB CLI のファイル単位ミューテックスとトランザクション更新・ストリーミング `COPY ... TO` エクスポート、PostgreSQL アイドル限定サブプール解放、アップロード中ディレクトリを保護するエフェメラル掃除機構を実装。
+  - **サンドボックス・SSRF & ダークモード修正**：DuckDB Web サンドボックスでの `-safe` フラグ強制＋`stdin` SQL 入力によるドットコマンド遮断、SQLite Web サンドボックスの字句スキャナ化（コメント・引用符による `ATTACH` 回避と `?`/`#` DSN パラメータ注入を防止）、非管理者向け `<DataDir>/local_databases/u_<hash>/` ユーザー別隔離、MariaDB `/*M!...*/` 実行可能コメントの読み取り専用ガード対応、Oracle / Dameng 等リモートドライバへのダイヤル時 DNS リバインディング SSRF 検証＆IPv6 `net.JoinHostPort` 適用、およびダークモード時にモーダルを開くと背景の Monaco エディタがライトテーマに変わる不具合を修正。
+
 ## [v1.0.1] - 2026-11-07
 
 > **エディション適用範囲の注意**：**デスクトップ GUI 版 (`dbharbor-desktop-*` / `DBHarbor.app`)** は引き続き**ユーザーアカウント機能を持たないログイン不要の純粋なローカルモード**で動作します。永続サーバー設定（`<DataDir>/config.json`）、初期管理者セットアップウィザード、ログイン画面のブランディング、緊急管理者リカバリモード（`recovery` / `-recover-admin`）、およびローカルファイル・ネットワークのサンドボックス制限は **Web サーバー版 (`dbharbor-*`) 専用**です。

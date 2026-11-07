@@ -3,10 +3,15 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	stdsql_driver "database/sql/driver"
+	"errors"
 	"fmt"
 	"io"
+	"net"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"dbharbor/backend/internal/driver"
@@ -14,6 +19,20 @@ import (
 
 	mysqldrv "github.com/go-sql-driver/mysql"
 )
+
+var (
+	reValidMySQLCharset        = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+	registerRestrictedDialOnce sync.Once
+)
+
+func ensureRestrictedMySQLDialer() {
+	registerRestrictedDialOnce.Do(func() {
+		restricted := sqlbase.NewRestrictedDialContext(8 * time.Second)
+		mysqldrv.RegisterDialContext("tcp_restricted", func(ctx context.Context, addr string) (net.Conn, error) {
+			return restricted(ctx, "tcp", addr)
+		})
+	})
+}
 
 func init() {
 	variants := []struct {
@@ -43,16 +62,17 @@ func init() {
 			},
 		})
 		driver.Register(driver.DriverMeta{
-			Type:            variant.typ,
-			Name:            variant.name,
-			Category:        driver.CategoryRelational,
-			BadgeColor:      variant.color,
-			DefaultPort:     variant.port,
-			Description:     variant.desc,
-			SupportsSchemas: false,
-			SupportsExplain: true,
-			DefaultTypes:    mysqlTypes,
-			Fields:          fields,
+			Type:               variant.typ,
+			Name:               variant.name,
+			Category:           driver.CategoryRelational,
+			BadgeColor:         variant.color,
+			DefaultPort:        variant.port,
+			Description:        variant.desc,
+			SupportsSchemas:    false,
+			SupportsPartitions: true,
+			SupportsExplain:    true,
+			DefaultTypes:       mysqlTypes,
+			Fields:             fields,
 		}, func(cfg driver.ConnectionConfig) (driver.Driver, error) {
 			return New(cfg, variant.typ, variant.name, variant.port)
 		})
@@ -75,11 +95,20 @@ func New(cfg driver.ConnectionConfig, variantType, productName string, defaultPo
 	if user == "" {
 		user = "root"
 	}
+	restrictIP := cfg.Option("__restrict_internal_ip", "") == "1"
+	host := strings.TrimSpace(cfg.Host)
+	if host == "" && !restrictIP {
+		host = "127.0.0.1"
+	}
 	mc := mysqldrv.NewConfig()
 	mc.User = user
 	mc.Passwd = cfg.Password
 	mc.Net = "tcp"
-	mc.Addr = fmt.Sprintf("%s:%d", cfg.Host, port)
+	if restrictIP {
+		ensureRestrictedMySQLDialer()
+		mc.Net = "tcp_restricted"
+	}
+	mc.Addr = net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(port))
 	mc.DBName = cfg.Database
 	mc.ParseTime = false
 	mc.Timeout = 8 * time.Second
@@ -95,7 +124,7 @@ func New(cfg driver.ConnectionConfig, variantType, productName string, defaultPo
 		return nil, err
 	}
 	db.SetMaxOpenConns(12)
-	db.SetMaxIdleConns(4)
+	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(15 * time.Minute)
 	db.SetConnMaxIdleTime(3 * time.Minute)
 	return &Driver{cfg: cfg, variantType: variantType, productName: productName, db: db}, nil
@@ -172,8 +201,15 @@ func (d *Driver) ListDatabases(ctx context.Context) ([]driver.DatabaseSummary, e
 }
 
 func (d *Driver) CreateDatabase(ctx context.Context, name, charset string) error {
+	if strings.TrimSpace(name) == "" {
+		return errors.New("database name cannot be empty")
+	}
+	charset = strings.TrimSpace(charset)
 	if charset == "" {
 		charset = "utf8mb4"
+	}
+	if !reValidMySQLCharset.MatchString(charset) {
+		return fmt.Errorf("invalid database charset %q", charset)
 	}
 	_, err := d.db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s CHARACTER SET %s", sqlbase.QuoteIdent(sqlbase.DialectMySQL, name), charset))
 	return err
@@ -190,10 +226,11 @@ func (d *Driver) ListSchemas(_ context.Context, _ string) ([]string, error) {
 
 func (d *Driver) ListObjects(ctx context.Context, database, _ string) (driver.SchemaObjects, error) {
 	res := driver.SchemaObjects{
-		Database: database,
-		Tables:   []driver.ObjectItem{},
-		Views:    []driver.ObjectItem{},
-		Routines: []driver.ObjectItem{},
+		Database:  database,
+		Tables:    []driver.ObjectItem{},
+		Views:     []driver.ObjectItem{},
+		Routines:  []driver.ObjectItem{},
+		Sequences: []driver.ObjectItem{},
 	}
 	rows, err := d.db.QueryContext(ctx, `
 		SELECT
@@ -229,10 +266,15 @@ func (d *Driver) ListObjects(ctx context.Context, database, _ string) (driver.Sc
 			Collation:  coll,
 			Comment:    comment,
 		}
-		if strings.Contains(strings.ToUpper(ttype), "VIEW") {
+		ttUpper := strings.ToUpper(strings.TrimSpace(ttype))
+		switch {
+		case ttUpper == "SEQUENCE":
+			item.Type = "SEQUENCE"
+			res.Sequences = append(res.Sequences, item)
+		case strings.Contains(ttUpper, "VIEW"):
 			item.Type = "VIEW"
 			res.Views = append(res.Views, item)
-		} else {
+		default:
 			item.Type = "TABLE"
 			res.Tables = append(res.Tables, item)
 		}
@@ -255,11 +297,12 @@ func (d *Driver) ListObjects(ctx context.Context, database, _ string) (driver.Sc
 
 func (d *Driver) GetTableStructure(ctx context.Context, database, _, table string) (driver.TableStructure, error) {
 	st := driver.TableStructure{
-		Database:    database,
-		Table:       table,
-		Columns:     []driver.ColumnDef{},
-		Indexes:     []driver.IndexDef{},
-		ForeignKeys: []driver.ForeignKeyDef{},
+		Database:         database,
+		Table:            table,
+		Columns:          []driver.ColumnDef{},
+		Indexes:          []driver.IndexDef{},
+		ForeignKeys:      []driver.ForeignKeyDef{},
+		CheckConstraints: []driver.CheckConstraintDef{},
 	}
 
 	_ = d.db.QueryRowContext(ctx, `
@@ -274,37 +317,65 @@ func (d *Driver) GetTableStructure(ctx context.Context, database, _, table strin
 		st.DDL = createDDL
 	}
 
-	// Columns
+	// Columns (including GENERATION_EXPRESSION when supported)
+	hasGenCol := true
 	cRows, err := d.db.QueryContext(ctx, `
-		SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, EXTRA, COLUMN_COMMENT
+		SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, EXTRA, COLUMN_COMMENT, COALESCE(GENERATION_EXPRESSION, '')
 		FROM information_schema.COLUMNS
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 		ORDER BY ORDINAL_POSITION
 	`, database, table)
 	if err != nil {
-		return st, err
+		hasGenCol = false
+		cRows, err = d.db.QueryContext(ctx, `
+			SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, EXTRA, COLUMN_COMMENT
+			FROM information_schema.COLUMNS
+			WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+			ORDER BY ORDINAL_POSITION
+		`, database, table)
+		if err != nil {
+			return st, err
+		}
 	}
 	defer cRows.Close()
 
 	for cRows.Next() {
-		var cName, cType, isNull, cKey, extra, comment string
+		var cName, cType, isNull, cKey, extra, comment, genExpr string
 		var cDef sql.NullString
-		if err := cRows.Scan(&cName, &cType, &isNull, &cDef, &cKey, &extra, &comment); err != nil {
-			return st, err
+		var scanErr error
+		if hasGenCol {
+			scanErr = cRows.Scan(&cName, &cType, &isNull, &cDef, &cKey, &extra, &comment, &genExpr)
+		} else {
+			scanErr = cRows.Scan(&cName, &cType, &isNull, &cDef, &cKey, &extra, &comment)
+		}
+		if scanErr != nil {
+			return st, scanErr
 		}
 		defVal := ""
 		if cDef.Valid {
 			defVal = cDef.String
 		}
+		genStorage := ""
+		genExpr = strings.TrimSpace(genExpr)
+		if genExpr != "" {
+			extraUpper := strings.ToUpper(extra)
+			if strings.Contains(extraUpper, "STORED") || strings.Contains(extraUpper, "PERSISTENT") {
+				genStorage = "STORED"
+			} else {
+				genStorage = "VIRTUAL"
+			}
+		}
 		st.Columns = append(st.Columns, driver.ColumnDef{
-			Name:            cName,
-			Type:            cType,
-			Nullable:        strings.EqualFold(isNull, "YES"),
-			DefaultValue:    defVal,
-			IsPrimaryKey:    strings.EqualFold(cKey, "PRI"),
-			IsAutoIncrement: strings.Contains(strings.ToLower(extra), "auto_increment"),
-			Comment:         comment,
-			Extra:           extra,
+			Name:             cName,
+			Type:             cType,
+			Nullable:         strings.EqualFold(isNull, "YES"),
+			DefaultValue:     defVal,
+			IsPrimaryKey:     strings.EqualFold(cKey, "PRI"),
+			IsAutoIncrement:  strings.Contains(strings.ToLower(extra), "auto_increment"),
+			Comment:          comment,
+			Extra:            extra,
+			GeneratedExpr:    genExpr,
+			GeneratedStorage: genStorage,
 		})
 	}
 
@@ -342,23 +413,38 @@ func (d *Driver) GetTableStructure(ctx context.Context, database, _, table strin
 		}
 	}
 
-	// Foreign keys
+	// Foreign keys (joined with REFERENTIAL_CONSTRAINTS for OnUpdate / OnDelete)
 	fkRows, err := d.db.QueryContext(ctx, `
-		SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
-		FROM information_schema.KEY_COLUMN_USAGE
-		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL
-		ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
+		SELECT
+			kcu.CONSTRAINT_NAME,
+			kcu.COLUMN_NAME,
+			kcu.REFERENCED_TABLE_NAME,
+			kcu.REFERENCED_COLUMN_NAME,
+			COALESCE(rc.UPDATE_RULE, ''),
+			COALESCE(rc.DELETE_RULE, '')
+		FROM information_schema.KEY_COLUMN_USAGE kcu
+		LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+			ON kcu.CONSTRAINT_SCHEMA = rc.CONSTRAINT_SCHEMA
+			AND kcu.TABLE_NAME = rc.TABLE_NAME
+			AND kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME
+		WHERE kcu.TABLE_SCHEMA = ? AND kcu.TABLE_NAME = ? AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+		ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION
 	`, database, table)
 	if err == nil {
 		defer fkRows.Close()
 		fkMap := map[string]*driver.ForeignKeyDef{}
 		var fkOrder []string
 		for fkRows.Next() {
-			var name, col, refTbl, refCol string
-			if fkRows.Scan(&name, &col, &refTbl, &refCol) == nil {
+			var name, col, refTbl, refCol, onUpd, onDel string
+			if fkRows.Scan(&name, &col, &refTbl, &refCol, &onUpd, &onDel) == nil {
 				item, exists := fkMap[name]
 				if !exists {
-					item = &driver.ForeignKeyDef{Name: name, RefTable: refTbl}
+					item = &driver.ForeignKeyDef{
+						Name:     name,
+						RefTable: refTbl,
+						OnUpdate: onUpd,
+						OnDelete: onDel,
+					}
 					fkMap[name] = item
 					fkOrder = append(fkOrder, name)
 				}
@@ -368,6 +454,40 @@ func (d *Driver) GetTableStructure(ctx context.Context, database, _, table strin
 		}
 		for _, k := range fkOrder {
 			st.ForeignKeys = append(st.ForeignKeys, *fkMap[k])
+		}
+	}
+
+	// CHECK constraints (MySQL 8.0.16+ / MariaDB 10.2+ / TiDB; ignored gracefully on MySQL 5.7)
+	chkRows, chkErr := d.db.QueryContext(ctx, `
+		SELECT tc.CONSTRAINT_NAME, cc.CHECK_CLAUSE, COALESCE(tc.ENFORCED, 'YES')
+		FROM information_schema.TABLE_CONSTRAINTS tc
+		JOIN information_schema.CHECK_CONSTRAINTS cc
+			ON tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA AND tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
+		WHERE tc.TABLE_SCHEMA = ? AND tc.TABLE_NAME = ? AND tc.CONSTRAINT_TYPE = 'CHECK'
+		ORDER BY tc.CONSTRAINT_NAME
+	`, database, table)
+	if chkErr != nil {
+		// MariaDB omits ENFORCED from TABLE_CONSTRAINTS
+		chkRows, chkErr = d.db.QueryContext(ctx, `
+			SELECT tc.CONSTRAINT_NAME, cc.CHECK_CLAUSE, 'YES'
+			FROM information_schema.TABLE_CONSTRAINTS tc
+			JOIN information_schema.CHECK_CONSTRAINTS cc
+				ON tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA AND tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
+			WHERE tc.TABLE_SCHEMA = ? AND tc.TABLE_NAME = ? AND tc.CONSTRAINT_TYPE = 'CHECK'
+			ORDER BY tc.CONSTRAINT_NAME
+		`, database, table)
+	}
+	if chkErr == nil {
+		defer chkRows.Close()
+		for chkRows.Next() {
+			var cName, cExpr, enforced string
+			if chkRows.Scan(&cName, &cExpr, &enforced) == nil {
+				st.CheckConstraints = append(st.CheckConstraints, driver.CheckConstraintDef{
+					Name:       cName,
+					Expression: cExpr,
+					Enforced:   !strings.EqualFold(strings.TrimSpace(enforced), "NO"),
+				})
+			}
 		}
 	}
 
@@ -419,7 +539,7 @@ func (d *Driver) CreateTable(ctx context.Context, req driver.CreateTableRequest)
 }
 
 func (d *Driver) AlterTable(ctx context.Context, req driver.AlterTableRequest) ([]string, error) {
-	stmts, err := sqlbase.BuildAlterTableSQLs(sqlbase.DialectMySQL, req)
+	stmts, err := sqlbase.BuildAlterTableSQLsForEngine(d.variantType, sqlbase.DialectMySQL, req)
 	if err != nil {
 		return nil, err
 	}
@@ -434,17 +554,52 @@ func (d *Driver) AlterTable(ctx context.Context, req driver.AlterTableRequest) (
 	return stmts, nil
 }
 
+func (d *Driver) acquireConnForDB(ctx context.Context, targetDB string) (*sql.Conn, func(), error) {
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	targetDB = strings.TrimSpace(targetDB)
+	defaultDB := strings.TrimSpace(d.cfg.Database)
+	switched := false
+	if targetDB != "" {
+		if _, uErr := conn.ExecContext(ctx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectMySQL, targetDB)); uErr != nil {
+			_ = conn.Close()
+			return nil, nil, uErr
+		}
+		if !strings.EqualFold(targetDB, defaultDB) {
+			switched = true
+		}
+	}
+	cleanup := func() {
+		if switched {
+			if defaultDB == "" {
+				_ = conn.Raw(func(_ any) error { return stdsql_driver.ErrBadConn })
+			} else {
+				rCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				_, rErr := conn.ExecContext(rCtx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectMySQL, defaultDB))
+				cancel()
+				if rErr != nil {
+					_ = conn.Raw(func(_ any) error { return stdsql_driver.ErrBadConn })
+				}
+			}
+		}
+		_ = conn.Close()
+	}
+	return conn, cleanup, nil
+}
+
 func (d *Driver) ManageObject(ctx context.Context, req driver.ObjectActionRequest) error {
 	sqls, err := sqlbase.BuildObjectActionSQLs(sqlbase.DialectMySQL, req)
 	if err != nil {
 		return err
 	}
-	conn, cErr := d.db.Conn(ctx)
-	if cErr == nil {
-		defer conn.Close()
-		if req.Database != "" {
-			_, _ = conn.ExecContext(ctx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectMySQL, req.Database))
+	if strings.TrimSpace(req.Database) != "" {
+		conn, cleanup, cErr := d.acquireConnForDB(ctx, req.Database)
+		if cErr != nil {
+			return cErr
 		}
+		defer cleanup()
 		for _, s := range sqls {
 			if _, err := conn.ExecContext(ctx, s); err != nil {
 				return err
@@ -460,16 +615,93 @@ func (d *Driver) ManageObject(ctx context.Context, req driver.ObjectActionReques
 	return nil
 }
 
-func (d *Driver) ExecuteSQL(ctx context.Context, database, query string, maxRows int) ([]driver.QueryResult, error) {
-	conn, err := d.db.Conn(ctx)
+// PartitionManager implementation for MySQL / MariaDB / TiDB / OceanBase
+func (d *Driver) ListPartitions(ctx context.Context, database, _, table string) ([]driver.PartitionInfo, error) {
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT
+			PARTITION_NAME,
+			COALESCE(PARTITION_METHOD, ''),
+			COALESCE(PARTITION_EXPRESSION, ''),
+			COALESCE(CAST(PARTITION_DESCRIPTION AS CHAR), ''),
+			COALESCE(TABLE_ROWS, 0),
+			COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0)
+		FROM information_schema.PARTITIONS
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND PARTITION_NAME IS NOT NULL
+		ORDER BY PARTITION_ORDINAL_POSITION
+	`, database, table)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer rows.Close()
 
-	if database != "" {
-		_, _ = conn.ExecContext(ctx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectMySQL, database))
+	list := []driver.PartitionInfo{}
+	for rows.Next() {
+		var pName, method, expr, desc string
+		var rCnt, diskBytes int64
+		if err := rows.Scan(&pName, &method, &expr, &desc, &rCnt, &diskBytes); err != nil {
+			return nil, err
+		}
+		list = append(list, driver.PartitionInfo{
+			ID:               pName,
+			Name:             pName,
+			Rows:             rCnt,
+			BytesOnDisk:      diskBytes,
+			PartsCount:       1,
+			Active:           true,
+			Strategy:         method,
+			Expression:       expr,
+			BoundDescription: desc,
+		})
 	}
+	return list, rows.Err()
+}
+
+func (d *Driver) ManagePartition(ctx context.Context, req driver.PartitionActionRequest) (string, error) {
+	if strings.TrimSpace(req.Table) == "" || strings.TrimSpace(req.PartitionID) == "" {
+		return "", errors.New("table and partition name are required")
+	}
+	tbl := sqlbase.QualifyTable(sqlbase.DialectMySQL, req.Database, "", req.Table)
+	qPart := sqlbase.QuoteIdent(sqlbase.DialectMySQL, req.PartitionID)
+
+	var stmt string
+	switch strings.ToUpper(strings.TrimSpace(req.Action)) {
+	case "TRUNCATE":
+		stmt = fmt.Sprintf("ALTER TABLE %s TRUNCATE PARTITION %s", tbl, qPart)
+	case "DROP":
+		stmt = fmt.Sprintf("ALTER TABLE %s DROP PARTITION %s", tbl, qPart)
+	case "ANALYZE":
+		stmt = fmt.Sprintf("ALTER TABLE %s ANALYZE PARTITION %s", tbl, qPart)
+	case "OPTIMIZE":
+		stmt = fmt.Sprintf("ALTER TABLE %s OPTIMIZE PARTITION %s", tbl, qPart)
+	case "ADD":
+		expr := strings.TrimSpace(req.Expression)
+		if err := sqlbase.ValidateSQLExpression("partition bound expression", expr); err != nil {
+			return "", err
+		}
+		upperExpr := strings.ToUpper(expr)
+		if strings.HasPrefix(upperExpr, "VALUES ") {
+			stmt = fmt.Sprintf("ALTER TABLE %s ADD PARTITION (PARTITION %s %s)", tbl, qPart, expr)
+		} else if upperExpr == "MAXVALUE" {
+			stmt = fmt.Sprintf("ALTER TABLE %s ADD PARTITION (PARTITION %s VALUES LESS THAN MAXVALUE)", tbl, qPart)
+		} else {
+			stmt = fmt.Sprintf("ALTER TABLE %s ADD PARTITION (PARTITION %s VALUES LESS THAN (%s))", tbl, qPart, expr)
+		}
+	default:
+		return "", fmt.Errorf("unsupported MySQL partition action: %s", req.Action)
+	}
+	if req.PreviewOnly {
+		return stmt, nil
+	}
+	_, err := d.db.ExecContext(ctx, stmt)
+	return stmt, err
+}
+
+func (d *Driver) ExecuteSQL(ctx context.Context, database, query string, maxRows int) ([]driver.QueryResult, error) {
+	conn, cleanup, err := d.acquireConnForDB(ctx, database)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
 	return sqlbase.ExecuteMultiSQLConn(ctx, conn, query, maxRows)
 }
 
@@ -507,30 +739,30 @@ func (d *Driver) StreamExport(ctx context.Context, req driver.ExportRequest, w i
 }
 
 func (d *Driver) BatchImport(ctx context.Context, req driver.ImportRequest) (driver.ImportResult, error) {
-	if strings.EqualFold(req.Format, "sql") && req.Database != "" {
-		conn, err := d.db.Conn(ctx)
-		if err == nil {
-			defer conn.Close()
-			_, _ = conn.ExecContext(ctx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectMySQL, req.Database))
-			start := time.Now()
-			res := driver.ImportResult{}
-			sErr := sqlbase.StreamStatements(req.Reader, func(stmt string) error {
-				if _, execErr := conn.ExecContext(ctx, stmt); execErr != nil {
-					if req.ContinueOnError {
-						res.FailedCount++
-						if len(res.Warnings) < 20 {
-							res.Warnings = append(res.Warnings, execErr.Error())
-						}
-						return nil
-					}
-					return execErr
-				}
-				res.ImportedRows++
-				return nil
-			})
-			res.ElapsedMs = time.Since(start).Milliseconds()
-			return res, sErr
+	if strings.EqualFold(req.Format, "sql") && strings.TrimSpace(req.Database) != "" {
+		conn, cleanup, err := d.acquireConnForDB(ctx, req.Database)
+		if err != nil {
+			return driver.ImportResult{}, err
 		}
+		defer cleanup()
+		start := time.Now()
+		res := driver.ImportResult{}
+		sErr := sqlbase.StreamStatements(req.Reader, func(stmt string) error {
+			if _, execErr := conn.ExecContext(ctx, stmt); execErr != nil {
+				if req.ContinueOnError {
+					res.FailedCount++
+					if len(res.Warnings) < 20 {
+						res.Warnings = append(res.Warnings, execErr.Error())
+					}
+					return nil
+				}
+				return execErr
+			}
+			res.ImportedRows++
+			return nil
+		})
+		res.ElapsedMs = time.Since(start).Milliseconds()
+		return res, sErr
 	}
 	return sqlbase.BatchImport(ctx, d.db, sqlbase.DialectMySQL, req)
 }

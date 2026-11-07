@@ -112,8 +112,13 @@ type SavedConnection struct {
 	OwnerID     string            `json:"ownerId,omitempty"`
 	Visibility  string            `json:"visibility"`
 	Editable    bool              `json:"editable"`
+	Ephemeral   bool              `json:"ephemeral,omitempty"`
 	CreatedAt   string            `json:"createdAt"`
 	UpdatedAt   string            `json:"updatedAt"`
+}
+
+func IsEphemeralConnection(opts map[string]string) bool {
+	return opts != nil && opts["__ephemeral"] == "1"
 }
 
 type HistoryEntry struct {
@@ -182,8 +187,17 @@ type Store struct {
 	userMu     sync.RWMutex
 	principals map[string]UserPrincipal // userID -> live principal
 
+	maintMu   sync.RWMutex
+	maintHook func()
+
 	stopOnce sync.Once
 	stopCh   chan struct{}
+}
+
+func (s *Store) SetMaintenanceHook(fn func()) {
+	s.maintMu.Lock()
+	s.maintHook = fn
+	s.maintMu.Unlock()
 }
 
 func (s *Store) DataDir() string {
@@ -202,7 +216,8 @@ func Open(dataDir string, vault *crypto.Vault, adminUser, adminPass string) (*St
 	}
 	db.SetMaxOpenConns(1)
 
-	dummy, _ := bcrypt.GenerateFromPassword([]byte("dbharbor-anti-enumeration-dummy"), bcrypt.DefaultCost)
+	// Precomputed cost-10 bcrypt hash used for constant-time anti-enumeration password checks on unknown usernames.
+	dummy := []byte("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy")
 
 	s := &Store{
 		dataDir:        dataDir,
@@ -975,6 +990,7 @@ func (s *Store) ListConnections() ([]SavedConnection, error) {
 		item.HasURI = uriEnc != ""
 		item.Options = make(map[string]string)
 		_ = json.Unmarshal([]byte(optJSON), &item.Options)
+		item.Ephemeral = IsEphemeralConnection(item.Options)
 		list = append(list, item)
 	}
 	return list, nil
@@ -1017,6 +1033,58 @@ func (s *Store) GetDecryptedConnection(id string) (driver.ConnectionConfig, erro
 
 func (s *Store) SaveConnection(cfg driver.ConnectionConfig, keepExistingSecret bool) (SavedConnection, error) {
 	return s.SaveConnectionWithMeta(cfg, keepExistingSecret, "", "shared")
+}
+
+func (s *Store) InsertConnectionWithMeta(cfg driver.ConnectionConfig, ownerID, visibility string) (SavedConnection, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if strings.TrimSpace(cfg.ID) == "" {
+		cfg.ID = crypto.NewUUID()
+	}
+	if cfg.Color == "" {
+		cfg.Color = "#1677ff"
+	}
+	if cfg.Options == nil {
+		cfg.Options = map[string]string{}
+	}
+	if visibility != "private" && visibility != "shared" {
+		visibility = "shared"
+	}
+	optBytes, _ := json.Marshal(cfg.Options)
+	passEnc, err := s.vault.Encrypt(cfg.Password)
+	if err != nil {
+		return SavedConnection{}, err
+	}
+	uriEnc, err := s.vault.Encrypt(cfg.URI)
+	if err != nil {
+		return SavedConnection{}, err
+	}
+	_, err = s.db.Exec(`
+		INSERT INTO connections (id, name, type, color, host, port, username, password_enc, database_name, file_path, uri_enc, options_json, owner_id, visibility, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, cfg.ID, cfg.Name, cfg.Type, cfg.Color, cfg.Host, cfg.Port, cfg.Username, passEnc, cfg.Database, cfg.FilePath, uriEnc, string(optBytes), ownerID, visibility, now, now)
+	if err != nil {
+		return SavedConnection{}, err
+	}
+	return SavedConnection{
+		ID:          cfg.ID,
+		Name:        cfg.Name,
+		Type:        cfg.Type,
+		Color:       cfg.Color,
+		Host:        cfg.Host,
+		Port:        cfg.Port,
+		Username:    cfg.Username,
+		HasPassword: passEnc != "",
+		Database:    cfg.Database,
+		FilePath:    cfg.FilePath,
+		HasURI:      uriEnc != "",
+		Options:     cfg.Options,
+		OwnerID:     ownerID,
+		Visibility:  visibility,
+		Editable:    true,
+		Ephemeral:   IsEphemeralConnection(cfg.Options),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}, nil
 }
 
 func (s *Store) SaveConnectionWithMeta(cfg driver.ConnectionConfig, keepExistingSecret bool, ownerID, visibility string) (SavedConnection, error) {
@@ -1108,6 +1176,7 @@ func (s *Store) SaveConnectionWithMeta(cfg driver.ConnectionConfig, keepExisting
 		OwnerID:     ownerID,
 		Visibility:  visibility,
 		Editable:    true,
+		Ephemeral:   IsEphemeralConnection(cfg.Options),
 		CreatedAt:   createdAt,
 		UpdatedAt:   now,
 	}, nil

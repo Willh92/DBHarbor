@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +19,7 @@ import (
 	"time"
 
 	"dbharbor/backend/internal/driver"
+	"dbharbor/backend/internal/driver/sqlbase"
 )
 
 func (s *Server) handleDesktopBoot(c *Context) {
@@ -370,6 +374,34 @@ func hasWindowsADS(s string) bool {
 	return strings.IndexByte(trimmed, ':') >= 0
 }
 
+func equalCleanPaths(a, b string) bool {
+	ca := filepath.Clean(a)
+	cb := filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(ca, cb)
+	}
+	return ca == cb
+}
+
+func hasInvalidDBFilePathChars(s string) bool {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b < 0x20 || b == 0x7f || b == '?' || b == '#' || b == '%' {
+			return true
+		}
+	}
+	return false
+}
+
+func hasControlChars(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 func cleanDBFilePathCandidate(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" || s == ":memory:" || strings.HasPrefix(strings.ToLower(s), "file::memory:") {
@@ -379,7 +411,7 @@ func cleanDBFilePathCandidate(raw string) string {
 		s = s[5:]
 		s = strings.TrimPrefix(s, "//")
 	}
-	if qIdx := strings.IndexByte(s, '?'); qIdx >= 0 {
+	if qIdx := strings.IndexAny(s, "?#"); qIdx >= 0 {
 		s = s[:qIdx]
 	}
 	return strings.TrimSpace(s)
@@ -428,7 +460,8 @@ func isPathWithinDir(targetPath, baseDir string) bool {
 
 func isProtectedMatch(absTarget, absBase string) bool {
 	if isPathWithinDir(absTarget, filepath.Join(absBase, ".backups")) ||
-		isPathWithinDir(absTarget, filepath.Join(absBase, "backups")) {
+		isPathWithinDir(absTarget, filepath.Join(absBase, "backups")) ||
+		isPathWithinDir(absTarget, filepath.Join(absBase, "ephemeral_workspaces")) {
 		return true
 	}
 	baseName := strings.ToLower(filepath.Base(absTarget))
@@ -476,9 +509,90 @@ func (s *Server) isProtectedInternalPath(candidatePath string) bool {
 	return isProtectedMatch(realTarget, realBase)
 }
 
+func userScopedLocalDBBucket(userID string) string {
+	uid := strings.TrimSpace(userID)
+	if uid == "" {
+		uid = "anonymous"
+	}
+	sum := sha256.Sum256([]byte("dbharbor-localdb-user:" + uid))
+	return "u_" + hex.EncodeToString(sum[:12])
+}
+
+func isUserScopedLocalDBBucketName(name string) bool {
+	if len(name) != 26 || !strings.HasPrefix(strings.ToLower(name), "u_") {
+		return false
+	}
+	for i := 2; i < len(name); i++ {
+		ch := name[i]
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func isOtherUserLocalDBPath(targetPath, localDBDir, myBucket string) bool {
+	absTarget, err1 := filepath.Abs(targetPath)
+	absLocal, err2 := filepath.Abs(localDBDir)
+	if err1 != nil || err2 != nil {
+		return true
+	}
+	rel, err := filepath.Rel(absLocal, absTarget)
+	if err != nil || rel == "." {
+		return false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return true
+	}
+	firstSeg := rel
+	if sepIdx := strings.IndexByte(rel, filepath.Separator); sepIdx >= 0 {
+		firstSeg = rel[:sepIdx]
+	}
+	return isUserScopedLocalDBBucketName(firstSeg) && !strings.EqualFold(firstSeg, myBucket)
+}
+
+func verifyUploadedSingleFileDB(origBase, filePath string, written int64) error {
+	ext := strings.ToLower(filepath.Ext(origBase))
+	if allowedEphemeralExts[ext] {
+		if written < 12 {
+			return errors.New("uploaded file is not a valid SQLite 3 or DuckDB binary database")
+		}
+		f, err := os.Open(filePath)
+		if err != nil {
+			return errors.New("failed to inspect uploaded database file")
+		}
+		var hdr [32]byte
+		n, _ := io.ReadFull(f, hdr[:])
+		_ = f.Close()
+		if _, _, vErr := detectAndValidateSingleFileDB(origBase, "auto", hdr[:n], written); vErr != nil {
+			return vErr
+		}
+		return nil
+	}
+	if ext == ".parquet" {
+		if written < 4 {
+			return errors.New("uploaded file is not a valid Apache Parquet file")
+		}
+		f, err := os.Open(filePath)
+		if err != nil {
+			return errors.New("failed to inspect uploaded Parquet file")
+		}
+		var hdr [4]byte
+		n, _ := io.ReadFull(f, hdr[:])
+		_ = f.Close()
+		if n < 4 || string(hdr[:4]) != "PAR1" {
+			return errors.New("uploaded file header does not match Apache Parquet magic (PAR1)")
+		}
+	}
+	return nil
+}
+
 func (s *Server) normalizeConnectionFilePathForWebUser(c *Context, rawFilePath string) string {
 	trimmed := strings.TrimSpace(rawFilePath)
 	if s.desktop.Enabled || c.IsAdmin() || trimmed == "" || trimmed == ":memory:" {
+		return rawFilePath
+	}
+	if hasInvalidDBFilePathChars(trimmed) {
 		return rawFilePath
 	}
 	low := strings.ToLower(trimmed)
@@ -488,69 +602,86 @@ func (s *Server) normalizeConnectionFilePathForWebUser(c *Context, rawFilePath s
 	if s.isProtectedInternalPath(trimmed) {
 		return rawFilePath
 	}
-	return filepath.ToSlash(filepath.Join("local_databases", trimmed))
+	return filepath.ToSlash(filepath.Join("local_databases", userScopedLocalDBBucket(c.UserID()), trimmed))
 }
 
 func (s *Server) validateConnectionFilePath(c *Context, dbType, rawFilePath string) (int, string) {
-	cleaned := cleanDBFilePathCandidate(rawFilePath)
-	if cleaned == "" || cleaned == ":memory:" {
+	trimmed := strings.TrimSpace(rawFilePath)
+	if trimmed == "" || trimmed == ":memory:" {
 		return http.StatusOK, ""
 	}
-	if hasWindowsADS(cleaned) {
-		return http.StatusBadRequest, "Invalid database file path"
+	if hasInvalidDBFilePathChars(trimmed) || strings.HasPrefix(strings.ToLower(trimmed), "file:") || hasWindowsADS(trimmed) {
+		return http.StatusBadRequest, "Invalid database file path: query parameters, URI schemes, percent-encoding, and control characters are not allowed"
 	}
-	if s.isProtectedInternalPath(cleaned) {
+	if s.isProtectedInternalPath(trimmed) {
 		return http.StatusForbidden, "Access denied: connecting directly to DBHarbor's internal metadata or configuration files is prohibited"
 	}
 	if !s.desktop.Enabled && !c.IsAdmin() {
 		baseDataDir := s.resolveBaseDataDir()
 		localDBDir := filepath.Join(baseDataDir, "local_databases")
-		_ = os.MkdirAll(localDBDir, 0o700)
-		absTarget, err := resolveCandidateAbsPath(baseDataDir, cleaned)
-		if err != nil || !isPathWithinDir(absTarget, localDBDir) {
-			return http.StatusForbidden, "Permission denied: non-admin accounts can only open database files inside the server local_databases directory"
+		myBucket := userScopedLocalDBBucket(c.UserID())
+		userDir := filepath.Join(localDBDir, myBucket)
+		_ = os.MkdirAll(userDir, 0o700)
+
+		absTarget, err := resolveCandidateAbsPath(baseDataDir, trimmed)
+		if err != nil || !isPathWithinDir(absTarget, userDir) || equalCleanPaths(absTarget, userDir) {
+			return http.StatusForbidden, "Permission denied: non-admin accounts can only open database files inside their own isolated local_databases user directory"
 		}
 		realTarget := evalExistingSymlinkPath(absTarget)
-		realLocal := evalExistingSymlinkPath(localDBDir)
-		if !isPathWithinDir(realTarget, realLocal) {
-			return http.StatusForbidden, "Permission denied: symbolic links escaping the local_databases sandbox are prohibited"
+		realUserDir := evalExistingSymlinkPath(userDir)
+		if !isPathWithinDir(realTarget, realUserDir) || equalCleanPaths(realTarget, realUserDir) {
+			return http.StatusForbidden, "Permission denied: symbolic links escaping your isolated local_databases directory are prohibited"
+		}
+		ext := strings.ToLower(filepath.Ext(absTarget))
+		if !allowedLocalDBExts[ext] {
+			return http.StatusForbidden, "Permission denied: unsupported local database file extension"
 		}
 	}
 	return http.StatusOK, ""
 }
 
-func isRestrictedInternalIP(ip net.IP) bool {
-	if ip == nil {
-		return false
-	}
-	return ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate()
-}
-
-func extractHostsFromMongoURI(rawURI string) []string {
+func extractHostsFromURI(rawURI string) (scheme string, hosts []string, ok bool) {
 	uStr := strings.TrimSpace(rawURI)
 	if uStr == "" {
-		return nil
+		return "", nil, true
 	}
-	if parsed, err := url.Parse(uStr); err == nil && parsed.Host != "" {
-		var hosts []string
-		for _, part := range strings.Split(parsed.Host, ",") {
-			hp := strings.TrimSpace(part)
-			if hp == "" {
-				continue
-			}
-			if h, _, sErr := net.SplitHostPort(hp); sErr == nil {
-				hosts = append(hosts, strings.Trim(h, "[]"))
-			} else {
-				hosts = append(hosts, strings.Trim(hp, "[]"))
-			}
+	parsed, err := url.Parse(uStr)
+	if err != nil || parsed.Host == "" {
+		return "", nil, false
+	}
+	scheme = strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	for _, part := range strings.Split(parsed.Host, ",") {
+		hp := strings.TrimSpace(part)
+		if atIdx := strings.LastIndexByte(hp, '@'); atIdx >= 0 {
+			hp = strings.TrimSpace(hp[atIdx+1:])
 		}
-		return hosts
+		if hp == "" {
+			return scheme, nil, false
+		}
+		if h, _, sErr := net.SplitHostPort(hp); sErr == nil {
+			hosts = append(hosts, strings.Trim(h, "[]"))
+		} else {
+			hosts = append(hosts, strings.Trim(hp, "[]"))
+		}
 	}
-	return nil
+	if len(hosts) == 0 {
+		return scheme, nil, false
+	}
+	return scheme, hosts, true
+}
+
+var restrictedNonAdminOptions = map[string]bool{
+	"tlscafile":                   true,
+	"tlscertificatekeyfile":       true,
+	"sslclientcertificatekeyfile": true,
+	"sslcertificateauthorityfile": true,
+	"sslrootcert":                 true,
+	"sslcert":                     true,
+	"sslkey":                      true,
 }
 
 func (s *Server) validateRemoteEndpointForWebUser(c *Context, cfg driver.ConnectionConfig) (int, string) {
-	if s.desktop.Enabled || c.IsAdmin() || s.opts.AllowPrivateNetForNonAdmin {
+	if s.desktop.Enabled || c.IsAdmin() {
 		return http.StatusOK, ""
 	}
 	dbType := strings.ToLower(strings.TrimSpace(cfg.Type))
@@ -558,42 +689,73 @@ func (s *Server) validateRemoteEndpointForWebUser(c *Context, cfg driver.Connect
 		return http.StatusOK, ""
 	}
 
-	var candidates []string
-	if h := strings.TrimSpace(cfg.Host); h != "" {
-		candidates = append(candidates, strings.Trim(h, "[]"))
-	}
-	if strings.TrimSpace(cfg.URI) != "" {
-		candidates = append(candidates, extractHostsFromMongoURI(cfg.URI)...)
+	for k, v := range cfg.Options {
+		if strings.TrimSpace(v) == "" {
+			continue
+		}
+		if restrictedNonAdminOptions[strings.ToLower(strings.TrimSpace(k))] {
+			return http.StatusForbidden, fmt.Sprintf("Permission denied: connection option %q is restricted for non-administrator accounts", k)
+		}
 	}
 
-	for _, host := range candidates {
-		if host == "" {
-			continue
+	rawURI := strings.TrimSpace(cfg.URI)
+	if rawURI != "" && (dbType == "mongodb" || strings.HasPrefix(strings.ToLower(rawURI), "mongodb")) {
+		if err := sqlbase.ValidateMongoURIForRestrictedWeb(rawURI); err != nil {
+			return http.StatusForbidden, "Permission denied: " + err.Error()
 		}
-		if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
-			return http.StatusForbidden, "Permission denied: non-admin accounts cannot connect to loopback, link-local, or private internal network addresses unless allowed by an administrator"
+	}
+
+	rawHost := strings.TrimSpace(cfg.Host)
+	if rawHost != "" {
+		lowHost := strings.ToLower(rawHost)
+		if strings.Contains(lowHost, "/") || strings.Contains(lowHost, `\`) || strings.Contains(lowHost, ".sock") {
+			return http.StatusForbidden, "Permission denied: Unix domain socket hosts are restricted for non-administrator accounts"
 		}
-		if ip := net.ParseIP(host); ip != nil {
-			if isRestrictedInternalIP(ip) {
-				return http.StatusForbidden, "Permission denied: non-admin accounts cannot connect to loopback, link-local, or private internal network addresses unless allowed by an administrator"
+	}
+
+	if s.opts.AllowPrivateNetForNonAdmin {
+		return http.StatusOK, ""
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	if rawURI != "" {
+		scheme, uriHosts, ok := extractHostsFromURI(rawURI)
+		if !ok {
+			return http.StatusForbidden, "Permission denied: invalid or unverifiable connection URI for non-administrator account"
+		}
+		for _, h := range uriHosts {
+			var err error
+			if scheme == "mongodb+srv" {
+				err = sqlbase.ValidateMongoSRVHost(ctx, h)
+			} else {
+				err = sqlbase.ValidateRemoteHost(ctx, h)
 			}
-			continue
+			if err != nil {
+				return http.StatusForbidden, "Permission denied: " + err.Error()
+			}
 		}
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
-		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-		cancel()
-		if err == nil {
-			for _, addr := range addrs {
-				if isRestrictedInternalIP(addr.IP) {
-					return http.StatusForbidden, "Permission denied: target hostname resolves to a restricted internal or loopback address"
-				}
+	}
+
+	if rawHost == "" && rawURI == "" {
+		rawHost = "127.0.0.1"
+	}
+	if rawHost != "" {
+		for _, part := range strings.Split(rawHost, ",") {
+			hp := strings.TrimSpace(part)
+			if hp == "" {
+				continue
+			}
+			if err := sqlbase.ValidateRemoteHost(ctx, hp); err != nil {
+				return http.StatusForbidden, "Permission denied: " + err.Error()
 			}
 		}
 	}
 	return http.StatusOK, ""
 }
 
-func listFilesystemRoots(baseDataDir string, sandboxed bool) []H {
+func listFilesystemRoots(baseDataDir string, sandboxed bool, userBucket string) []H {
 	var roots []H
 	seen := map[string]bool{}
 	addRoot := func(label, p string) {
@@ -613,10 +775,16 @@ func listFilesystemRoots(baseDataDir string, sandboxed bool) []H {
 	if baseDataDir != "" {
 		localDBDir := filepath.Join(baseDataDir, "local_databases")
 		_ = os.MkdirAll(localDBDir, 0o700)
-		addRoot("Local DBs", localDBDir)
-		if !sandboxed {
-			addRoot("Data Dir", baseDataDir)
+		if sandboxed {
+			if userBucket != "" {
+				userDir := filepath.Join(localDBDir, userBucket)
+				_ = os.MkdirAll(userDir, 0o700)
+				addRoot("My Uploads", userDir)
+			}
+			return roots
 		}
+		addRoot("Local DBs", localDBDir)
+		addRoot("Data Dir", baseDataDir)
 	}
 	if sandboxed {
 		return roots
@@ -644,13 +812,26 @@ func (s *Server) handleBrowseLocalFS(c *Context) {
 	localDBDir := filepath.Join(baseDataDir, "local_databases")
 	_ = os.MkdirAll(localDBDir, 0o700)
 	sandboxed := !s.desktop.Enabled && !c.IsAdmin()
+	myBucket := ""
+	userDir := ""
+	realUserDir := ""
+	if sandboxed {
+		myBucket = userScopedLocalDBBucket(c.UserID())
+		userDir = filepath.Join(localDBDir, myBucket)
+		_ = os.MkdirAll(userDir, 0o700)
+		realUserDir = evalExistingSymlinkPath(userDir)
+	}
 
 	rawPath := strings.TrimSpace(c.Query("path"))
+	if hasControlChars(rawPath) || (sandboxed && rawPath != "" && hasInvalidDBFilePathChars(rawPath)) {
+		c.JSON(http.StatusBadRequest, H{"error": "Invalid directory path"})
+		return
+	}
 	showAll := (c.Query("all") == "1" || c.Query("all") == "true") && !sandboxed
 
 	defaultDir := baseDataDir
 	if sandboxed {
-		defaultDir = localDBDir
+		defaultDir = userDir
 	}
 
 	targetDir := rawPath
@@ -660,19 +841,26 @@ func (s *Server) handleBrowseLocalFS(c *Context) {
 	if abs, err := resolveCandidateAbsPath(baseDataDir, targetDir); err == nil {
 		targetDir = abs
 	}
-	realLocalDBDir := evalExistingSymlinkPath(localDBDir)
 	if sandboxed {
-		if !isPathWithinDir(targetDir, localDBDir) || !isPathWithinDir(evalExistingSymlinkPath(targetDir), realLocalDBDir) {
-			c.JSON(http.StatusForbidden, H{"error": "Permission denied: non-admin accounts can only browse inside the server local_databases directory"})
+		evalTarget := evalExistingSymlinkPath(targetDir)
+		if !isPathWithinDir(targetDir, userDir) || !isPathWithinDir(evalTarget, realUserDir) {
+			c.JSON(http.StatusForbidden, H{"error": "Permission denied: non-admin accounts can only browse inside their own isolated local_databases user directory"})
 			return
 		}
+	}
+	if s.isProtectedInternalPath(targetDir) {
+		c.JSON(http.StatusForbidden, H{"error": "Access denied: browsing internal protected directories is prohibited"})
+		return
 	}
 	if st, err := os.Stat(targetDir); err != nil {
 		targetDir = defaultDir
 	} else if !st.IsDir() {
 		targetDir = filepath.Dir(targetDir)
-		if sandboxed && (!isPathWithinDir(targetDir, localDBDir) || !isPathWithinDir(evalExistingSymlinkPath(targetDir), realLocalDBDir)) {
-			targetDir = defaultDir
+		if sandboxed {
+			evalTarget := evalExistingSymlinkPath(targetDir)
+			if !isPathWithinDir(targetDir, userDir) || !isPathWithinDir(evalTarget, realUserDir) {
+				targetDir = defaultDir
+			}
 		}
 	}
 
@@ -685,12 +873,15 @@ func (s *Server) handleBrowseLocalFS(c *Context) {
 	entries := make([]fsBrowseEntry, 0, len(dirEntries))
 	for _, de := range dirEntries {
 		name := de.Name()
-		if strings.HasPrefix(name, ".") {
+		if strings.HasPrefix(name, ".") || strings.EqualFold(name, "ephemeral_workspaces") || strings.EqualFold(name, "backups") {
 			continue
 		}
 		fullEntryPath := filepath.Join(targetDir, name)
-		if sandboxed && !isPathWithinDir(evalExistingSymlinkPath(fullEntryPath), realLocalDBDir) {
-			continue
+		if sandboxed {
+			evalEntry := evalExistingSymlinkPath(fullEntryPath)
+			if !isPathWithinDir(fullEntryPath, userDir) || !isPathWithinDir(evalEntry, realUserDir) {
+				continue
+			}
 		}
 		isDir := de.IsDir()
 		if !isDir && s.isProtectedInternalPath(fullEntryPath) {
@@ -730,75 +921,139 @@ func (s *Server) handleBrowseLocalFS(c *Context) {
 	})
 
 	parentDir := filepath.Dir(targetDir)
-	if parentDir == targetDir || (sandboxed && !isPathWithinDir(parentDir, localDBDir)) {
+	if parentDir == targetDir || (sandboxed && !isPathWithinDir(parentDir, userDir)) {
 		parentDir = ""
 	}
 	reportedDataDir := baseDataDir
 	if sandboxed {
-		reportedDataDir = localDBDir
+		reportedDataDir = userDir
 	}
 
 	c.JSON(http.StatusOK, H{
 		"currentDir": targetDir,
 		"parentDir":  parentDir,
 		"dataDir":    reportedDataDir,
-		"roots":      listFilesystemRoots(baseDataDir, sandboxed),
+		"roots":      listFilesystemRoots(baseDataDir, sandboxed, myBucket),
 		"entries":    entries,
 	})
 }
 
+func (s *Server) evictConnectionsMatchingFilePath(targetPath string, maxWait time.Duration) {
+	if s.store == nil || s.pool == nil {
+		return
+	}
+	absTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		return
+	}
+	baseDataDir := s.resolveBaseDataDir()
+	conns, err := s.store.ListConnections()
+	if err != nil {
+		return
+	}
+	for _, conn := range conns {
+		fp := strings.TrimSpace(conn.FilePath)
+		if fp == "" || fp == ":memory:" {
+			continue
+		}
+		connAbs, cErr := resolveCandidateAbsPath(baseDataDir, fp)
+		if cErr != nil {
+			continue
+		}
+		if equalCleanPaths(connAbs, absTarget) {
+			s.pool.EvictAndWait(conn.ID, maxWait)
+			s.invalidateConnCache(conn.ID)
+		}
+	}
+}
+
+func (s *Server) cleanupUserLocalDBDir(userID string) {
+	uid := strings.TrimSpace(userID)
+	if uid == "" {
+		return
+	}
+	localDBDir := filepath.Join(s.resolveBaseDataDir(), "local_databases")
+	uDir := filepath.Join(localDBDir, userScopedLocalDBBucket(uid))
+	if !isPathWithinDir(uDir, localDBDir) || equalCleanPaths(uDir, localDBDir) {
+		return
+	}
+	_ = os.RemoveAll(uDir)
+}
+
 func (s *Server) handleUploadLocalDBFile(c *Context) {
+	if !c.RequireWrite() {
+		return
+	}
 	if !c.Principal.CanCreateConn {
 		c.JSON(http.StatusForbidden, H{"error": "Permission denied: your account is not authorized to upload database files"})
 		return
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, s.maxImportBytes())
-	fileHeader, err := c.FormFile("file")
+	part, rawFilename, fields, err := c.StreamFormFile("file")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": "Please select a local database file to upload"})
 		return
 	}
+	defer part.Close()
 
-	origBase := filepath.Base(fileHeader.Filename)
+	origBase := filepath.Base(rawFilename)
 	ext := strings.ToLower(filepath.Ext(origBase))
 	if !allowedLocalDBExts[ext] {
 		c.JSON(http.StatusBadRequest, H{"error": "Unsupported database file extension; allowed: .db, .sqlite, .sqlite3, .duckdb, .ddb, .parquet, .csv"})
 		return
 	}
 
-	src, err := fileHeader.Open()
-	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": "Failed to open uploaded file"})
-		return
-	}
-	defer src.Close()
-
 	destDir := filepath.Join(s.resolveBaseDataDir(), "local_databases")
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	if !s.desktop.Enabled && !c.IsAdmin() {
+		destDir = filepath.Join(destDir, userScopedLocalDBBucket(c.UserID()))
+	}
+	if err := os.MkdirAll(destDir, 0o700); err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "Failed to create local_databases directory: " + err.Error()})
 		return
 	}
 
+	tmpFile, err := os.CreateTemp(destDir, ".upload_*"+ext)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, H{"error": "Failed to save database file: " + err.Error()})
+		return
+	}
+	tmpPath := tmpFile.Name()
+	written, copyErr := io.Copy(tmpFile, part)
+	_ = tmpFile.Close()
+	if copyErr != nil {
+		_ = os.Remove(tmpPath)
+		c.JSON(http.StatusInternalServerError, H{"error": "Failed while writing database file: " + copyErr.Error()})
+		return
+	}
+
+	// Drain any trailing form fields (e.g., overwrite appended after file in FormData)
+	c.DrainMultipartFields(fields)
+
+	if vErr := verifyUploadedSingleFileDB(origBase, tmpPath, written); vErr != nil {
+		_ = os.Remove(tmpPath)
+		c.JSON(http.StatusBadRequest, H{"error": vErr.Error()})
+		return
+	}
+
+	overwrite := strings.EqualFold(strings.TrimSpace(fields["overwrite"]), "true") || strings.EqualFold(strings.TrimSpace(c.Query("overwrite")), "true")
 	stem := strings.TrimSuffix(origBase, filepath.Ext(origBase))
 	safeName := sanitizeExportName(stem) + ext
 	destPath := filepath.Join(destDir, safeName)
-	if c.PostForm("overwrite") != "true" {
+	if !overwrite {
 		if _, err := os.Stat(destPath); err == nil {
 			safeName = fmt.Sprintf("%s_%s%s", sanitizeExportName(stem), time.Now().Format("20060102_150405"), ext)
 			destPath = filepath.Join(destDir, safeName)
 		}
 	}
-
-	dst, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, H{"error": "Failed to save database file: " + err.Error()})
-		return
+	if overwrite {
+		s.evictConnectionsMatchingFilePath(destPath, 1500*time.Millisecond)
+		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+			_ = os.Remove(destPath + suffix)
+		}
 	}
-	written, copyErr := io.Copy(dst, src)
-	_ = dst.Close()
-	if copyErr != nil {
-		_ = os.Remove(destPath)
-		c.JSON(http.StatusInternalServerError, H{"error": "Failed while writing database file: " + copyErr.Error()})
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		_ = os.Remove(tmpPath)
+		c.JSON(http.StatusInternalServerError, H{"error": "Failed to finalize uploaded database file: " + err.Error()})
 		return
 	}
 

@@ -3,7 +3,6 @@ import {
   Alert,
   Button,
   Col,
-  ColorPicker,
   Empty,
   Form,
   Input,
@@ -36,14 +35,77 @@ import { useWorkbenchStore } from '../../store/useWorkbenchStore';
 import type { ConnectionFormPayload, LocalFSBrowseResponse, SavedConnection, ServerInfo } from '../../types';
 import { DB_SHORT_LABELS, formatBytes } from '../../utils/format';
 
+const PRESET_BADGE_COLORS = [
+  '#1677ff',
+  '#13c2c2',
+  '#52c41a',
+  '#fa8c16',
+  '#f5222d',
+  '#722ed1',
+  '#eb2f96',
+  '#2f54eb',
+];
+
+const ColorSwatchPicker: React.FC<{ value?: string; onChange?: (hex: string) => void }> = ({ value, onChange }) => {
+  const hex = typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value) ? value : '#1677ff';
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', minHeight: 32 }}>
+      {PRESET_BADGE_COLORS.map((c) => {
+        const active = hex.toLowerCase() === c.toLowerCase();
+        return (
+          <button
+            key={c}
+            type="button"
+            onClick={() => onChange?.(c)}
+            title={c}
+            style={{
+              width: 18,
+              height: 18,
+              padding: 0,
+              borderRadius: 4,
+              background: c,
+              border: active ? '2px solid #fff' : '1px solid rgba(128,128,128,0.35)',
+              boxShadow: active ? `0 0 0 2px ${c}` : 'none',
+              cursor: 'pointer',
+              flexShrink: 0,
+            }}
+          />
+        );
+      })}
+      <label
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 4,
+          padding: '2px 6px',
+          borderRadius: 6,
+          border: '1px solid rgba(128,128,128,0.28)',
+          cursor: 'pointer',
+          fontSize: 11,
+          fontFamily: 'monospace',
+        }}
+      >
+        <input
+          type="color"
+          value={hex}
+          onChange={(e) => onChange?.(e.target.value)}
+          style={{ width: 16, height: 16, padding: 0, border: 'none', background: 'transparent', cursor: 'pointer' }}
+        />
+        <span>{hex.toUpperCase()}</span>
+      </label>
+    </div>
+  );
+};
+
 interface Props {
   open: boolean;
   editing?: SavedConnection | null;
   onClose: () => void;
   onSaved: () => void;
+  onOpenEphemeral?: () => void;
 }
 
-export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSaved }) => {
+export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSaved, onOpenEphemeral }) => {
   const { drivers, isDesktop, role } = useWorkbenchStore();
   const { isMobile } = useResponsive();
   const { t } = useI18n();
@@ -142,6 +204,10 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
   useEffect(() => {
     if (!open) return;
     setPingResult(null);
+    setCategoryFilter('all');
+    setFsModalOpen(false);
+    setFsData(null);
+    setFsShowAll(false);
     if (editing) {
       setSelectedType(editing.type);
       form.setFieldsValue({
@@ -392,13 +458,13 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
 
       <Form form={form} layout="vertical">
         <Row gutter={12}>
-          <Col xs={24} sm={!isDesktop && role === 'admin' ? 11 : 18}>
+          <Col xs={24} sm={!isDesktop && role === 'admin' ? 9 : 14}>
             <Form.Item name="name" label={t('Connection Name')} rules={[{ required: true }]}>
               <Input placeholder="Production ClickHouse / Orders MySQL" />
             </Form.Item>
           </Col>
           {!isDesktop && role === 'admin' && (
-            <Col xs={24} sm={7}>
+            <Col xs={24} sm={6}>
               <Form.Item name="visibility" label={t('Visibility')}>
                 <Select
                   options={[
@@ -409,9 +475,9 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
               </Form.Item>
             </Col>
           )}
-          <Col xs={24} sm={6}>
+          <Col xs={24} sm={!isDesktop && role === 'admin' ? 9 : 10}>
             <Form.Item name="color" label={t('Badge Color')}>
-              <ColorPicker showText format="hex" />
+              <ColorSwatchPicker />
             </Form.Item>
           </Col>
         </Row>
@@ -463,6 +529,18 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
                             onClick={openServerFileBrowser}
                           >
                             <FolderOpenOutlined /> {t('Folder Browser')}
+                          </Tag>
+                        )}
+                        {!isDesktop && !editing && onOpenEphemeral && (
+                          <Tag
+                            color="orange"
+                            style={{ cursor: 'pointer', margin: 0 }}
+                            onClick={() => {
+                              onClose();
+                              onOpenEphemeral();
+                            }}
+                          >
+                            <FolderOpenOutlined /> {t('Open Local DB (Temp Session / Save Back)')}
                           </Tag>
                         )}
                         {!isDesktop && (

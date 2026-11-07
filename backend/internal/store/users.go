@@ -655,34 +655,128 @@ func redactHostDataDirPrefix(filePath, dataDir string) string {
 	return filepath.ToSlash(rel)
 }
 
+func sanitizeClientVisibleConnection(c SavedConnection, dataDir string, maskHostDir bool) SavedConnection {
+	if IsEphemeralConnection(c.Options) {
+		c.Ephemeral = true
+		origName := strings.TrimSpace(c.Options["__orig_filename"])
+		if origName == "" {
+			origName = filepath.Base(c.FilePath)
+		}
+		c.FilePath = origName
+	} else if maskHostDir {
+		c.FilePath = redactHostDataDirPrefix(c.FilePath, dataDir)
+	}
+	if len(c.Options) > 0 {
+		cleaned := make(map[string]string, len(c.Options))
+		for k, v := range c.Options {
+			if strings.HasPrefix(k, "__") {
+				continue
+			}
+			cleaned[k] = v
+		}
+		c.Options = cleaned
+	}
+	return c
+}
+
+func StripReservedConnectionOptions(opts map[string]string) map[string]string {
+	if len(opts) == 0 {
+		return opts
+	}
+	out := make(map[string]string, len(opts))
+	for k, v := range opts {
+		if strings.HasPrefix(k, "__") {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func (s *Store) CountUserEphemeralConnections(userID string) int {
+	if strings.TrimSpace(userID) == "" {
+		return 0
+	}
+	var cnt int
+	_ = s.db.QueryRow(
+		`SELECT COUNT(1) FROM connections WHERE owner_id = ? AND options_json LIKE '%"__ephemeral":"1"%'`,
+		userID,
+	).Scan(&cnt)
+	return cnt
+}
+
+// IsConnectionOwnedByAdmin reports whether connID is a system-bootstrapped connection (empty owner_id)
+// or is owned by an active user whose role is RoleAdmin.
+func (s *Store) IsConnectionOwnedByAdmin(connID string) bool {
+	if strings.TrimSpace(connID) == "" {
+		return false
+	}
+	var ownerID string
+	if err := s.db.QueryRow(`SELECT owner_id FROM connections WHERE id = ?`, connID).Scan(&ownerID); err != nil {
+		return false
+	}
+	ownerID = strings.TrimSpace(ownerID)
+	if ownerID == "" {
+		return true
+	}
+	if p, ok := s.GetPrincipal(ownerID); ok {
+		return p.Role == RoleAdmin
+	}
+	var role string
+	if err := s.db.QueryRow(`SELECT role FROM users WHERE id = ? AND disabled = 0`, ownerID).Scan(&role); err == nil {
+		return role == RoleAdmin
+	}
+	return false
+}
+
 func (s *Store) ListConnectionsForPrincipal(p UserPrincipal) ([]SavedConnection, error) {
 	all, err := s.ListConnections()
 	if err != nil {
 		return nil, err
 	}
-	if p.ID == "local" || p.Role == RoleAdmin {
+	if p.ID == "local" {
 		for i := range all {
 			all[i].Editable = true
+			all[i] = sanitizeClientVisibleConnection(all[i], s.dataDir, false)
 		}
 		return all, nil
+	}
+	if p.Role == RoleAdmin {
+		filtered := make([]SavedConnection, 0, len(all))
+		for _, c := range all {
+			if IsEphemeralConnection(c.Options) {
+				if c.OwnerID == "" || c.OwnerID != p.ID {
+					continue
+				}
+			}
+			c.Editable = true
+			filtered = append(filtered, sanitizeClientVisibleConnection(c, s.dataDir, false))
+		}
+		return filtered, nil
 	}
 
 	filtered := make([]SavedConnection, 0, len(all))
 	for _, c := range all {
-		c.FilePath = redactHostDataDirPrefix(c.FilePath, s.dataDir)
+		if IsEphemeralConnection(c.Options) {
+			if c.OwnerID != "" && c.OwnerID == p.ID {
+				c.Editable = true
+				filtered = append(filtered, sanitizeClientVisibleConnection(c, s.dataDir, true))
+			}
+			continue
+		}
 		isOwner := c.OwnerID != "" && c.OwnerID == p.ID
 		if isOwner {
 			c.Editable = p.Role != RoleReadOnly
-			filtered = append(filtered, c)
+			filtered = append(filtered, sanitizeClientVisibleConnection(c, s.dataDir, true))
 			continue
 		}
 		if c.Visibility == "shared" || c.Visibility == "" {
 			if p.ConnScopeAll {
 				c.Editable = false
-				filtered = append(filtered, c)
+				filtered = append(filtered, sanitizeClientVisibleConnection(c, s.dataDir, true))
 			} else if _, allowed := p.AllowedConnIDs[c.ID]; allowed {
 				c.Editable = false
-				filtered = append(filtered, c)
+				filtered = append(filtered, sanitizeClientVisibleConnection(c, s.dataDir, true))
 			}
 		}
 	}
@@ -693,14 +787,22 @@ func (s *Store) CanAccessConnection(p UserPrincipal, connID string) bool {
 	if connID == "" {
 		return false
 	}
-	if p.ID == "local" || p.Role == RoleAdmin {
-		var cnt int
-		return s.db.QueryRow(`SELECT COUNT(*) FROM connections WHERE id = ?`, connID).Scan(&cnt) == nil && cnt > 0
-	}
-	var ownerID, vis string
-	err := s.db.QueryRow(`SELECT owner_id, visibility FROM connections WHERE id = ?`, connID).Scan(&ownerID, &vis)
+	var ownerID, vis, optJSON string
+	err := s.db.QueryRow(`SELECT owner_id, visibility, options_json FROM connections WHERE id = ?`, connID).Scan(&ownerID, &vis, &optJSON)
 	if err != nil {
 		return false
+	}
+	if p.ID == "local" {
+		return true
+	}
+	var opts map[string]string
+	_ = json.Unmarshal([]byte(optJSON), &opts)
+	if IsEphemeralConnection(opts) {
+		ephOwner := opts["__ephemeral_owner"]
+		return ownerID != "" && ownerID == p.ID && (ephOwner == "" || ephOwner == p.ID)
+	}
+	if p.Role == RoleAdmin {
+		return true
 	}
 	if ownerID != "" && ownerID == p.ID {
 		return true
@@ -716,14 +818,26 @@ func (s *Store) CanAccessConnection(p UserPrincipal, connID string) bool {
 }
 
 func (s *Store) CanEditConnection(p UserPrincipal, connID string) bool {
-	if p.ID == "local" || p.Role == RoleAdmin {
+	if connID == "" {
+		return false
+	}
+	var ownerID, optJSON string
+	if err := s.db.QueryRow(`SELECT owner_id, options_json FROM connections WHERE id = ?`, connID).Scan(&ownerID, &optJSON); err != nil {
+		return false
+	}
+	if p.ID == "local" {
+		return true
+	}
+	var opts map[string]string
+	_ = json.Unmarshal([]byte(optJSON), &opts)
+	if IsEphemeralConnection(opts) {
+		ephOwner := opts["__ephemeral_owner"]
+		return ownerID != "" && ownerID == p.ID && (ephOwner == "" || ephOwner == p.ID)
+	}
+	if p.Role == RoleAdmin {
 		return true
 	}
 	if p.Role == RoleReadOnly {
-		return false
-	}
-	var ownerID string
-	if err := s.db.QueryRow(`SELECT owner_id FROM connections WHERE id = ?`, connID).Scan(&ownerID); err != nil {
 		return false
 	}
 	return ownerID != "" && ownerID == p.ID
@@ -734,11 +848,15 @@ func (s *Store) DuplicateConnection(connID string, p UserPrincipal) (SavedConnec
 	if err != nil {
 		return SavedConnection{}, err
 	}
+	if IsEphemeralConnection(cfg.Options) {
+		return SavedConnection{}, errors.New("temporary browser-loaded database sessions cannot be duplicated")
+	}
 	var origVis string
 	_ = s.db.QueryRow(`SELECT visibility FROM connections WHERE id = ?`, connID).Scan(&origVis)
 
 	cfg.ID = ""
 	cfg.Name = strings.TrimSpace(cfg.Name) + " (Copy)"
+	cfg.Options = StripReservedConnectionOptions(cfg.Options)
 	ownerID := p.ID
 	vis := "private"
 	if p.ID == "local" {
@@ -774,6 +892,9 @@ func (s *Store) ExportConnectionsForPrincipal(p UserPrincipal) ([]ExportedConnec
 	}
 	out := make([]ExportedConnectionProfile, 0, len(list))
 	for _, c := range list {
+		if c.Ephemeral {
+			continue
+		}
 		out = append(out, ExportedConnectionProfile{
 			Name:       c.Name,
 			Type:       c.Type,
@@ -825,7 +946,7 @@ func (s *Store) ImportConnections(profiles []ExportedConnectionProfile, p UserPr
 			Username: item.Username,
 			Database: item.Database,
 			FilePath: item.FilePath,
-			Options:  item.Options,
+			Options:  StripReservedConnectionOptions(item.Options),
 		}, false, ownerID, vis)
 		if err == nil {
 			imported++
@@ -851,6 +972,12 @@ func (s *Store) maintenanceLoop() {
 				}
 			}
 			s.sessMu.Unlock()
+			s.maintMu.RLock()
+			hook := s.maintHook
+			s.maintMu.RUnlock()
+			if hook != nil {
+				hook()
+			}
 			_, _ = s.db.Exec(`PRAGMA wal_checkpoint(PASSIVE)`)
 			_, _ = s.db.Exec(`PRAGMA optimize`)
 		}

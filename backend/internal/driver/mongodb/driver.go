@@ -8,12 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"dbharbor/backend/internal/driver"
+	"dbharbor/backend/internal/driver/sqlbase"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -46,12 +49,34 @@ type Driver struct {
 	client *mongo.Client
 }
 
+var (
+	_ driver.DocumentDriver      = (*Driver)(nil)
+	_ driver.DocExtendedDriver   = (*Driver)(nil)
+	_ driver.DocGovernanceDriver = (*Driver)(nil)
+)
+
+type contextDialerFunc func(ctx context.Context, network, address string) (net.Conn, error)
+
+func (f contextDialerFunc) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return f(ctx, network, address)
+}
+
 func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
+	restrictIP := cfg.Option("__restrict_internal_ip", "") == "1"
 	uri := strings.TrimSpace(cfg.URI)
 	if uri == "" {
-		host := cfg.Host
-		if host == "" {
+		host := strings.TrimSpace(cfg.Host)
+		if host == "" && !restrictIP {
 			host = "127.0.0.1"
+		}
+		if restrictIP {
+			lowHost := strings.ToLower(host)
+			if strings.Contains(lowHost, "/") || strings.Contains(lowHost, `\`) || strings.Contains(lowHost, ".sock") {
+				return nil, errors.New("Unix domain socket hosts are restricted for non-administrator MongoDB connections")
+			}
+			if _, err := sqlbase.ValidateStrictHostname(host); err != nil {
+				return nil, err
+			}
 		}
 		port := cfg.Port
 		if port == 0 {
@@ -59,7 +84,7 @@ func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
 		}
 		u := &url.URL{
 			Scheme: "mongodb",
-			Host:   fmt.Sprintf("%s:%d", host, port),
+			Host:   net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(port)),
 		}
 		if cfg.Username != "" {
 			u.User = url.UserPassword(cfg.Username, cfg.Password)
@@ -68,11 +93,18 @@ func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
 			u.RawQuery = q.Encode()
 		}
 		uri = u.String()
+	} else if restrictIP {
+		if err := sqlbase.ValidateMongoURIForRestrictedWeb(uri); err != nil {
+			return nil, err
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	clientOpts := options.Client().ApplyURI(uri).SetConnectTimeout(6 * time.Second).SetServerSelectionTimeout(6 * time.Second)
+	if restrictIP {
+		clientOpts.SetDialer(contextDialerFunc(sqlbase.NewRestrictedDialContext(8 * time.Second)))
+	}
 	client, err := mongo.Connect(ctx, clientOpts)
 	if err != nil {
 		return nil, err
@@ -403,40 +435,270 @@ func IsReadOnlyCommand(commandJSON string) (bool, string) {
 	return validateMongoReadOnlyDoc(cmdDoc)
 }
 
+func (d *Driver) resolveDBName(database string) string {
+	dbName := strings.TrimSpace(database)
+	if dbName == "" {
+		dbName = strings.TrimSpace(d.cfg.Database)
+	}
+	if dbName == "" {
+		dbName = "test"
+	}
+	return dbName
+}
+
+func parseCollectionSpec(spec *mongo.CollectionSpecification) driver.CollectionSummary {
+	colType := strings.ToLower(strings.TrimSpace(spec.Type))
+	if colType == "" {
+		colType = "collection"
+	}
+	summary := driver.CollectionSummary{
+		Name: spec.Name,
+		Type: colType,
+	}
+	if len(spec.Options) > 0 {
+		var m bson.M
+		if bson.Unmarshal(spec.Options, &m) == nil {
+			if capped, ok := m["capped"].(bool); ok && capped {
+				summary.Capped = true
+			}
+			if sz := toInt64(m["size"]); sz > 0 {
+				summary.MaxBytes = sz
+			}
+			if mx := toInt64(m["max"]); mx > 0 {
+				summary.MaxDocs = mx
+			}
+			if viewOn, ok := m["viewOn"].(string); ok && viewOn != "" {
+				summary.ViewOn = viewOn
+			}
+			if pipeRaw, exists := m["pipeline"]; exists && pipeRaw != nil {
+				if b, err := json.Marshal(normalizeBSONVal(pipeRaw)); err == nil {
+					summary.PipelineJSON = string(b)
+				}
+			}
+			if valRaw, exists := m["validator"]; exists && valRaw != nil {
+				norm := normalizeBSONVal(valRaw)
+				if mp, ok := norm.(map[string]any); !ok || len(mp) > 0 {
+					if b, err := json.Marshal(norm); err == nil {
+						summary.ValidatorJSON = string(b)
+					}
+				}
+			}
+			if lvl, ok := m["validationLevel"].(string); ok && lvl != "" {
+				summary.ValidationLevel = lvl
+			}
+			if act, ok := m["validationAction"].(string); ok && act != "" {
+				summary.ValidationAction = act
+			}
+			if tsDoc, ok := m["timeseries"].(bson.M); ok {
+				summary.Type = "timeseries"
+				if tf, ok := tsDoc["timeField"].(string); ok {
+					summary.TimeField = tf
+				}
+				if mf, ok := tsDoc["metaField"].(string); ok {
+					summary.MetaField = mf
+				}
+				if gr, ok := tsDoc["granularity"].(string); ok {
+					summary.Granularity = gr
+				}
+			}
+			if expRaw, exists := m["expireAfterSeconds"]; exists && expRaw != nil {
+				exp := toInt64(expRaw)
+				summary.ExpireAfterSeconds = &exp
+			}
+		}
+	}
+	return summary
+}
+
+func parseExtJSONArray(raw string) (bson.A, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || !strings.HasPrefix(trimmed, "[") {
+		return nil, errors.New("pipeline JSON must be a valid JSON array, e.g. [{\"$match\": {}}]")
+	}
+	var arr bson.A
+	if err := bson.UnmarshalExtJSON([]byte(trimmed), false, &arr); err != nil {
+		return nil, fmt.Errorf("invalid pipeline JSON array: %w", err)
+	}
+	return arr, nil
+}
+
 func (d *Driver) ListCollections(ctx context.Context, database string) ([]driver.CollectionSummary, error) {
-	if database == "" {
-		database = d.cfg.Database
-	}
-	if database == "" {
-		database = "test"
-	}
-	db := d.client.Database(database)
-	names, err := db.ListCollectionNames(ctx, bson.D{})
+	db := d.client.Database(d.resolveDBName(database))
+	specs, err := db.ListCollectionSpecifications(ctx, bson.D{})
 	if err != nil {
 		return nil, err
 	}
-	out := make([]driver.CollectionSummary, 0, len(names))
-	for _, name := range names {
-		cnt, _ := db.Collection(name).EstimatedDocumentCount(ctx)
-		var stats bson.M
-		var sizeBytes int64
-		var idxCnt int
-		if db.RunCommand(ctx, bson.D{{Key: "collStats", Value: name}}).Decode(&stats) == nil {
-			sizeBytes = toInt64(stats["size"])
-			idxCnt = int(toInt64(stats["nindexes"]))
+	out := make([]driver.CollectionSummary, 0, len(specs))
+	for _, spec := range specs {
+		if spec == nil || spec.Name == "system.views" {
+			continue
 		}
-		out = append(out, driver.CollectionSummary{
-			Name:         name,
-			Count:        cnt,
-			SizeBytes:    sizeBytes,
-			IndexesCount: idxCnt,
-		})
+		summary := parseCollectionSpec(spec)
+		if summary.Type != "view" {
+			cnt, _ := db.Collection(spec.Name).EstimatedDocumentCount(ctx)
+			var stats bson.M
+			var sizeBytes int64
+			var idxCnt int
+			if db.RunCommand(ctx, bson.D{{Key: "collStats", Value: spec.Name}}).Decode(&stats) == nil {
+				sizeBytes = toInt64(stats["size"])
+				idxCnt = int(toInt64(stats["nindexes"]))
+			}
+			summary.Count = cnt
+			summary.SizeBytes = sizeBytes
+			summary.IndexesCount = idxCnt
+		}
+		out = append(out, summary)
 	}
 	return out, nil
 }
 
+func (d *Driver) GetCollectionOptions(ctx context.Context, database, collection string) (driver.CollectionSummary, error) {
+	colName := strings.TrimSpace(collection)
+	if colName == "" {
+		return driver.CollectionSummary{}, errors.New("collection name is required")
+	}
+	db := d.client.Database(d.resolveDBName(database))
+	specs, err := db.ListCollectionSpecifications(ctx, bson.D{{Key: "name", Value: colName}})
+	if err != nil {
+		return driver.CollectionSummary{}, err
+	}
+	if len(specs) == 0 || specs[0] == nil {
+		return driver.CollectionSummary{}, fmt.Errorf("collection %q not found", colName)
+	}
+	summary := parseCollectionSpec(specs[0])
+	if summary.Type != "view" {
+		summary.Count, _ = db.Collection(colName).EstimatedDocumentCount(ctx)
+		var stats bson.M
+		if db.RunCommand(ctx, bson.D{{Key: "collStats", Value: colName}}).Decode(&stats) == nil {
+			summary.SizeBytes = toInt64(stats["size"])
+			summary.IndexesCount = int(toInt64(stats["nindexes"]))
+		}
+	}
+	return summary, nil
+}
+
 func (d *Driver) CreateCollection(ctx context.Context, database, collection string) error {
-	return d.client.Database(database).CreateCollection(ctx, collection)
+	return d.client.Database(d.resolveDBName(database)).CreateCollection(ctx, collection)
+}
+
+func (d *Driver) CreateCollectionAdvanced(ctx context.Context, req driver.DocCreateCollectionRequest) error {
+	name := strings.TrimSpace(req.Collection)
+	if name == "" {
+		return errors.New("collection name is required")
+	}
+	db := d.client.Database(d.resolveDBName(req.Database))
+	colType := strings.ToLower(strings.TrimSpace(req.Type))
+
+	if colType == "view" {
+		viewOn := strings.TrimSpace(req.ViewOn)
+		if viewOn == "" {
+			return errors.New("viewOn source collection is required when creating a MongoDB view")
+		}
+		pipeline, err := parseExtJSONArray(req.PipelineJSON)
+		if err != nil {
+			return err
+		}
+		return db.RunCommand(ctx, bson.D{
+			{Key: "create", Value: name},
+			{Key: "viewOn", Value: viewOn},
+			{Key: "pipeline", Value: pipeline},
+		}).Err()
+	}
+
+	cmd := bson.D{{Key: "create", Value: name}}
+	switch {
+	case colType == "timeseries":
+		timeField := strings.TrimSpace(req.TimeField)
+		if timeField == "" {
+			return errors.New("timeField is required when creating a time-series collection")
+		}
+		tsDoc := bson.D{{Key: "timeField", Value: timeField}}
+		if mf := strings.TrimSpace(req.MetaField); mf != "" {
+			tsDoc = append(tsDoc, bson.E{Key: "metaField", Value: mf})
+		}
+		if gr := strings.TrimSpace(req.Granularity); gr != "" {
+			tsDoc = append(tsDoc, bson.E{Key: "granularity", Value: gr})
+		}
+		cmd = append(cmd, bson.E{Key: "timeseries", Value: tsDoc})
+		if req.ExpireAfterSeconds != nil {
+			cmd = append(cmd, bson.E{Key: "expireAfterSeconds", Value: *req.ExpireAfterSeconds})
+		}
+	case req.Capped:
+		maxBytes := req.MaxBytes
+		if maxBytes <= 0 {
+			maxBytes = 1048576
+		}
+		cmd = append(cmd,
+			bson.E{Key: "capped", Value: true},
+			bson.E{Key: "size", Value: maxBytes},
+		)
+		if req.MaxDocs > 0 {
+			cmd = append(cmd, bson.E{Key: "max", Value: req.MaxDocs})
+		}
+	}
+
+	if rawVal := strings.TrimSpace(req.ValidatorJSON); rawVal != "" {
+		var valDoc bson.D
+		if err := bson.UnmarshalExtJSON([]byte(rawVal), false, &valDoc); err != nil {
+			return fmt.Errorf("invalid validator JSON: %w", err)
+		}
+		cmd = append(cmd, bson.E{Key: "validator", Value: valDoc})
+	}
+	if lvl := strings.TrimSpace(req.ValidationLevel); lvl != "" {
+		cmd = append(cmd, bson.E{Key: "validationLevel", Value: lvl})
+	}
+	if act := strings.TrimSpace(req.ValidationAction); act != "" {
+		cmd = append(cmd, bson.E{Key: "validationAction", Value: act})
+	}
+
+	return db.RunCommand(ctx, cmd).Err()
+}
+
+func (d *Driver) ModifyCollectionOptions(ctx context.Context, req driver.DocModCollectionRequest) error {
+	name := strings.TrimSpace(req.Collection)
+	if name == "" {
+		return errors.New("collection name is required")
+	}
+	db := d.client.Database(d.resolveDBName(req.Database))
+	cmd := bson.D{{Key: "collMod", Value: name}}
+
+	viewOn := strings.TrimSpace(req.ViewOn)
+	rawPipe := strings.TrimSpace(req.PipelineJSON)
+	if viewOn != "" || rawPipe != "" {
+		if viewOn == "" {
+			return errors.New("viewOn is required when modifying a view")
+		}
+		pipeline, err := parseExtJSONArray(rawPipe)
+		if err != nil {
+			return err
+		}
+		cmd = append(cmd,
+			bson.E{Key: "viewOn", Value: viewOn},
+			bson.E{Key: "pipeline", Value: pipeline},
+		)
+	} else {
+		if rawVal := strings.TrimSpace(req.ValidatorJSON); rawVal != "" {
+			var valDoc bson.D
+			if err := bson.UnmarshalExtJSON([]byte(rawVal), false, &valDoc); err != nil {
+				return fmt.Errorf("invalid validator JSON: %w", err)
+			}
+			cmd = append(cmd, bson.E{Key: "validator", Value: valDoc})
+		}
+		if lvl := strings.TrimSpace(req.ValidationLevel); lvl != "" {
+			cmd = append(cmd, bson.E{Key: "validationLevel", Value: lvl})
+		}
+		if act := strings.TrimSpace(req.ValidationAction); act != "" {
+			cmd = append(cmd, bson.E{Key: "validationAction", Value: act})
+		}
+		if req.ExpireAfterSeconds != nil {
+			cmd = append(cmd, bson.E{Key: "expireAfterSeconds", Value: *req.ExpireAfterSeconds})
+		}
+	}
+
+	if len(cmd) <= 1 {
+		return errors.New("no collection or view options provided for modification")
+	}
+	return db.RunCommand(ctx, cmd).Err()
 }
 
 func (d *Driver) DropCollection(ctx context.Context, database, collection string) error {
@@ -756,35 +1018,80 @@ func (d *Driver) DeleteDocuments(ctx context.Context, database, collection strin
 }
 
 func (d *Driver) ListIndexes(ctx context.Context, database, collection string) ([]driver.DocIndexInfo, error) {
-	cur, err := d.client.Database(database).Collection(collection).Indexes().List(ctx)
+	cur, err := d.client.Database(d.resolveDBName(database)).Collection(collection).Indexes().List(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer cur.Close(ctx)
-	var list []driver.DocIndexInfo
+	list := []driver.DocIndexInfo{}
 	for cur.Next(ctx) {
 		var m bson.M
 		if cur.Decode(&m) == nil {
 			name, _ := m["name"].(string)
 			uniq, _ := m["unique"].(bool)
+			sparse, _ := m["sparse"].(bool)
 			keys := map[string]any{}
 			if km, ok := m["key"].(bson.M); ok {
 				keys = normalizeBSONMap(km)
 			}
-			list = append(list, driver.DocIndexInfo{Name: name, Keys: keys, Unique: uniq})
+			info := driver.DocIndexInfo{
+				Name:   name,
+				Keys:   keys,
+				Unique: uniq,
+				Sparse: sparse,
+			}
+			if expRaw, exists := m["expireAfterSeconds"]; exists && expRaw != nil {
+				sec := int32(toInt64(expRaw))
+				info.ExpireAfterSeconds = &sec
+			}
+			if pfRaw, exists := m["partialFilterExpression"]; exists && pfRaw != nil {
+				if b, mErr := json.Marshal(normalizeBSONVal(pfRaw)); mErr == nil {
+					info.PartialFilterJSON = string(b)
+				}
+			}
+			list = append(list, info)
 		}
 	}
 	return list, nil
 }
 
 func (d *Driver) CreateIndex(ctx context.Context, database, collection, keysJSON string, unique bool) error {
-	keysDoc, err := parseExtJSONOrEmpty(keysJSON)
+	return d.CreateIndexAdvanced(ctx, driver.DocCreateIndexRequest{
+		Database:   database,
+		Collection: collection,
+		KeysJSON:   keysJSON,
+		Unique:     unique,
+	})
+}
+
+func (d *Driver) CreateIndexAdvanced(ctx context.Context, req driver.DocCreateIndexRequest) error {
+	if strings.TrimSpace(req.Collection) == "" {
+		return errors.New("collection name is required")
+	}
+	keysDoc, err := parseExtJSONOrEmpty(req.KeysJSON)
 	if err != nil || len(keysDoc) == 0 {
 		return errors.New("index key definition must be a non-empty JSON object, e.g. {\"email\": 1}")
 	}
-	_, err = d.client.Database(database).Collection(collection).Indexes().CreateOne(ctx, mongo.IndexModel{
+	idxOpts := options.Index().SetUnique(req.Unique)
+	if name := strings.TrimSpace(req.Name); name != "" {
+		idxOpts.SetName(name)
+	}
+	if req.Sparse {
+		idxOpts.SetSparse(true)
+	}
+	if req.ExpireAfterSeconds != nil {
+		idxOpts.SetExpireAfterSeconds(*req.ExpireAfterSeconds)
+	}
+	if rawPF := strings.TrimSpace(req.PartialFilterJSON); rawPF != "" {
+		pfDoc, pfErr := parseExtJSONOrEmpty(rawPF)
+		if pfErr != nil || len(pfDoc) == 0 {
+			return fmt.Errorf("invalid partialFilterExpression JSON: %v", pfErr)
+		}
+		idxOpts.SetPartialFilterExpression(pfDoc)
+	}
+	_, err = d.client.Database(d.resolveDBName(req.Database)).Collection(req.Collection).Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    keysDoc,
-		Options: options.Index().SetUnique(unique),
+		Options: idxOpts,
 	})
 	return err
 }

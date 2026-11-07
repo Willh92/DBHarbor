@@ -1563,10 +1563,16 @@ func BuildStatements(dbType string, req ActionRequest) ([]string, error) {
 			if req.Password == "" {
 				return nil, fmt.Errorf("password is required")
 			}
+			if strings.ContainsAny(req.Password, "\"\r\n\x00") {
+				return nil, fmt.Errorf("Oracle/Dameng password cannot contain double quotes or control characters")
+			}
 			return []string{fmt.Sprintf("CREATE USER %s IDENTIFIED BY %s", qu, quoteDouble(req.Password))}, nil
 		case "ALTER_USER":
 			if req.Password == "" {
 				return nil, fmt.Errorf("new password is required")
+			}
+			if strings.ContainsAny(req.Password, "\"\r\n\x00") {
+				return nil, fmt.Errorf("Oracle/Dameng password cannot contain double quotes or control characters")
 			}
 			return []string{fmt.Sprintf("ALTER USER %s IDENTIFIED BY %s", qu, quoteDouble(req.Password))}, nil
 		case "LOCK_USER":
@@ -1607,6 +1613,25 @@ func BuildStatements(dbType string, req ActionRequest) ([]string, error) {
 	return nil, fmt.Errorf("unsupported action %q for engine %s", action, dbType)
 }
 
+var redisACLRuleTokenRe = regexp.MustCompile(`^(?:[~&+@%-][A-Za-z0-9_*|:@/?.-]*|on|off|allkeys|allchannels|allcommands|nocommands|resetkeys|resetchannels|sanitize-payload|skip-sanitize-payload)$`)
+
+func validateRedisACLRules(rawRules string) (string, error) {
+	if strings.ContainsAny(rawRules, "\r\n\x00") {
+		return "", fmt.Errorf("Redis ACL rules cannot contain line breaks or null bytes")
+	}
+	tokens := strings.Fields(rawRules)
+	for _, tok := range tokens {
+		low := strings.ToLower(tok)
+		if strings.HasPrefix(tok, ">") || strings.HasPrefix(tok, "<") || strings.HasPrefix(tok, "#") || strings.HasPrefix(tok, "!") || low == "nopass" || low == "resetpass" {
+			return "", fmt.Errorf("password directives (%q) are not permitted inside Redis ACL rules; use the password field instead", tok)
+		}
+		if !redisACLRuleTokenRe.MatchString(tok) {
+			return "", fmt.Errorf("invalid or disallowed Redis ACL rule token %q", tok)
+		}
+	}
+	return strings.Join(tokens, " "), nil
+}
+
 func buildRedisACLCommands(action, uname string, req ActionRequest) ([]string, error) {
 	if strings.ContainsAny(uname, " \t\r\n\"'") {
 		return nil, fmt.Errorf("Redis ACL username cannot contain whitespace or quotes")
@@ -1614,8 +1639,12 @@ func buildRedisACLCommands(action, uname string, req ActionRequest) ([]string, e
 	switch action {
 	case "CREATE_USER", "GRANT":
 		rules := strings.TrimSpace(req.ACLRules)
-		if strings.ContainsAny(rules, "\r\n") {
-			return nil, fmt.Errorf("Redis ACL rules cannot contain line breaks")
+		if rules != "" {
+			cleanRules, err := validateRedisACLRules(rules)
+			if err != nil {
+				return nil, err
+			}
+			rules = cleanRules
 		}
 		if rules == "" {
 			switch strings.ToLower(strings.TrimSpace(req.ACLPreset)) {
@@ -1633,7 +1662,11 @@ func buildRedisACLCommands(action, uname string, req ActionRequest) ([]string, e
 					return nil, fmt.Errorf("invalid Redis ACL privilege token %q", p)
 				}
 			}
-			rules = strings.Join(req.Privileges, " ")
+			cleanPrivs, err := validateRedisACLRules(strings.Join(req.Privileges, " "))
+			if err != nil {
+				return nil, err
+			}
+			rules = cleanPrivs
 		}
 		pwdPart := ""
 		if req.Password != "" {
@@ -1669,7 +1702,28 @@ func buildRedisACLCommands(action, uname string, req ActionRequest) ([]string, e
 	}
 }
 
+func isValidMongoRoleOrDBName(s string) bool {
+	if len(s) == 0 || len(s) > 128 {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+		isAlphaNum := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		if !isAlphaNum && r != '_' && r != '-' && r != '.' {
+			return false
+		}
+	}
+	return true
+}
+
 func buildMongoPrivilegeCommands(action, uname string, req ActionRequest) ([]string, error) {
+	for i := 0; i < len(uname); i++ {
+		if uname[i] < 0x20 || uname[i] == 0x7f {
+			return nil, fmt.Errorf("control characters are not allowed in MongoDB username")
+		}
+	}
 	targetDB := strings.TrimSpace(req.Database)
 	if targetDB == "" {
 		targetDB = strings.TrimSpace(req.Host)
@@ -1677,22 +1731,42 @@ func buildMongoPrivilegeCommands(action, uname string, req ActionRequest) ([]str
 	if targetDB == "" {
 		targetDB = "admin"
 	}
+	if !isValidMongoRoleOrDBName(targetDB) {
+		return nil, fmt.Errorf("invalid MongoDB target database name %q", targetDB)
+	}
 
-	toRoleDocs := func(roles []string) []map[string]string {
+	toRoleDocs := func(roles []string) ([]map[string]string, error) {
 		out := make([]map[string]string, 0, len(roles))
 		for _, raw := range roles {
+			for i := 0; i < len(raw); i++ {
+				if raw[i] < 0x20 || raw[i] == 0x7f {
+					return nil, fmt.Errorf("invalid MongoDB role entry: control characters are not allowed")
+				}
+			}
 			r := strings.TrimSpace(raw)
 			if r == "" {
-				continue
+				return nil, fmt.Errorf("MongoDB role name cannot be empty")
 			}
 			roleName, roleDB := r, targetDB
-			if idx := strings.LastIndex(r, "@"); idx > 0 {
-				roleName = r[:idx]
-				roleDB = r[idx+1:]
+			if idx := strings.LastIndexByte(r, '@'); idx >= 0 {
+				roleName = strings.TrimSpace(r[:idx])
+				roleDB = strings.TrimSpace(r[idx+1:])
+			}
+			if roleName == "" || roleDB == "" {
+				return nil, fmt.Errorf("invalid MongoDB role specification %q", raw)
+			}
+			if strings.HasPrefix(roleName, "__") {
+				return nil, fmt.Errorf("internal MongoDB role %q (prefixed with '__') cannot be assigned", roleName)
+			}
+			if !isValidMongoRoleOrDBName(roleName) {
+				return nil, fmt.Errorf("invalid MongoDB role name %q", roleName)
+			}
+			if !isValidMongoRoleOrDBName(roleDB) {
+				return nil, fmt.Errorf("invalid MongoDB role database %q", roleDB)
 			}
 			out = append(out, map[string]string{"role": roleName, "db": roleDB})
 		}
-		return out
+		return out, nil
 	}
 
 	var cmd map[string]any
@@ -1701,7 +1775,10 @@ func buildMongoPrivilegeCommands(action, uname string, req ActionRequest) ([]str
 		if req.Password == "" {
 			return nil, fmt.Errorf("password is required to create a MongoDB user")
 		}
-		roles := toRoleDocs(req.Roles)
+		roles, err := toRoleDocs(req.Roles)
+		if err != nil {
+			return nil, err
+		}
 		if len(roles) == 0 {
 			roles = []map[string]string{{"role": "read", "db": targetDB}}
 		}
@@ -1723,7 +1800,10 @@ func buildMongoPrivilegeCommands(action, uname string, req ActionRequest) ([]str
 			"dropUser": uname,
 		}
 	case "GRANT":
-		roles := toRoleDocs(req.Roles)
+		roles, err := toRoleDocs(req.Roles)
+		if err != nil {
+			return nil, err
+		}
 		if len(roles) == 0 {
 			return nil, fmt.Errorf("at least one MongoDB role is required")
 		}
@@ -1732,7 +1812,10 @@ func buildMongoPrivilegeCommands(action, uname string, req ActionRequest) ([]str
 			"roles":            roles,
 		}
 	case "REVOKE":
-		roles := toRoleDocs(req.Roles)
+		roles, err := toRoleDocs(req.Roles)
+		if err != nil {
+			return nil, err
+		}
 		if len(roles) == 0 {
 			return nil, fmt.Errorf("at least one MongoDB role is required")
 		}

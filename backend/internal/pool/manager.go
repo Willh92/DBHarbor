@@ -9,14 +9,33 @@ import (
 	"dbharbor/backend/internal/store"
 )
 
-const defaultMaxPools = 32
+const (
+	defaultMaxPools = 32
+	defaultIdleTTL  = 15 * time.Minute
+)
 
 type pooledDriver struct {
-	drv      driver.Driver
-	cfg      driver.ConnectionConfig
-	lastUsed time.Time
-	inUse    int
-	evicted  bool
+	drv       driver.Driver
+	cfg       driver.ConnectionConfig
+	lastUsed  time.Time
+	inUse     int
+	evicted   bool
+	closedCh  chan struct{}
+	closeOnce sync.Once
+}
+
+func (p *pooledDriver) closeDriver() {
+	if p == nil {
+		return
+	}
+	p.closeOnce.Do(func() {
+		if p.drv != nil {
+			_ = p.drv.Close()
+		}
+		if p.closedCh != nil {
+			close(p.closedCh)
+		}
+	})
 }
 
 type inflightDial struct {
@@ -47,12 +66,13 @@ type Manager struct {
 }
 
 func NewManager(st *store.Store, idleMinutes int) *Manager {
-	if idleMinutes <= 0 {
-		idleMinutes = 15
+	idleTTL := defaultIdleTTL
+	if idleMinutes > 0 {
+		idleTTL = time.Duration(idleMinutes) * time.Minute
 	}
 	m := &Manager{
 		store:    st,
-		idleTTL:  time.Duration(idleMinutes) * time.Minute,
+		idleTTL:  idleTTL,
 		maxPools: defaultMaxPools,
 		conns:    make(map[string]*pooledDriver),
 		inflight: make(map[string]*inflightDial),
@@ -107,7 +127,7 @@ func (m *Manager) Acquire(connID string) (driver.Driver, driver.ConnectionConfig
 			drv, err = driver.Create(cfg)
 		}
 
-		var toClose []driver.Driver
+		var evictedPool *pooledDriver
 		var leased *pooledDriver
 
 		m.mu.Lock()
@@ -115,18 +135,15 @@ func (m *Manager) Acquire(connID string) (driver.Driver, driver.ConnectionConfig
 			delete(m.inflight, connID)
 		}
 		if dial.cancelled {
-			if drv != nil {
-				toClose = append(toClose, drv)
-			}
 			if err == nil {
 				err = errors.New("connection configuration was updated or removed during dial")
 			}
 			dial.err = err
-			close(dial.done)
 			m.mu.Unlock()
-			for _, d := range toClose {
-				_ = d.Close()
+			if drv != nil {
+				_ = drv.Close()
 			}
+			close(dial.done)
 			if attempt == 0 {
 				continue
 			}
@@ -150,7 +167,7 @@ func (m *Manager) Acquire(connID string) (driver.Driver, driver.ConnectionConfig
 				if oldestID != "" {
 					ev := m.conns[oldestID]
 					ev.evicted = true
-					toClose = append(toClose, ev.drv)
+					evictedPool = ev
 					delete(m.conns, oldestID)
 				}
 			}
@@ -159,6 +176,7 @@ func (m *Manager) Acquire(connID string) (driver.Driver, driver.ConnectionConfig
 				cfg:      cfg,
 				lastUsed: time.Now(),
 				inUse:    1,
+				closedCh: make(chan struct{}),
 			}
 			m.conns[connID] = leased
 		}
@@ -166,8 +184,8 @@ func (m *Manager) Acquire(connID string) (driver.Driver, driver.ConnectionConfig
 		close(dial.done)
 		m.mu.Unlock()
 
-		for _, d := range toClose {
-			_ = d.Close()
+		if evictedPool != nil {
+			evictedPool.closeDriver()
 		}
 		if err != nil {
 			return nil, driver.ConnectionConfig{}, func() {}, err
@@ -181,16 +199,16 @@ func (m *Manager) makeReleaseFunc(entry *pooledDriver) func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			var closeNow driver.Driver
+			shouldClose := false
 			m.mu.Lock()
 			entry.inUse--
 			entry.lastUsed = time.Now()
 			if entry.inUse <= 0 && entry.evicted {
-				closeNow = entry.drv
+				shouldClose = true
 			}
 			m.mu.Unlock()
-			if closeNow != nil {
-				_ = closeNow.Close()
+			if shouldClose {
+				entry.closeDriver()
 			}
 		})
 	}
@@ -218,7 +236,7 @@ func (m *Manager) Stats() PoolStats {
 }
 
 func (m *Manager) Evict(connID string) {
-	var closeNow driver.Driver
+	var closeNow *pooledDriver
 	m.mu.Lock()
 	if dial, ok := m.inflight[connID]; ok {
 		dial.cancelled = true
@@ -228,31 +246,101 @@ func (m *Manager) Evict(connID string) {
 		delete(m.conns, connID)
 		item.evicted = true
 		if item.inUse <= 0 {
-			closeNow = item.drv
+			closeNow = item
 		}
 	}
 	m.mu.Unlock()
 	if closeNow != nil {
-		_ = closeNow.Close()
+		closeNow.closeDriver()
 	}
 }
 
+// EvictAndWait removes connID from the pool and, if an active lease or in-flight dial
+// is currently holding the driver, waits up to maxWait for its Close() call to complete
+// so single-file OS locks (SQLite WAL/SHM, DuckDB) are released before disk deletion or overwrite.
+func (m *Manager) EvictAndWait(connID string, maxWait time.Duration) {
+	var closeNow *pooledDriver
+	var waitItem *pooledDriver
+	var waitDial *inflightDial
+
+	m.mu.Lock()
+	if dial, ok := m.inflight[connID]; ok {
+		dial.cancelled = true
+		delete(m.inflight, connID)
+		waitDial = dial
+	}
+	if item, ok := m.conns[connID]; ok {
+		delete(m.conns, connID)
+		item.evicted = true
+		if item.inUse <= 0 {
+			closeNow = item
+		} else {
+			waitItem = item
+		}
+	}
+	m.mu.Unlock()
+
+	if closeNow != nil {
+		closeNow.closeDriver()
+	}
+	if maxWait <= 0 {
+		return
+	}
+	deadline := time.Now().Add(maxWait)
+	if waitDial != nil && waitDial.done != nil {
+		if rem := time.Until(deadline); rem > 0 {
+			timer := time.NewTimer(rem)
+			select {
+			case <-waitDial.done:
+			case <-timer.C:
+			}
+			timer.Stop()
+		}
+	}
+	if waitItem != nil && waitItem.closedCh != nil {
+		if rem := time.Until(deadline); rem > 0 {
+			timer := time.NewTimer(rem)
+			select {
+			case <-waitItem.closedCh:
+			case <-timer.C:
+			}
+			timer.Stop()
+		}
+	}
+}
+
+// IsConnectionActiveWithin reports whether the connection currently has an active lease
+// or has been used in the connection pool within the given duration window.
+func (m *Manager) IsConnectionActiveWithin(connID string, window time.Duration) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, dialing := m.inflight[connID]; dialing {
+		return true
+	}
+	item, ok := m.conns[connID]
+	if !ok {
+		return false
+	}
+	if item.inUse > 0 {
+		return true
+	}
+	return time.Since(item.lastUsed) < window
+}
+
 func (m *Manager) ReleaseIdle() int {
-	var toClose []driver.Driver
+	var toClose []*pooledDriver
 	m.mu.Lock()
 	for id, it := range m.conns {
 		if it.inUse > 0 {
 			continue
 		}
 		it.evicted = true
-		if it.drv != nil {
-			toClose = append(toClose, it.drv)
-		}
+		toClose = append(toClose, it)
 		delete(m.conns, id)
 	}
 	m.mu.Unlock()
-	for _, d := range toClose {
-		_ = d.Close()
+	for _, it := range toClose {
+		it.closeDriver()
 	}
 	return len(toClose)
 }
@@ -272,9 +360,8 @@ func (m *Manager) CloseAll() {
 	m.inflight = make(map[string]*inflightDial)
 	m.mu.Unlock()
 	for _, it := range items {
-		if it.drv != nil {
-			_ = it.drv.Close()
-		}
+		it.evicted = true
+		it.closeDriver()
 	}
 }
 
@@ -287,18 +374,18 @@ func (m *Manager) reaper() {
 			return
 		case <-ticker.C:
 			cutoff := time.Now().Add(-m.idleTTL)
-			var stale []driver.Driver
+			var stale []*pooledDriver
 			m.mu.Lock()
 			for id, it := range m.conns {
 				if it.inUse == 0 && it.lastUsed.Before(cutoff) {
 					it.evicted = true
-					stale = append(stale, it.drv)
+					stale = append(stale, it)
 					delete(m.conns, id)
 				}
 			}
 			m.mu.Unlock()
-			for _, d := range stale {
-				_ = d.Close()
+			for _, it := range stale {
+				it.closeDriver()
 			}
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"dbharbor/backend/internal/store"
 )
@@ -158,9 +159,11 @@ func (s *Server) handleAdminDeleteUser(c *Context) {
 		}
 	}
 	for _, cid := range privConnIDs {
-		s.pool.Evict(cid)
+		s.pool.EvictAndWait(cid, 1500*time.Millisecond)
 		s.invalidateConnCache(cid)
 	}
+	s.cleanupUserEphemeralWorkspaces(uid)
+	s.cleanupUserLocalDBDir(uid)
 	s.store.AddAuditLog(
 		"USER_DELETED",
 		c.Username(),

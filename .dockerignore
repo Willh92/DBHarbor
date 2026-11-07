@@ -1,0 +1,41 @@
+# Git & CI metadata
+.git
+.github
+
+# Local toolchains & build outputs
+.toolchain
+dist
+release-assets
+stage
+*.old
+*.tsbuildinfo
+
+# Runtime data, local databases & secret keys
+data
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+*.db3
+*.s3db
+*.duckdb
+*.duckdb.wal
+*.ddb
+.secret.key
+.master.key
+ui_prefs.json
+*.log
+.env.local
+
+# Node & prebuilt frontend bundles (rebuilt cleanly inside Docker stages)
+node_modules
+frontend/node_modules
+frontend/dist
+backend/dbharbor
+backend/dbharbor.exe
+backend/dbharbor-desktop
+backend/dbharbor-desktop.exe
+backend/webdist/dist/*
+!backend/webdist/dist/.gitkeep

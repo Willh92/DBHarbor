@@ -579,6 +579,7 @@ export const LoginPage: React.FC = () => {
                                 options={[
                                   { value: 'shield', label: t('Shield') },
                                   { value: 'database', label: t('Database') },
+                                  { value: 'brand', label: t('App Logo') },
                                   { value: 'custom', label: t('Custom') },
                                   { value: 'none', label: t('Hidden') },
                                 ]}

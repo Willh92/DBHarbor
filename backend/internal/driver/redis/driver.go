@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"dbharbor/backend/internal/driver"
+	"dbharbor/backend/internal/driver/sqlbase"
 
 	goredis "github.com/redis/go-redis/v9"
 )
@@ -49,6 +51,12 @@ type Driver struct {
 	clients map[int]*goredis.Client
 }
 
+var (
+	_ driver.KeyValueDriver      = (*Driver)(nil)
+	_ driver.KVExtendedDriver    = (*Driver)(nil)
+	_ driver.KVDiagnosticsDriver = (*Driver)(nil)
+)
+
 func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
 	return &Driver{
 		cfg:     cfg,
@@ -67,23 +75,32 @@ func (d *Driver) clientForDB(dbIdx int) *goredis.Client {
 	if c, ok := d.clients[dbIdx]; ok {
 		return c
 	}
+	restrictIP := d.cfg.Option("__restrict_internal_ip", "") == "1"
+	host := strings.TrimSpace(d.cfg.Host)
+	if host == "" && !restrictIP {
+		host = "127.0.0.1"
+	}
+	cleanHost := strings.Trim(host, "[]")
 	port := d.cfg.Port
 	if port == 0 {
 		port = 6379
 	}
 	opts := &goredis.Options{
-		Addr:            fmt.Sprintf("%s:%d", d.cfg.Host, port),
+		Addr:            net.JoinHostPort(cleanHost, strconv.Itoa(port)),
 		Username:        d.cfg.Username,
 		Password:        d.cfg.Password,
 		DB:              dbIdx,
 		DialTimeout:     6 * time.Second,
 		PoolSize:        4,
-		MaxIdleConns:    2,
+		MaxIdleConns:    1,
 		ConnMaxIdleTime: 3 * time.Minute,
+	}
+	if restrictIP {
+		opts.Dialer = sqlbase.NewRestrictedDialContext(8 * time.Second)
 	}
 	switch d.cfg.Option("tls", "false") {
 	case "true":
-		opts.TLSConfig = &tls.Config{ServerName: d.cfg.Host, MinVersion: tls.VersionTLS12}
+		opts.TLSConfig = &tls.Config{ServerName: cleanHost, MinVersion: tls.VersionTLS12}
 	case "skip-verify":
 		opts.TLSConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
 	}
@@ -212,14 +229,21 @@ func (d *Driver) ScanKeys(ctx context.Context, dbIndex int, pattern string, curs
 
 func (d *Driver) GetKey(ctx context.Context, dbIndex int, key string) (driver.KVEntryDetail, error) {
 	c := d.clientForDB(dbIndex)
-	kt, err := c.Type(ctx, key).Result()
+	pipe := c.Pipeline()
+	typeCmd := pipe.Type(ctx, key)
+	ttlCmd := pipe.TTL(ctx, key)
+	memCmd := pipe.MemoryUsage(ctx, key, 0)
+	encCmd := pipe.ObjectEncoding(ctx, key)
+	_, _ = pipe.Exec(ctx)
+
+	kt, err := typeCmd.Result()
 	if err != nil {
 		return driver.KVEntryDetail{}, err
 	}
 	if kt == "none" {
 		return driver.KVEntryDetail{}, fmt.Errorf("key not found: %s", key)
 	}
-	ttlDur, _ := c.TTL(ctx, key).Result()
+	ttlDur, _ := ttlCmd.Result()
 	ttlSec := int64(-1)
 	if ttlDur > 0 {
 		ttlSec = int64(ttlDur.Seconds())
@@ -230,6 +254,12 @@ func (d *Driver) GetKey(ctx context.Context, dbIndex int, key string) (driver.KV
 		Type:  kt,
 		TTL:   ttlSec,
 		Items: []driver.KVCollectionItem{},
+	}
+	if memBytes, mErr := memCmd.Result(); mErr == nil && memBytes > 0 {
+		detail.MemoryBytes = memBytes
+	}
+	if enc, eErr := encCmd.Result(); eErr == nil && enc != "" {
+		detail.Encoding = enc
 	}
 
 	switch kt {
@@ -396,6 +426,49 @@ func (d *Driver) SetKey(ctx context.Context, dbIndex int, req driver.KVSetReques
 				return err
 			}
 		}
+	case "stream":
+		id := "*"
+		values := map[string]any{}
+		for _, it := range req.Items {
+			if strings.TrimSpace(it.ID) != "" {
+				id = strings.TrimSpace(it.ID)
+			}
+			if f := strings.TrimSpace(it.Field); f != "" {
+				values[f] = it.Value
+			}
+		}
+		if len(values) == 0 && len(req.Items) == 1 && strings.TrimSpace(req.Items[0].Value) != "" {
+			rawVal := strings.TrimSpace(req.Items[0].Value)
+			var obj map[string]any
+			if json.Unmarshal([]byte(rawVal), &obj) == nil && len(obj) > 0 {
+				for k, v := range obj {
+					values[k] = fmt.Sprintf("%v", v)
+				}
+			} else {
+				values["data"] = req.Items[0].Value
+			}
+		}
+		if len(values) == 0 {
+			if rawStr := strings.TrimSpace(req.StringValue); rawStr != "" {
+				var obj map[string]any
+				if json.Unmarshal([]byte(rawStr), &obj) == nil && len(obj) > 0 {
+					for k, v := range obj {
+						values[k] = fmt.Sprintf("%v", v)
+					}
+				} else {
+					values["data"] = req.StringValue
+				}
+			} else {
+				values["data"] = ""
+			}
+		}
+		if err := c.XAdd(ctx, &goredis.XAddArgs{
+			Stream: req.Key,
+			ID:     id,
+			Values: values,
+		}).Err(); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("creating key of type %s is not supported", req.Type)
 	}
@@ -407,8 +480,8 @@ func (d *Driver) SetKey(ctx context.Context, dbIndex int, req driver.KVSetReques
 
 func (d *Driver) MutateCollectionItem(ctx context.Context, dbIndex int, req driver.KVItemMutationRequest) error {
 	c := d.clientForDB(dbIndex)
-	act := strings.ToUpper(req.Action)
-	switch strings.ToLower(req.Type) {
+	act := strings.ToUpper(strings.TrimSpace(req.Action))
+	switch strings.ToLower(strings.TrimSpace(req.Type)) {
 	case "hash":
 		if act == "DELETE" {
 			return c.HDel(ctx, req.Key, req.Field).Err()
@@ -439,6 +512,63 @@ func (d *Driver) MutateCollectionItem(ctx context.Context, dbIndex int, req driv
 			_ = c.ZRem(ctx, req.Key, req.OldValue).Err()
 		}
 		return c.ZAdd(ctx, req.Key, goredis.Z{Score: req.Score, Member: req.Value}).Err()
+	case "stream":
+		switch act {
+		case "ADD":
+			id := strings.TrimSpace(req.ID)
+			if id == "" {
+				id = "*"
+			}
+			values := map[string]any{}
+			if len(req.Fields) > 0 {
+				for k, v := range req.Fields {
+					if fk := strings.TrimSpace(k); fk != "" {
+						values[fk] = v
+					}
+				}
+			} else if f := strings.TrimSpace(req.Field); f != "" {
+				values[f] = req.Value
+			} else if raw := strings.TrimSpace(req.Value); raw != "" {
+				var parsed map[string]any
+				if json.Unmarshal([]byte(raw), &parsed) == nil && len(parsed) > 0 {
+					for k, v := range parsed {
+						values[k] = fmt.Sprintf("%v", v)
+					}
+				} else {
+					values["data"] = req.Value
+				}
+			}
+			if len(values) == 0 {
+				return errors.New("stream entry requires at least one field/value pair")
+			}
+			xArgs := &goredis.XAddArgs{
+				Stream: req.Key,
+				ID:     id,
+				Values: values,
+			}
+			if req.MaxLen > 0 {
+				xArgs.MaxLen = req.MaxLen
+				xArgs.Approx = true
+			}
+			return c.XAdd(ctx, xArgs).Err()
+		case "DELETE":
+			targetID := strings.TrimSpace(req.ID)
+			if targetID == "" {
+				targetID = strings.TrimSpace(req.Field)
+			}
+			if targetID == "" {
+				targetID = strings.TrimSpace(req.Value)
+			}
+			if targetID == "" {
+				return errors.New("stream entry ID is required for DELETE")
+			}
+			return c.XDel(ctx, req.Key, targetID).Err()
+		case "TRIM":
+			if req.MaxLen < 0 {
+				return errors.New("maxLen must be >= 0 for stream TRIM")
+			}
+			return c.XTrimMaxLenApprox(ctx, req.Key, req.MaxLen, 0).Err()
+		}
 	}
 	return fmt.Errorf("unsupported operation: %s / %s", req.Type, req.Action)
 }
@@ -661,6 +791,159 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 
 func (d *Driver) KillSession(ctx context.Context, sessionID string) error {
 	return d.clientForDB(0).Do(ctx, "CLIENT", "KILL", "ID", sessionID).Err()
+}
+
+func (d *Driver) GetStreamInfo(ctx context.Context, dbIndex int, key string) (driver.KVStreamInfo, error) {
+	if strings.TrimSpace(key) == "" {
+		return driver.KVStreamInfo{}, errors.New("stream key is required")
+	}
+	c := d.clientForDB(dbIndex)
+	info, err := c.XInfoStream(ctx, key).Result()
+	if err != nil {
+		return driver.KVStreamInfo{}, err
+	}
+	out := driver.KVStreamInfo{
+		Length:      info.Length,
+		RadixKeys:   info.RadixTreeKeys,
+		FirstID:     info.FirstEntry.ID,
+		LastID:      info.LastEntry.ID,
+		GroupsCount: info.Groups,
+		Groups:      []driver.KVStreamGroup{},
+	}
+	groups, gErr := c.XInfoGroups(ctx, key).Result()
+	if gErr == nil {
+		for _, g := range groups {
+			consList := []driver.KVStreamConsumer{}
+			if consumers, cErr := c.XInfoConsumers(ctx, key, g.Name).Result(); cErr == nil {
+				limit := len(consumers)
+				if limit > 50 {
+					limit = 50
+				}
+				for i := 0; i < limit; i++ {
+					cons := consumers[i]
+					consList = append(consList, driver.KVStreamConsumer{
+						Name:    cons.Name,
+						Pending: cons.Pending,
+						IdleMs:  cons.Idle.Milliseconds(),
+					})
+				}
+			}
+			out.Groups = append(out.Groups, driver.KVStreamGroup{
+				Name:            g.Name,
+				Consumers:       g.Consumers,
+				Pending:         g.Pending,
+				LastDeliveredID: g.LastDeliveredID,
+				EntriesRead:     g.EntriesRead,
+				Lag:             g.Lag,
+				ConsumerList:    consList,
+			})
+		}
+		if out.GroupsCount == 0 && len(out.Groups) > 0 {
+			out.GroupsCount = int64(len(out.Groups))
+		}
+	}
+	return out, nil
+}
+
+func (d *Driver) ManageStreamGroup(ctx context.Context, req driver.KVStreamGroupActionRequest) error {
+	key := strings.TrimSpace(req.Key)
+	group := strings.TrimSpace(req.Group)
+	if key == "" || group == "" {
+		return errors.New("stream key and consumer group name are required")
+	}
+	c := d.clientForDB(req.DB)
+	switch strings.ToUpper(strings.TrimSpace(req.Action)) {
+	case "CREATE":
+		startID := strings.TrimSpace(req.StartID)
+		if startID == "" {
+			startID = "$"
+		}
+		return c.XGroupCreateMkStream(ctx, key, group, startID).Err()
+	case "SETID":
+		startID := strings.TrimSpace(req.StartID)
+		if startID == "" {
+			startID = "$"
+		}
+		return c.XGroupSetID(ctx, key, group, startID).Err()
+	case "DESTROY":
+		return c.XGroupDestroy(ctx, key, group).Err()
+	case "DELCONSUMER":
+		consumer := strings.TrimSpace(req.Consumer)
+		if consumer == "" {
+			return errors.New("consumer name is required for DELCONSUMER")
+		}
+		return c.XGroupDelConsumer(ctx, key, group, consumer).Err()
+	default:
+		return fmt.Errorf("unsupported stream group action: %s", req.Action)
+	}
+}
+
+func (d *Driver) GetSlowlog(ctx context.Context, count int64) ([]driver.KVSlowlogEntry, error) {
+	if count <= 0 {
+		count = 50
+	} else if count > 500 {
+		count = 500
+	}
+	entries, err := d.clientForDB(0).SlowLogGet(ctx, count).Result()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]driver.KVSlowlogEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, driver.KVSlowlogEntry{
+			ID:         e.ID,
+			Timestamp:  e.Time.Format(time.RFC3339),
+			DurationUs: e.Duration.Microseconds(),
+			Command:    strings.Join(e.Args, " "),
+			ClientAddr: e.ClientAddr,
+			ClientName: e.ClientName,
+		})
+	}
+	return out, nil
+}
+
+func (d *Driver) ResetSlowlog(ctx context.Context) error {
+	return d.clientForDB(0).Do(ctx, "SLOWLOG", "RESET").Err()
+}
+
+func (d *Driver) GetConfig(ctx context.Context, pattern string) ([]driver.KVConfigItem, error) {
+	p := strings.TrimSpace(pattern)
+	if p == "" {
+		p = "*"
+	}
+	m, err := d.clientForDB(0).ConfigGet(ctx, p).Result()
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]driver.KVConfigItem, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, driver.KVConfigItem{
+			Key:   k,
+			Value: m[k],
+		})
+	}
+	return out, nil
+}
+
+func (d *Driver) SetConfig(ctx context.Context, key, value string) error {
+	k := strings.TrimSpace(key)
+	if k == "" {
+		return errors.New("configuration parameter key is required")
+	}
+	return d.clientForDB(0).ConfigSet(ctx, k, value).Err()
+}
+
+func (d *Driver) PublishMessage(ctx context.Context, channel, message string) (int64, error) {
+	ch := strings.TrimSpace(channel)
+	if ch == "" {
+		return 0, errors.New("pub/sub channel name is required")
+	}
+	return d.clientForDB(0).Publish(ctx, ch, message).Result()
 }
 
 func parseRedisInfoField(info, field string) string {

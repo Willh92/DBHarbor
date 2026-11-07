@@ -77,21 +77,37 @@ export const ImportExportModal: React.FC<Props> = ({
 
   useEffect(() => {
     if (!open) return;
+    let active = true;
     setActiveKey(initialMode);
     setTargetTable(table || '');
     setImportFormat(table ? 'csv' : 'sql');
     setExportFormat(!table && !customSQL ? 'sql' : 'csv_bom');
     setSelectedTables(initialTables && initialTables.length > 0 ? [...initialTables] : []);
+    setAvailableTables([]);
+    setIncludeDDL(true);
+    setDropIfExists(false);
+    setContinueOnError(false);
+    setSqlScript('');
+    setSqlContinueOnError(false);
     setFile(null);
 
     if (connectionId && database) {
       api
         .listObjects(connectionId, database, schema || '')
         .then((res) => {
-          setAvailableTables((res.tables || []).map((tbl) => tbl.name));
+          if (active) {
+            setAvailableTables((res.tables || []).map((tbl) => tbl.name));
+          }
         })
-        .catch(() => setAvailableTables([]));
+        .catch(() => {
+          if (active) {
+            setAvailableTables([]);
+          }
+        });
     }
+    return () => {
+      active = false;
+    };
   }, [open, initialMode, connectionId, database, schema, table, initialTables, customSQL]);
 
   const handleTriggerExport = async () => {
