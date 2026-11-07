@@ -28,6 +28,37 @@ func (s *Server) handleUpdateProfile(c *Context) {
 	c.JSON(http.StatusOK, H{"message": "Profile updated successfully", "displayName": dname})
 }
 
+func (s *Server) handleAdminGetLoginBranding(c *Context) {
+	if !c.RequireAdmin() {
+		return
+	}
+	c.JSON(http.StatusOK, H{"branding": s.store.GetLoginBranding()})
+}
+
+func (s *Server) handleAdminSaveLoginBranding(c *Context) {
+	if !c.RequireAdmin() {
+		return
+	}
+	var in store.LoginBrandingConfig
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, H{"error": "Invalid login branding configuration payload"})
+		return
+	}
+	saved, err := s.store.SaveLoginBranding(in)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		return
+	}
+	s.store.AddAuditLog(
+		"LOGIN_BRANDING_UPDATED",
+		c.Username(),
+		c.ClientIP(),
+		c.Request.UserAgent(),
+		fmt.Sprintf("Updated login page branding (iconMode=%s, hasTitle=%v, hasHeading=%v)", saved.IconMode, saved.PageTitle != "", saved.Heading != ""),
+	)
+	c.JSON(http.StatusOK, H{"message": "Login page appearance updated", "branding": saved})
+}
+
 func (s *Server) handleAdminListUsers(c *Context) {
 	if !c.RequireAdmin() {
 		return
@@ -149,8 +180,8 @@ func (s *Server) handleAdminResetPassword(c *Context) {
 		NewPassword         string `json:"newPassword"`
 		ForcePasswordChange bool   `json:"forcePasswordChange"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || len(req.NewPassword) < 6 {
-		c.JSON(http.StatusBadRequest, H{"error": "New password must be at least 6 characters"})
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.NewPassword) < 8 {
+		c.JSON(http.StatusBadRequest, H{"error": "New password must be at least 8 characters"})
 		return
 	}
 	target, err := s.store.GetUserByID(uid)
@@ -162,6 +193,9 @@ func (s *Server) handleAdminResetPassword(c *Context) {
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
+	}
+	if s.protector != nil {
+		s.protector.ResetUser(target.Username)
 	}
 	if s.tokens != nil {
 		for _, sid := range sids {

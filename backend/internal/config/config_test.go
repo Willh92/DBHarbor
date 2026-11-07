@@ -201,4 +201,14 @@ func TestLoadAdminBootstrapAndInitOnlyFlags(t *testing.T) {
 	if cfgFlag.AdminUser != "ops_root" || cfgFlag.AdminPass != "Strong#Pass99" {
 		t.Fatalf("unexpected CLI admin credentials: user=%q pass=%q", cfgFlag.AdminUser, cfgFlag.AdminPass)
 	}
+
+	t.Setenv("DBHARBOR_ADMIN_USER", "")
+	t.Setenv("DBHARBOR_ADMIN_PASS", "")
+	cfgDeferred, err := Load([]string{"-data-dir", tmpData})
+	if err != nil {
+		t.Fatalf("Load deferred bootstrap failed: %v", err)
+	}
+	if cfgDeferred.AdminUser != "" || cfgDeferred.AdminPass != "" {
+		t.Fatalf("expected empty default admin credentials for Web setup wizard, got user=%q pass=%q", cfgDeferred.AdminUser, cfgDeferred.AdminPass)
+	}
 }

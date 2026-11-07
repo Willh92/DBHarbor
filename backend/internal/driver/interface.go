@@ -172,6 +172,7 @@ type QueryResult struct {
 	Rows         [][]any       `json:"rows"`
 	Total        int64         `json:"total"`
 	HasTotal     bool          `json:"hasTotal"`
+	Truncated    bool          `json:"truncated,omitempty"`
 	AffectedRows int64         `json:"affectedRows"`
 	ElapsedMs    int64         `json:"elapsedMs"`
 	IsSelect     bool          `json:"isSelect"`

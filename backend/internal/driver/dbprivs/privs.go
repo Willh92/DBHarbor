@@ -65,19 +65,32 @@ type ActionRequest struct {
 var safePrivTokenRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_ ]*$`)
 
 func sqlStr(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+	clean := strings.ReplaceAll(s, "\x00", "")
+	return "'" + strings.ReplaceAll(clean, "'", "''") + "'"
+}
+
+func sqlStrDialect(dbType, s string) string {
+	clean := strings.ReplaceAll(s, "\x00", "")
+	if isMySQLFamily(dbType) || strings.EqualFold(strings.TrimSpace(dbType), "clickhouse") {
+		escaped := strings.ReplaceAll(clean, `\`, `\\`)
+		escaped = strings.ReplaceAll(escaped, `'`, `''`)
+		escaped = strings.ReplaceAll(escaped, "\r", `\r`)
+		escaped = strings.ReplaceAll(escaped, "\n", `\n`)
+		return "'" + escaped + "'"
+	}
+	return "'" + strings.ReplaceAll(clean, "'", "''") + "'"
 }
 
 func quoteBacktick(id string) string {
-	return "`" + strings.ReplaceAll(id, "`", "``") + "`"
+	return "`" + strings.ReplaceAll(strings.ReplaceAll(id, "\x00", ""), "`", "``") + "`"
 }
 
 func quoteDouble(id string) string {
-	return `"` + strings.ReplaceAll(id, `"`, `""`) + `"`
+	return `"` + strings.ReplaceAll(strings.ReplaceAll(id, "\x00", ""), `"`, `""`) + `"`
 }
 
 func quoteBracket(id string) string {
-	return "[" + strings.ReplaceAll(id, "]", "]]") + "]"
+	return "[" + strings.ReplaceAll(strings.ReplaceAll(id, "\x00", ""), "]", "]]") + "]"
 }
 
 func normalizeMySQLHost(host string) string {
@@ -89,7 +102,7 @@ func normalizeMySQLHost(host string) string {
 }
 
 func formatMySQLUser(username, host string) string {
-	return fmt.Sprintf("%s@%s", sqlStr(strings.TrimSpace(username)), sqlStr(normalizeMySQLHost(host)))
+	return fmt.Sprintf("%s@%s", sqlStrDialect("mysql", strings.TrimSpace(username)), sqlStrDialect("mysql", normalizeMySQLHost(host)))
 }
 
 func sanitizePrivileges(items []string) ([]string, error) {
@@ -1204,6 +1217,22 @@ func parseMySQLGrantStatement(stmt string) (privs string, scope string) {
 	return privs, scope
 }
 
+// BuildRedactedStatements validates req and returns preview/audit statements with credentials masked.
+func BuildRedactedStatements(dbType string, req ActionRequest) ([]string, error) {
+	stmts, err := BuildStatements(dbType, req)
+	if err != nil {
+		return nil, err
+	}
+	if req.Password != "" {
+		masked := req
+		masked.Password = "********"
+		if maskedStmts, mErr := BuildStatements(dbType, masked); mErr == nil {
+			return maskedStmts, nil
+		}
+	}
+	return stmts, nil
+}
+
 // BuildStatements generates previewable SQL statements, Redis ACL commands, or MongoDB JSON admin commands for an action.
 func BuildStatements(dbType string, req ActionRequest) ([]string, error) {
 	t := strings.ToLower(strings.TrimSpace(dbType))
@@ -1217,6 +1246,9 @@ func BuildStatements(dbType string, req ActionRequest) ([]string, error) {
 	if uname == "" {
 		return nil, fmt.Errorf("username is required")
 	}
+	if strings.ContainsRune(uname, 0) || strings.ContainsRune(req.Password, 0) {
+		return nil, fmt.Errorf("null bytes are not allowed in account credentials")
+	}
 
 	if t == "redis" {
 		return buildRedisACLCommands(action, uname, req)
@@ -1228,6 +1260,17 @@ func BuildStatements(dbType string, req ActionRequest) ([]string, error) {
 	privs, err := sanitizePrivileges(req.Privileges)
 	if err != nil {
 		return nil, err
+	}
+	if len(caps.AvailablePrivileges) > 0 && len(privs) > 0 {
+		allowed := make(map[string]struct{}, len(caps.AvailablePrivileges))
+		for _, ap := range caps.AvailablePrivileges {
+			allowed[strings.ToUpper(strings.TrimSpace(ap))] = struct{}{}
+		}
+		for _, p := range privs {
+			if _, ok := allowed[p]; !ok {
+				return nil, fmt.Errorf("privilege %q is not in the supported allowlist for %s", p, dbType)
+			}
+		}
 	}
 	roles, err := sanitizePrivileges(req.Roles)
 	if err != nil {
@@ -1249,7 +1292,7 @@ func BuildStatements(dbType string, req ActionRequest) ([]string, error) {
 		case "CREATE_USER":
 			stmt := fmt.Sprintf("CREATE USER %s", userSpec)
 			if req.Password != "" {
-				stmt += fmt.Sprintf(" IDENTIFIED BY %s", sqlStr(req.Password))
+				stmt += fmt.Sprintf(" IDENTIFIED BY %s", sqlStrDialect(t, req.Password))
 			}
 			stmts := []string{stmt}
 			if len(privs) > 0 {
@@ -1273,7 +1316,7 @@ func BuildStatements(dbType string, req ActionRequest) ([]string, error) {
 			if req.Password == "" {
 				return nil, fmt.Errorf("new password is required")
 			}
-			return []string{fmt.Sprintf("ALTER USER %s IDENTIFIED BY %s", userSpec, sqlStr(req.Password))}, nil
+			return []string{fmt.Sprintf("ALTER USER %s IDENTIFIED BY %s", userSpec, sqlStrDialect(t, req.Password))}, nil
 		case "LOCK_USER":
 			return []string{fmt.Sprintf("ALTER USER %s ACCOUNT LOCK", userSpec)}, nil
 		case "UNLOCK_USER":
@@ -1325,7 +1368,7 @@ func BuildStatements(dbType string, req ActionRequest) ([]string, error) {
 				opts = append(opts, "CREATEROLE")
 			}
 			if req.Password != "" {
-				opts = append(opts, "PASSWORD "+sqlStr(req.Password))
+				opts = append(opts, "PASSWORD "+sqlStrDialect(t, req.Password))
 			}
 			stmts := []string{fmt.Sprintf("CREATE ROLE %s WITH %s", qu, strings.Join(opts, " "))}
 			if len(privs) > 0 || len(cleanRoles) > 0 {
@@ -1350,7 +1393,7 @@ func BuildStatements(dbType string, req ActionRequest) ([]string, error) {
 			if req.Password == "" {
 				return nil, fmt.Errorf("new password is required")
 			}
-			return []string{fmt.Sprintf("ALTER ROLE %s WITH PASSWORD %s", qu, sqlStr(req.Password))}, nil
+			return []string{fmt.Sprintf("ALTER ROLE %s WITH PASSWORD %s", qu, sqlStrDialect(t, req.Password))}, nil
 		case "LOCK_USER":
 			return []string{fmt.Sprintf("ALTER ROLE %s NOLOGIN", qu)}, nil
 		case "UNLOCK_USER":
@@ -1431,11 +1474,14 @@ func BuildStatements(dbType string, req ActionRequest) ([]string, error) {
 		case "CREATE_USER":
 			stmt := fmt.Sprintf("CREATE USER %s", qu)
 			if req.Password != "" {
-				stmt += fmt.Sprintf(" IDENTIFIED BY %s", sqlStr(req.Password))
+				stmt += fmt.Sprintf(" IDENTIFIED BY %s", sqlStrDialect(t, req.Password))
 			}
 			return []string{stmt}, nil
 		case "ALTER_USER":
-			return []string{fmt.Sprintf("ALTER USER %s IDENTIFIED BY %s", qu, sqlStr(req.Password))}, nil
+			if req.Password == "" {
+				return nil, fmt.Errorf("new password is required")
+			}
+			return []string{fmt.Sprintf("ALTER USER %s IDENTIFIED BY %s", qu, sqlStrDialect(t, req.Password))}, nil
 		case "DROP_USER":
 			return []string{fmt.Sprintf("DROP USER %s", qu)}, nil
 		case "GRANT", "REVOKE":
@@ -1467,13 +1513,16 @@ func BuildStatements(dbType string, req ActionRequest) ([]string, error) {
 		case "CREATE_USER":
 			if req.Password != "" {
 				return []string{
-					fmt.Sprintf("CREATE LOGIN %s WITH PASSWORD = %s", qu, sqlStr(req.Password)),
+					fmt.Sprintf("CREATE LOGIN %s WITH PASSWORD = %s", qu, sqlStrDialect(t, req.Password)),
 					fmt.Sprintf("CREATE USER %s FOR LOGIN %s", qu, qu),
 				}, nil
 			}
 			return []string{fmt.Sprintf("CREATE USER %s WITHOUT LOGIN", qu)}, nil
 		case "ALTER_USER":
-			return []string{fmt.Sprintf("ALTER LOGIN %s WITH PASSWORD = %s", qu, sqlStr(req.Password))}, nil
+			if req.Password == "" {
+				return nil, fmt.Errorf("new password is required")
+			}
+			return []string{fmt.Sprintf("ALTER LOGIN %s WITH PASSWORD = %s", qu, sqlStrDialect(t, req.Password))}, nil
 		case "DROP_USER":
 			return []string{fmt.Sprintf("DROP USER %s", qu)}, nil
 		case "GRANT", "REVOKE":
@@ -1516,6 +1565,9 @@ func BuildStatements(dbType string, req ActionRequest) ([]string, error) {
 			}
 			return []string{fmt.Sprintf("CREATE USER %s IDENTIFIED BY %s", qu, quoteDouble(req.Password))}, nil
 		case "ALTER_USER":
+			if req.Password == "" {
+				return nil, fmt.Errorf("new password is required")
+			}
 			return []string{fmt.Sprintf("ALTER USER %s IDENTIFIED BY %s", qu, quoteDouble(req.Password))}, nil
 		case "LOCK_USER":
 			return []string{fmt.Sprintf("ALTER USER %s ACCOUNT LOCK", qu)}, nil
@@ -1530,7 +1582,7 @@ func BuildStatements(dbType string, req ActionRequest) ([]string, error) {
 				prep = "FROM"
 			}
 			for _, rl := range cleanRoles {
-				stmts = append(stmts, fmt.Sprintf("%s %s %s %s", action, rl, prep, qu))
+				stmts = append(stmts, fmt.Sprintf("%s %s %s %s", action, quoteDouble(rl), prep, qu))
 			}
 			if len(privs) > 0 {
 				tbl := strings.TrimSpace(req.Table)
@@ -1562,6 +1614,9 @@ func buildRedisACLCommands(action, uname string, req ActionRequest) ([]string, e
 	switch action {
 	case "CREATE_USER", "GRANT":
 		rules := strings.TrimSpace(req.ACLRules)
+		if strings.ContainsAny(rules, "\r\n") {
+			return nil, fmt.Errorf("Redis ACL rules cannot contain line breaks")
+		}
 		if rules == "" {
 			switch strings.ToLower(strings.TrimSpace(req.ACLPreset)) {
 			case "readonly":
@@ -1573,6 +1628,11 @@ func buildRedisACLCommands(action, uname string, req ActionRequest) ([]string, e
 			}
 		}
 		if len(req.Privileges) > 0 && req.ACLRules == "" && req.ACLPreset == "" {
+			for _, p := range req.Privileges {
+				if strings.ContainsAny(p, " \t\r\n") {
+					return nil, fmt.Errorf("invalid Redis ACL privilege token %q", p)
+				}
+			}
 			rules = strings.Join(req.Privileges, " ")
 		}
 		pwdPart := ""
@@ -1588,6 +1648,9 @@ func buildRedisACLCommands(action, uname string, req ActionRequest) ([]string, e
 	case "ALTER_USER":
 		if req.Password == "" {
 			return nil, fmt.Errorf("new password is required")
+		}
+		if strings.ContainsAny(req.Password, " \t\r\n") {
+			return nil, fmt.Errorf("Redis ACL password token cannot contain whitespace")
 		}
 		return []string{fmt.Sprintf("ACL SETUSER %s resetpass >%s", uname, req.Password)}, nil
 	case "LOCK_USER":

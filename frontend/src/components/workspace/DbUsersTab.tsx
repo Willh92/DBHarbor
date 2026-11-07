@@ -670,7 +670,7 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
           rowKey="identity"
           columns={columns}
           dataSource={filteredUsers}
-          pagination={{ pageSize: 50, showSizeChanger: true }}
+          pagination={{ pageSize: 50, simple: isMobile, showSizeChanger: !isMobile }}
           locale={{ emptyText: <Empty description={t('No database accounts returned')} /> }}
         />
       </div>
@@ -686,7 +686,7 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
         okText={t('Create Now')}
       >
         <Form form={createForm} layout="vertical" onValuesChange={updateCreatePreview}>
-          <div style={{ display: 'grid', gridTemplateColumns: caps?.supportsHost ? '2fr 1fr' : '1fr', gap: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: !isMobile && caps?.supportsHost ? '2fr 1fr' : '1fr', gap: 12 }}>
             <Form.Item
               name="username"
               label={t('Account Username')}
@@ -721,13 +721,15 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
 
           {tab.dbType === 'redis' ? (
             <Form.Item name="aclPreset" label={t('Initial ACL Permission Preset')}>
-              <Segmented
-                options={[
-                  { value: 'readonly', label: t('Read-Only') },
-                  { value: 'readwrite', label: t('Read-Write') },
-                  { value: 'admin', label: t('Full Admin') },
-                ]}
-              />
+              <div className="dbharbor-no-scrollbar" style={{ overflowX: 'auto', maxWidth: '100%' }}>
+                <Segmented
+                  options={[
+                    { value: 'readonly', label: t('Read-Only') },
+                    { value: 'readwrite', label: t('Read-Write') },
+                    { value: 'admin', label: t('Full Admin') },
+                  ]}
+                />
+              </div>
             </Form.Item>
           ) : (
             <>
@@ -867,18 +869,32 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
                 size="small"
                 title={t('Assign or Revoke Database Privileges')}
                 extra={
-                  <Segmented
-                    size="small"
-                    value={grantActionMode}
-                    onChange={(v) => setGrantActionMode(v as 'GRANT' | 'REVOKE')}
-                    options={[
-                      { value: 'GRANT', label: t('Grant Privileges') },
-                      { value: 'REVOKE', label: t('Revoke Privileges') },
-                    ]}
-                  />
+                  !isMobile ? (
+                    <Segmented
+                      size="small"
+                      value={grantActionMode}
+                      onChange={(v) => setGrantActionMode(v as 'GRANT' | 'REVOKE')}
+                      options={[
+                        { value: 'GRANT', label: t('Grant Privileges') },
+                        { value: 'REVOKE', label: t('Revoke Privileges') },
+                      ]}
+                    />
+                  ) : undefined
                 }
               >
                 <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  {isMobile && (
+                    <Segmented
+                      block
+                      size="middle"
+                      value={grantActionMode}
+                      onChange={(v) => setGrantActionMode(v as 'GRANT' | 'REVOKE')}
+                      options={[
+                        { value: 'GRANT', label: t('Grant Privileges') },
+                        { value: 'REVOKE', label: t('Revoke Privileges') },
+                      ]}
+                    />
+                  )}
                   {/* Quick Presets */}
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -916,16 +932,18 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
 
                   {tab.dbType === 'redis' ? (
                     <>
-                      <Segmented
-                        value={redisPreset}
-                        onChange={(v) => setRedisPreset(v as any)}
-                        options={[
-                          { value: 'readonly', label: t('Read-Only') },
-                          { value: 'readwrite', label: t('Read-Write') },
-                          { value: 'admin', label: t('Full Admin') },
-                          { value: 'custom', label: t('Custom ACL Rules') },
-                        ]}
-                      />
+                      <div className="dbharbor-no-scrollbar" style={{ overflowX: 'auto', maxWidth: '100%' }}>
+                        <Segmented
+                          value={redisPreset}
+                          onChange={(v) => setRedisPreset(v as any)}
+                          options={[
+                            { value: 'readonly', label: t('Read-Only') },
+                            { value: 'readwrite', label: t('Read-Write') },
+                            { value: 'admin', label: t('Full Admin') },
+                            { value: 'custom', label: t('Custom ACL Rules') },
+                          ]}
+                        />
+                      </div>
                       {redisPreset === 'custom' && (
                         <Input
                           value={redisRules}

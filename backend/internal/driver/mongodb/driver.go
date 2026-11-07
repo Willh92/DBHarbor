@@ -305,9 +305,64 @@ var readOnlyMongoCommands = map[string]struct{}{
 	"connectionstatus": {}, "hostinfo": {}, "datasize": {},
 }
 
+var forbiddenMongoReadOnlyOperators = map[string]struct{}{
+	"$out": {}, "$merge": {}, "$where": {}, "$function": {}, "$accumulator": {},
+}
+
+func containsForbiddenMongoOperator(v any) (bool, string) {
+	switch doc := v.(type) {
+	case bson.D:
+		for _, elem := range doc {
+			kl := strings.ToLower(strings.TrimSpace(elem.Key))
+			if _, bad := forbiddenMongoReadOnlyOperators[kl]; bad {
+				return true, elem.Key
+			}
+			if bad, op := containsForbiddenMongoOperator(elem.Value); bad {
+				return true, op
+			}
+		}
+	case bson.M:
+		for k, val := range doc {
+			kl := strings.ToLower(strings.TrimSpace(k))
+			if _, bad := forbiddenMongoReadOnlyOperators[kl]; bad {
+				return true, k
+			}
+			if bad, op := containsForbiddenMongoOperator(val); bad {
+				return true, op
+			}
+		}
+	case map[string]any:
+		for k, val := range doc {
+			kl := strings.ToLower(strings.TrimSpace(k))
+			if _, bad := forbiddenMongoReadOnlyOperators[kl]; bad {
+				return true, k
+			}
+			if bad, op := containsForbiddenMongoOperator(val); bad {
+				return true, op
+			}
+		}
+	case bson.A:
+		for _, item := range doc {
+			if bad, op := containsForbiddenMongoOperator(item); bad {
+				return true, op
+			}
+		}
+	case []any:
+		for _, item := range doc {
+			if bad, op := containsForbiddenMongoOperator(item); bad {
+				return true, op
+			}
+		}
+	}
+	return false, ""
+}
+
 func validateMongoReadOnlyDoc(cmdDoc bson.D) (bool, string) {
 	if len(cmdDoc) == 0 {
 		return false, "empty MongoDB command"
+	}
+	if bad, op := containsForbiddenMongoOperator(cmdDoc); bad {
+		return false, fmt.Sprintf("operator %q is not permitted in read-only mode", op)
 	}
 	cmdName := strings.ToLower(strings.TrimSpace(cmdDoc[0].Key))
 	if _, ok := readOnlyMongoCommands[cmdName]; ok {
@@ -329,27 +384,8 @@ func validateMongoReadOnlyDoc(cmdDoc bson.D) (bool, string) {
 	case "aggregate":
 		for _, elem := range cmdDoc {
 			if strings.EqualFold(elem.Key, "pipeline") {
-				stages, ok := elem.Value.(bson.A)
-				if !ok {
+				if _, ok := elem.Value.(bson.A); !ok {
 					return false, "aggregate pipeline must be an array"
-				}
-				for _, st := range stages {
-					switch stageDoc := st.(type) {
-					case bson.D:
-						for _, se := range stageDoc {
-							k := strings.ToLower(strings.TrimSpace(se.Key))
-							if k == "$out" || k == "$merge" {
-								return false, fmt.Sprintf("aggregation stage %q is not permitted in read-only mode", se.Key)
-							}
-						}
-					case bson.M:
-						for k := range stageDoc {
-							kl := strings.ToLower(strings.TrimSpace(k))
-							if kl == "$out" || kl == "$merge" {
-								return false, fmt.Sprintf("aggregation stage %q is not permitted in read-only mode", k)
-							}
-						}
-					}
 				}
 			}
 		}
@@ -492,12 +528,34 @@ func (d *Driver) ImportDocuments(ctx context.Context, database, collection strin
 		return driver.ImportResult{}, errors.New("collection name is required")
 	}
 
-	raw, err := io.ReadAll(io.LimitReader(r, 128<<20))
-	if err != nil {
-		return driver.ImportResult{}, err
+	br := bufio.NewReaderSize(io.LimitReader(r, 128<<20), 64*1024)
+	// Skip leading UTF-8 BOM / whitespace to detect format without buffering 128 MiB in memory
+	var firstByte byte
+	hasFirst := false
+	for {
+		b, bErr := br.ReadByte()
+		if bErr != nil {
+			if errors.Is(bErr, io.EOF) {
+				return driver.ImportResult{}, errors.New("import content is empty")
+			}
+			return driver.ImportResult{}, bErr
+		}
+		if b == 0xEF {
+			peek, _ := br.Peek(2)
+			if len(peek) == 2 && peek[0] == 0xBB && peek[1] == 0xBF {
+				_, _ = br.Discard(2)
+				continue
+			}
+		}
+		if b == ' ' || b == '\t' || b == '\r' || b == '\n' {
+			continue
+		}
+		firstByte = b
+		hasFirst = true
+		_ = br.UnreadByte()
+		break
 	}
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" {
+	if !hasFirst {
 		return driver.ImportResult{}, errors.New("import content is empty")
 	}
 
@@ -533,8 +591,55 @@ func (d *Driver) ImportDocuments(ctx context.Context, database, collection strin
 		return nil
 	}
 
-	if normFmt == "jsonl" || normFmt == "ndjson" || (!strings.HasPrefix(trimmed, "[") && strings.Contains(trimmed, "\n")) {
-		sc := bufio.NewScanner(strings.NewReader(trimmed))
+	if firstByte == '[' && normFmt != "jsonl" && normFmt != "ndjson" {
+		dec := json.NewDecoder(br)
+		tok, tErr := dec.Token()
+		if tErr != nil || tok != json.Delim('[') {
+			return res, fmt.Errorf("invalid JSON document array: %v", tErr)
+		}
+		batch := make([]any, 0, 200)
+		for dec.More() {
+			var rawItem json.RawMessage
+			if dErr := dec.Decode(&rawItem); dErr != nil {
+				if continueOnError {
+					res.FailedCount++
+					if len(res.Warnings) < 20 {
+						res.Warnings = append(res.Warnings, dErr.Error())
+					}
+					break
+				}
+				return res, fmt.Errorf("invalid document in JSON array: %w", dErr)
+			}
+			var doc bson.M
+			if uErr := bson.UnmarshalExtJSON(rawItem, false, &doc); uErr != nil {
+				if continueOnError {
+					res.FailedCount++
+					if len(res.Warnings) < 20 {
+						res.Warnings = append(res.Warnings, uErr.Error())
+					}
+					continue
+				}
+				return res, fmt.Errorf("invalid document in JSON array: %w", uErr)
+			}
+			batch = append(batch, doc)
+			if len(batch) >= 200 {
+				if fErr := flushBatch(batch); fErr != nil {
+					res.ElapsedMs = time.Since(start).Milliseconds()
+					return res, fErr
+				}
+				batch = batch[:0]
+			}
+		}
+		if fErr := flushBatch(batch); fErr != nil {
+			res.ElapsedMs = time.Since(start).Milliseconds()
+			return res, fErr
+		}
+		res.ElapsedMs = time.Since(start).Milliseconds()
+		return res, nil
+	}
+
+	if normFmt == "jsonl" || normFmt == "ndjson" {
+		sc := bufio.NewScanner(br)
 		sc.Buffer(make([]byte, 64*1024), 16<<20)
 		batch := make([]any, 0, 200)
 		for sc.Scan() {
@@ -574,46 +679,38 @@ func (d *Driver) ImportDocuments(ctx context.Context, database, collection strin
 		return res, nil
 	}
 
-	if strings.HasPrefix(trimmed, "[") {
-		var rawDocs []json.RawMessage
-		if uErr := json.Unmarshal([]byte(trimmed), &rawDocs); uErr != nil {
-			return res, fmt.Errorf("invalid JSON document array: %w", uErr)
-		}
-		batch := make([]any, 0, 200)
-		for _, item := range rawDocs {
-			var doc bson.M
-			if uErr := bson.UnmarshalExtJSON(item, false, &doc); uErr != nil {
-				if continueOnError {
-					res.FailedCount++
-					if len(res.Warnings) < 20 {
-						res.Warnings = append(res.Warnings, uErr.Error())
-					}
-					continue
-				}
-				return res, fmt.Errorf("invalid document in JSON array: %w", uErr)
+	// Stream one or more concatenated / newline-delimited JSON objects via json.Decoder
+	dec := json.NewDecoder(br)
+	batch := make([]any, 0, 200)
+	for {
+		var rawItem json.RawMessage
+		if dErr := dec.Decode(&rawItem); dErr != nil {
+			if errors.Is(dErr, io.EOF) {
+				break
 			}
-			batch = append(batch, doc)
-			if len(batch) >= 200 {
-				if fErr := flushBatch(batch); fErr != nil {
-					res.ElapsedMs = time.Since(start).Milliseconds()
-					return res, fErr
+			return res, fmt.Errorf("invalid JSON document: %w", dErr)
+		}
+		var doc bson.M
+		if uErr := bson.UnmarshalExtJSON(rawItem, false, &doc); uErr != nil {
+			if continueOnError {
+				res.FailedCount++
+				if len(res.Warnings) < 20 {
+					res.Warnings = append(res.Warnings, uErr.Error())
 				}
-				batch = batch[:0]
+				continue
 			}
+			return res, fmt.Errorf("invalid JSON document: %w", uErr)
 		}
-		if fErr := flushBatch(batch); fErr != nil {
-			res.ElapsedMs = time.Since(start).Milliseconds()
-			return res, fErr
+		batch = append(batch, doc)
+		if len(batch) >= 200 {
+			if fErr := flushBatch(batch); fErr != nil {
+				res.ElapsedMs = time.Since(start).Milliseconds()
+				return res, fErr
+			}
+			batch = batch[:0]
 		}
-		res.ElapsedMs = time.Since(start).Milliseconds()
-		return res, nil
 	}
-
-	var singleDoc bson.M
-	if uErr := bson.UnmarshalExtJSON([]byte(trimmed), false, &singleDoc); uErr != nil {
-		return res, fmt.Errorf("invalid JSON document: %w", uErr)
-	}
-	if fErr := flushBatch([]any{singleDoc}); fErr != nil {
+	if fErr := flushBatch(batch); fErr != nil {
 		res.ElapsedMs = time.Since(start).Milliseconds()
 		return res, fErr
 	}

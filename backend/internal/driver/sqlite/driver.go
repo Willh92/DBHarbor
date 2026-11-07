@@ -37,6 +37,7 @@ func init() {
 type SQLiteDriver struct {
 	cfg      driver.ConnectionConfig
 	filePath string
+	webMode  bool
 	db       *sql.DB
 }
 
@@ -44,6 +45,10 @@ func NewSQLite(cfg driver.ConnectionConfig) (driver.Driver, error) {
 	fp := strings.TrimSpace(cfg.FilePath)
 	if fp == "" {
 		return nil, errors.New("SQLite database file path cannot be empty")
+	}
+	webMode := cfg.Option("__web_mode", "") == "1"
+	if fp != ":memory:" && strings.HasPrefix(strings.ToLower(fp), "file:") {
+		return nil, errors.New("SQLite URI file paths are not supported; please specify a standard file path or :memory:")
 	}
 	dsn := fp
 	if fp != ":memory:" {
@@ -53,6 +58,9 @@ func NewSQLite(cfg driver.ConnectionConfig) (driver.Driver, error) {
 		}
 		fp = cleanPath
 		dsn = filepath.ToSlash(cleanPath) + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-4000)"
+		if webMode {
+			dsn += "&_pragma=trusted_schema(0)"
+		}
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -63,8 +71,33 @@ func NewSQLite(cfg driver.ConnectionConfig) (driver.Driver, error) {
 	} else {
 		db.SetMaxOpenConns(4)
 		db.SetMaxIdleConns(2)
+		db.SetConnMaxIdleTime(3 * time.Minute)
 	}
-	return &SQLiteDriver{cfg: cfg, filePath: fp, db: db}, nil
+	return &SQLiteDriver{cfg: cfg, filePath: fp, webMode: webMode, db: db}, nil
+}
+
+func validateSQLiteWebSandbox(script string) error {
+	for _, stmt := range sqlbase.SplitStatements(script) {
+		trimmed := strings.TrimSpace(sqlbase.StripLeadingSQLComments(stmt))
+		if trimmed == "" {
+			continue
+		}
+		upper := strings.ToUpper(trimmed)
+		firstWord := upper
+		for i, r := range upper {
+			if r == ' ' || r == '\t' || r == '\r' || r == '\n' || r == '(' {
+				firstWord = upper[:i]
+				break
+			}
+		}
+		if firstWord == "ATTACH" || firstWord == "DETACH" {
+			return errors.New("ATTACH / DETACH DATABASE is disabled in Web Server mode for host sandbox isolation")
+		}
+		if strings.Contains(upper, "LOAD_EXTENSION") {
+			return errors.New("load_extension is disabled in Web Server mode")
+		}
+	}
+	return nil
 }
 
 func (d *SQLiteDriver) Meta() driver.DriverMeta {
@@ -138,11 +171,11 @@ func (d *SQLiteDriver) ListObjects(ctx context.Context, database, _ string) (dri
 	}
 	_ = rows.Close()
 
-	// Skip per-table SELECT COUNT(*) full B-Tree scans when the database has many tables (> 60)
-	// or when the SQLite file exceeds 64 MB, keeping sidebar metadata loading instantaneous.
-	countRows := len(names) <= 60
+	// Skip per-table SELECT COUNT(*) full B-Tree scans unless the SQLite database is small (<= 4 MB & <= 20 tables),
+	// keeping sidebar metadata loading instantaneous on large database files.
+	countRows := len(names) <= 20
 	if countRows && d.filePath != ":memory:" {
-		if st, statErr := os.Stat(d.filePath); statErr == nil && st.Size() > 64*1024*1024 {
+		if st, statErr := os.Stat(d.filePath); statErr == nil && st.Size() > 4*1024*1024 {
 			countRows = false
 		}
 	}
@@ -432,6 +465,11 @@ func (d *SQLiteDriver) ManageObject(ctx context.Context, req driver.ObjectAction
 }
 
 func (d *SQLiteDriver) ExecuteSQL(ctx context.Context, _, query string, maxRows int) ([]driver.QueryResult, error) {
+	if d.webMode {
+		if err := validateSQLiteWebSandbox(query); err != nil {
+			return nil, err
+		}
+	}
 	return sqlbase.ExecuteMultiSQL(ctx, d.db, query, maxRows)
 }
 
@@ -476,6 +514,11 @@ func (d *SQLiteDriver) StreamExport(ctx context.Context, req driver.ExportReques
 		return sqlbase.StreamMultiTableExport(ctx, d.db, sqlbase.DialectSQLite, req, items, w)
 	}
 
+	if d.webMode && strings.TrimSpace(req.CustomSQL) != "" {
+		if err := validateSQLiteWebSandbox(req.CustomSQL); err != nil {
+			return err
+		}
+	}
 	ddl := ""
 	if req.IncludeDDL && req.Table != "" {
 		_ = d.db.QueryRowContext(ctx, `SELECT COALESCE(sql, '') FROM sqlite_master WHERE name = ?`, req.Table).Scan(&ddl)
@@ -484,6 +527,16 @@ func (d *SQLiteDriver) StreamExport(ctx context.Context, req driver.ExportReques
 }
 
 func (d *SQLiteDriver) BatchImport(ctx context.Context, req driver.ImportRequest) (driver.ImportResult, error) {
+	if d.webMode && (req.Format == "" || strings.EqualFold(req.Format, "sql")) {
+		raw, err := io.ReadAll(io.LimitReader(req.Reader, 64<<20))
+		if err != nil {
+			return driver.ImportResult{}, err
+		}
+		if err := validateSQLiteWebSandbox(string(raw)); err != nil {
+			return driver.ImportResult{}, err
+		}
+		req.Reader = strings.NewReader(string(raw))
+	}
 	return sqlbase.BatchImport(ctx, d.db, sqlbase.DialectSQLite, req)
 }
 

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Table } from 'antd';
 import type { TableProps } from 'antd';
 import type { ColumnType } from 'antd/es/table';
+import { useResponsive } from '../../hooks/useResponsive';
 import { extractSelectionAsTsv } from '../../utils/tableClipboard';
 
 export interface ResizableColumnType<RecordType = any> extends ColumnType<RecordType> {
@@ -93,6 +94,7 @@ const ResizableHeaderCell: React.FC<HeaderCellProps> = ({
   const thRef = useRef<HTMLTableCellElement | null>(null);
   const resizerRef = useRef<HTMLSpanElement | null>(null);
   const isDraggingRef = useRef(false);
+  const lastTapTimeRef = useRef<number>(0);
 
   if (!resizable || !onResizeWidth) {
     return (
@@ -103,11 +105,12 @@ const ResizableHeaderCell: React.FC<HeaderCellProps> = ({
   }
 
   const handlePointerDown = (e: React.PointerEvent<HTMLSpanElement>) => {
-    if (e.button !== 0) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
 
     const pointerId = e.pointerId;
+    const pointerType = e.pointerType;
     const resizerEl = e.currentTarget;
     try {
       resizerEl.setPointerCapture(pointerId);
@@ -154,7 +157,14 @@ const ResizableHeaderCell: React.FC<HeaderCellProps> = ({
     document.body.style.cursor = 'col-resize';
 
     let latestWidth = startWidth;
+    let hasMoved = false;
     let rafId = 0;
+
+    const preventTouchScroll = (touchEvent: TouchEvent) => {
+      if (touchEvent.cancelable) {
+        touchEvent.preventDefault();
+      }
+    };
 
     const applyColWidth = () => {
       rafId = 0;
@@ -174,19 +184,26 @@ const ResizableHeaderCell: React.FC<HeaderCellProps> = ({
     };
 
     const onPointerMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
       const delta = moveEvent.clientX - startX;
+      if (Math.abs(delta) >= 3) {
+        hasMoved = true;
+      }
       latestWidth = Math.max(minWidth, Math.min(1600, Math.round(startWidth + delta)));
       if (!rafId) {
         rafId = window.requestAnimationFrame(applyColWidth);
       }
     };
 
-    const onPointerUp = () => {
+    const onPointerUp = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId !== pointerId) return;
       if (rafId) {
         window.cancelAnimationFrame(rafId);
         rafId = 0;
       }
-      applyColWidth();
+      if (hasMoved) {
+        applyColWidth();
+      }
       try {
         if (resizerEl.hasPointerCapture(pointerId)) {
           resizerEl.releasePointerCapture(pointerId);
@@ -202,12 +219,37 @@ const ResizableHeaderCell: React.FC<HeaderCellProps> = ({
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('pointercancel', onPointerUp);
-      onResizeWidth(latestWidth);
+      window.removeEventListener('touchmove', preventTouchScroll);
+
+      if (hasMoved) {
+        // Block any trailing click on parent sortable <th> right after finishing a drag
+        const suppressClick = (clickEvent: MouseEvent) => {
+          clickEvent.stopPropagation();
+          clickEvent.preventDefault();
+          window.removeEventListener('click', suppressClick, true);
+        };
+        window.addEventListener('click', suppressClick, true);
+        window.setTimeout(() => {
+          window.removeEventListener('click', suppressClick, true);
+        }, 80);
+        onResizeWidth(latestWidth);
+      } else if (pointerType !== 'mouse' && upEvent.type === 'pointerup') {
+        const now = Date.now();
+        if (now - lastTapTimeRef.current < 320) {
+          lastTapTimeRef.current = 0;
+          onAutoExpandWidth?.();
+        } else {
+          lastTapTimeRef.current = now;
+        }
+      }
     };
 
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
     window.addEventListener('pointercancel', onPointerUp);
+    if (pointerType !== 'mouse') {
+      window.addEventListener('touchmove', preventTouchScroll, { passive: false });
+    }
   };
 
   // Preserve CSS `position: sticky` on fixed-left / fixed-right columns so `left` / `right` offsets never shift
@@ -216,9 +258,10 @@ const ResizableHeaderCell: React.FC<HeaderCellProps> = ({
   const cellStyle: React.CSSProperties = isStickyCell
     ? { ...style }
     : { ...style, position: style?.position || 'relative' };
+  const mergedThClassName = [restProps.className, 'dbharbor-resizable-th'].filter(Boolean).join(' ');
 
   return (
-    <th ref={thRef} style={cellStyle} {...restProps}>
+    <th ref={thRef} {...restProps} className={mergedThClassName} style={cellStyle}>
       {children}
       <span
         ref={resizerRef}
@@ -250,21 +293,54 @@ export function ResizableTable<RecordType extends object = any>({
   onFallbackCopy,
   ...restProps
 }: ResizableTableProps<RecordType>) {
+  const { isMobile } = useResponsive();
+  const [isCoarsePointer, setIsCoarsePointer] = useState<boolean>(() =>
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(pointer: coarse)').matches
+      : false
+  );
+  const [hasFinePointer, setHasFinePointer] = useState<boolean>(() =>
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(any-pointer: fine)').matches
+      : true
+  );
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [containerWidth, setContainerWidth] = useState<number>(0);
   const [customWidths, setCustomWidths] = useState<Record<string, number>>({});
   const currentWidthsRef = useRef<Record<string, number>>({});
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const coarseMq = window.matchMedia('(pointer: coarse)');
+    const fineMq = window.matchMedia('(any-pointer: fine)');
+    const onChange = () => {
+      setIsCoarsePointer(coarseMq.matches);
+      setHasFinePointer(fineMq.matches);
+    };
+    onChange();
+    coarseMq.addEventListener?.('change', onChange);
+    fineMq.addEventListener?.('change', onChange);
+    return () => {
+      coarseMq.removeEventListener?.('change', onChange);
+      fineMq.removeEventListener?.('change', onChange);
+    };
+  }, []);
+
+  const isTouchDevice = isMobile || (isCoarsePointer && !hasFinePointer);
+  const hasVerticalScroll = Boolean(scroll?.y || (fullHeightBody && fullHeightBody > 0));
+  const useTouchStickyHeader = isTouchDevice && hasVerticalScroll;
 
   // Measure available container width so extra horizontal space expands columns cleanly,
   // pausing React state updates while splitters or columns are actively dragging.
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
+    const widthThreshold = isTouchDevice ? 6 : 2;
     const measure = () => {
       if ((window as any).__DBHARBOR_LAYOUT_DRAGGING__) return;
       const w = Math.floor(el.clientWidth || 0);
       if (w <= 0) return;
-      setContainerWidth((prev) => (Math.abs(prev - w) >= 2 ? w : prev));
+      setContainerWidth((prev) => (Math.abs(prev - w) >= widthThreshold ? w : prev));
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -274,7 +350,7 @@ export function ResizableTable<RecordType extends object = any>({
       ro.disconnect();
       window.removeEventListener('dbharbor-layout-settled', measure);
     };
-  }, []);
+  }, [isTouchDevice]);
 
   const colSignature = useMemo(
     () =>
@@ -299,8 +375,18 @@ export function ResizableTable<RecordType extends object = any>({
     });
   }, []);
 
-  const selectionColWidth = restProps.rowSelection
-    ? Number((restProps.rowSelection as any)?.columnWidth) || 40
+  const defaultSelectionColWidth = isMobile ? 38 : 40;
+  const normalizedRowSelection = useMemo(() => {
+    if (!restProps.rowSelection) return undefined;
+    const explicitWidth = Number((restProps.rowSelection as any)?.columnWidth);
+    return {
+      ...restProps.rowSelection,
+      columnWidth: explicitWidth > 0 ? explicitWidth : defaultSelectionColWidth,
+    };
+  }, [restProps.rowSelection, defaultSelectionColWidth]);
+
+  const selectionColWidth = normalizedRowSelection
+    ? Number(normalizedRowSelection.columnWidth) || defaultSelectionColWidth
     : 0;
 
   const { mergedColumns, totalWidth } = useMemo(() => {
@@ -311,12 +397,14 @@ export function ResizableTable<RecordType extends object = any>({
       const rawBase = typeof col.width === 'number' ? col.width : defaultColumnWidth;
       const titleNode = typeof col.title === 'function' ? '' : col.title;
       const headerContentW = estimateHeaderContentWidth(titleNode);
+      const canResize = col.resizable !== false && !col.fixed;
       const sorterExtra = col.sorter ? 26 : 0;
-      const headerFloor = headerContentW > 0 ? Math.ceil(headerContentW + sorterExtra + 28) : 0;
+      const touchResizerExtra = isTouchDevice && canResize ? 10 : 0;
+      const headerFloor =
+        headerContentW > 0 ? Math.ceil(headerContentW + sorterExtra + touchResizerExtra + 28) : 0;
       const smartBase = col.fixed ? rawBase : Math.max(rawBase, headerFloor);
       const hasCustom = customWidths[colKey] !== undefined;
       const width = hasCustom ? customWidths[colKey] : smartBase;
-      const canResize = col.resizable !== false && !col.fixed;
       const isFlexCandidate = canResize && !hasCustom;
       return {
         col,
@@ -388,6 +476,7 @@ export function ResizableTable<RecordType extends object = any>({
     customWidths,
     defaultColumnWidth,
     handleResize,
+    isTouchDevice,
     minColumnWidth,
     containerWidth,
     selectionColWidth,
@@ -408,11 +497,16 @@ export function ResizableTable<RecordType extends object = any>({
   const mergedScroll = useMemo(() => {
     const fullW = totalWidth + selectionColWidth;
     const minX = typeof scroll?.x === 'number' ? Math.max(scroll.x, fullW) : Math.max(fullW, 1);
+    const resolvedX = scroll?.x === 'max-content' ? Math.max(fullW, 1) : minX;
+    if (useTouchStickyHeader) {
+      // Omit scroll.y so rc-table renders a single unified <table> with native GPU CSS sticky <thead>
+      return { x: resolvedX };
+    }
     return {
       ...scroll,
-      x: scroll?.x === 'max-content' ? Math.max(fullW, 1) : minX,
+      x: resolvedX,
     };
-  }, [scroll, totalWidth, selectionColWidth]);
+  }, [scroll, totalWidth, selectionColWidth, useTouchStickyHeader]);
 
   const handleTableCopy = useCallback(
     (e: React.ClipboardEvent<HTMLDivElement>) => {
@@ -430,16 +524,28 @@ export function ResizableTable<RecordType extends object = any>({
   const wrapperClasses = [
     'dbharbor-resizable-table-wrap',
     fullHeightBody && fullHeightBody > 0 ? 'dbharbor-full-height-grid' : '',
+    useTouchStickyHeader ? 'dbharbor-touch-sticky-grid' : '',
+    isMobile ? 'dbharbor-mobile-table' : '',
     wrapClassName || '',
   ]
     .filter(Boolean)
     .join(' ');
+
+  const stickyMaxHeightCss =
+    useTouchStickyHeader && !fullHeightBody && scroll?.y !== undefined
+      ? typeof scroll.y === 'number'
+        ? `${scroll.y + 38}px`
+        : String(scroll.y)
+      : undefined;
 
   const wrapperStyle: React.CSSProperties = {
     width: '100%',
     minWidth: 0,
     ...(fullHeightBody && fullHeightBody > 0
       ? ({ '--dbharbor-grid-body-h': `${fullHeightBody}px` } as React.CSSProperties)
+      : {}),
+    ...(stickyMaxHeightCss
+      ? ({ '--dbharbor-sticky-max-h': stickyMaxHeightCss } as React.CSSProperties)
       : {}),
   };
 
@@ -452,6 +558,7 @@ export function ResizableTable<RecordType extends object = any>({
     >
       <Table<RecordType>
         {...restProps}
+        rowSelection={normalizedRowSelection}
         tableLayout="fixed"
         components={mergedComponents}
         columns={mergedColumns}

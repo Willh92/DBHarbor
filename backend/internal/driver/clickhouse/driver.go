@@ -40,7 +40,14 @@ func init() {
 			{Key: "username", Label: "Username", Type: "text", Target: "root", DefaultValue: "default"},
 			{Key: "password", Label: "Password", Type: "password", Target: "root"},
 			{Key: "database", Label: "Default Database", Type: "text", Target: "root", DefaultValue: "default"},
-			{Key: "tls", Label: "Enable TLS Encryption", Type: "switch", Target: "options", DefaultValue: "false"},
+			{
+				Key: "tls", Label: "Enable TLS Encryption", Type: "select", Target: "options", DefaultValue: "false",
+				SelectOptions: []driver.SelectOption{
+					{Label: "Disabled", Value: "false"},
+					{Label: "TLS (Verify Server Certificate)", Value: "true"},
+					{Label: "TLS (Skip Certificate Verification)", Value: "skip-verify"},
+				},
+			},
 		},
 	}, New)
 }
@@ -81,14 +88,18 @@ func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
 		DialTimeout: 8 * time.Second,
 		Compression: &ch.Compression{Method: ch.CompressionLZ4},
 	}
-	if cfg.Option("tls", "false") == "true" {
-		opts.TLS = &tls.Config{InsecureSkipVerify: true}
+	switch cfg.Option("tls", "false") {
+	case "true":
+		opts.TLS = &tls.Config{ServerName: cfg.Host, MinVersion: tls.VersionTLS12}
+	case "skip-verify":
+		opts.TLS = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
 	}
 
 	db := ch.OpenDB(opts)
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(15 * time.Minute)
+	db.SetConnMaxIdleTime(3 * time.Minute)
 	return &Driver{cfg: cfg, db: db}, nil
 }
 
@@ -361,7 +372,21 @@ func (d *Driver) ManageObject(ctx context.Context, req driver.ObjectActionReques
 
 func (d *Driver) ExecuteSQL(ctx context.Context, database, query string, maxRows int) ([]driver.QueryResult, error) {
 	if database != "" {
-		_, _ = d.db.ExecContext(ctx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectClickHouse, database))
+		conn, cErr := d.db.Conn(ctx)
+		if cErr == nil {
+			defer func() {
+				defaultDB := d.cfg.Database
+				if defaultDB == "" {
+					defaultDB = "default"
+				}
+				if defaultDB != database {
+					_, _ = conn.ExecContext(context.Background(), "USE "+sqlbase.QuoteIdent(sqlbase.DialectClickHouse, defaultDB))
+				}
+				_ = conn.Close()
+			}()
+			_, _ = conn.ExecContext(ctx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectClickHouse, database))
+			return sqlbase.ExecuteMultiSQLConn(ctx, conn, query, maxRows)
+		}
 	}
 	return sqlbase.ExecuteMultiSQL(ctx, d.db, query, maxRows)
 }
@@ -473,7 +498,7 @@ func (d *Driver) ListPartitions(ctx context.Context, database, table string) ([]
 
 func (d *Driver) ManagePartition(ctx context.Context, database, table, partitionID, action string) error {
 	tbl := sqlbase.QualifyTable(sqlbase.DialectClickHouse, database, "", table)
-	safeID := sqlbase.FormatLiteral(partitionID)
+	safeID := sqlbase.FormatLiteralForDialect(sqlbase.DialectClickHouse, partitionID)
 	switch strings.ToUpper(action) {
 	case "DROP":
 		_, err := d.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s DROP PARTITION ID %s", tbl, safeID))

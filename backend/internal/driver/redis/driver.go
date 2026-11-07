@@ -31,7 +31,14 @@ func init() {
 			{Key: "username", Label: "ACL Username (Redis 6+, optional)", Type: "text", Target: "root"},
 			{Key: "password", Label: "Password", Type: "password", Target: "root"},
 			{Key: "database", Label: "Default DB Index (0-15)", Type: "number", Target: "root", DefaultValue: "0"},
-			{Key: "tls", Label: "Enable TLS", Type: "switch", Target: "options", DefaultValue: "false"},
+			{
+				Key: "tls", Label: "Enable TLS", Type: "select", Target: "options", DefaultValue: "false",
+				SelectOptions: []driver.SelectOption{
+					{Label: "Disabled", Value: "false"},
+					{Label: "TLS (Verify Server Certificate)", Value: "true"},
+					{Label: "TLS (Skip Certificate Verification)", Value: "skip-verify"},
+				},
+			},
 		},
 	}, New)
 }
@@ -52,6 +59,8 @@ func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
 func (d *Driver) clientForDB(dbIdx int) *goredis.Client {
 	if dbIdx < 0 {
 		dbIdx = 0
+	} else if dbIdx > 15 {
+		dbIdx = 15
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -63,14 +72,20 @@ func (d *Driver) clientForDB(dbIdx int) *goredis.Client {
 		port = 6379
 	}
 	opts := &goredis.Options{
-		Addr:        fmt.Sprintf("%s:%d", d.cfg.Host, port),
-		Username:    d.cfg.Username,
-		Password:    d.cfg.Password,
-		DB:          dbIdx,
-		DialTimeout: 6 * time.Second,
+		Addr:            fmt.Sprintf("%s:%d", d.cfg.Host, port),
+		Username:        d.cfg.Username,
+		Password:        d.cfg.Password,
+		DB:              dbIdx,
+		DialTimeout:     6 * time.Second,
+		PoolSize:        4,
+		MaxIdleConns:    2,
+		ConnMaxIdleTime: 3 * time.Minute,
 	}
-	if d.cfg.Option("tls", "false") == "true" {
-		opts.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	switch d.cfg.Option("tls", "false") {
+	case "true":
+		opts.TLSConfig = &tls.Config{ServerName: d.cfg.Host, MinVersion: tls.VersionTLS12}
+	case "skip-verify":
+		opts.TLSConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
 	}
 	c := goredis.NewClient(opts)
 	d.clients[dbIdx] = c
@@ -219,26 +234,49 @@ func (d *Driver) GetKey(ctx context.Context, dbIndex int, key string) (driver.KV
 
 	switch kt {
 	case "string":
-		val, err := c.Get(ctx, key).Result()
+		strLen, _ := c.StrLen(ctx, key).Result()
+		val, err := c.GetRange(ctx, key, 0, (1<<20)-1).Result()
 		if err != nil {
 			return detail, err
 		}
 		detail.StringValue = val
-		detail.Length = int64(len(val))
+		if strLen > int64(len(val)) {
+			detail.Length = strLen
+		} else {
+			detail.Length = int64(len(val))
+		}
 	case "hash":
-		m, err := c.HGetAll(ctx, key).Result()
-		if err != nil {
-			return detail, err
+		hlen, _ := c.HLen(ctx, key).Result()
+		detail.Length = hlen
+		if hlen <= 500 {
+			m, err := c.HGetAll(ctx, key).Result()
+			if err != nil {
+				return detail, err
+			}
+			fields := make([]string, 0, len(m))
+			for f := range m {
+				fields = append(fields, f)
+			}
+			sort.Strings(fields)
+			for _, f := range fields {
+				detail.Items = append(detail.Items, driver.KVCollectionItem{Field: f, Value: m[f]})
+			}
+		} else {
+			var cursor uint64
+			for len(detail.Items) < 500 {
+				kvs, next, err := c.HScan(ctx, key, cursor, "*", 200).Result()
+				if err != nil {
+					return detail, err
+				}
+				for i := 0; i+1 < len(kvs) && len(detail.Items) < 500; i += 2 {
+					detail.Items = append(detail.Items, driver.KVCollectionItem{Field: kvs[i], Value: kvs[i+1]})
+				}
+				cursor = next
+				if cursor == 0 {
+					break
+				}
+			}
 		}
-		fields := make([]string, 0, len(m))
-		for f := range m {
-			fields = append(fields, f)
-		}
-		sort.Strings(fields)
-		for _, f := range fields {
-			detail.Items = append(detail.Items, driver.KVCollectionItem{Field: f, Value: m[f]})
-		}
-		detail.Length = int64(len(fields))
 	case "list":
 		vals, err := c.LRange(ctx, key, 0, 499).Result()
 		if err != nil {
@@ -249,14 +287,35 @@ func (d *Driver) GetKey(ctx context.Context, dbIndex int, key string) (driver.KV
 			detail.Items = append(detail.Items, driver.KVCollectionItem{Index: idx, Value: v})
 		}
 	case "set":
-		vals, err := c.SMembers(ctx, key).Result()
-		if err != nil {
-			return detail, err
-		}
-		sort.Strings(vals)
-		detail.Length = int64(len(vals))
-		for _, v := range vals {
-			detail.Items = append(detail.Items, driver.KVCollectionItem{Value: v})
+		scard, _ := c.SCard(ctx, key).Result()
+		detail.Length = scard
+		if scard <= 500 {
+			vals, err := c.SMembers(ctx, key).Result()
+			if err != nil {
+				return detail, err
+			}
+			sort.Strings(vals)
+			for _, v := range vals {
+				detail.Items = append(detail.Items, driver.KVCollectionItem{Value: v})
+			}
+		} else {
+			var cursor uint64
+			for len(detail.Items) < 500 {
+				vals, next, err := c.SScan(ctx, key, cursor, "*", 200).Result()
+				if err != nil {
+					return detail, err
+				}
+				for _, v := range vals {
+					if len(detail.Items) >= 500 {
+						break
+					}
+					detail.Items = append(detail.Items, driver.KVCollectionItem{Value: v})
+				}
+				cursor = next
+				if cursor == 0 {
+					break
+				}
+			}
 		}
 	case "zset":
 		zs, err := c.ZRangeWithScores(ctx, key, 0, 499).Result()
@@ -472,7 +531,7 @@ var readOnlyRedisCommands = map[string]struct{}{
 	"ZRANGE": {}, "ZREVRANGE": {}, "ZRANGEBYSCORE": {}, "ZREVRANGEBYSCORE": {}, "ZRANGEBYLEX": {}, "ZCARD": {}, "ZCOUNT": {}, "ZSCORE": {}, "ZMSCORE": {}, "ZRANK": {}, "ZREVRANK": {}, "ZSCAN": {}, "ZRANDMEMBER": {},
 	"XLEN": {}, "XRANGE": {}, "XREVRANGE": {}, "XINFO": {},
 	"PFCOUNT": {}, "GEOPOS": {}, "GEODIST": {}, "GEOHASH": {}, "GEOSEARCH": {},
-	"SCAN": {}, "TYPE": {}, "TTL": {}, "PTTL": {}, "EXISTS": {}, "RANDOMKEY": {}, "DBSIZE": {}, "KEYS": {}, "DUMP": {}, "OBJECT": {}, "MEMORY": {},
+	"SCAN": {}, "TYPE": {}, "TTL": {}, "PTTL": {}, "EXISTS": {}, "RANDOMKEY": {}, "DBSIZE": {}, "DUMP": {}, "OBJECT": {}, "MEMORY": {},
 	"PING": {}, "ECHO": {}, "TIME": {}, "INFO": {}, "ROLE": {}, "LOLWUT": {}, "COMMAND": {}, "PUBSUB": {},
 }
 

@@ -23,10 +23,25 @@ type HandlerFunc func(*Context)
 
 // Context wraps http.ResponseWriter and *http.Request without third-party router bloat.
 type Context struct {
-	Writer    http.ResponseWriter
-	Request   *http.Request
-	Claims    *auth.Claims
-	Principal store.UserPrincipal
+	Writer         http.ResponseWriter
+	Request        *http.Request
+	Claims         *auth.Claims
+	Principal      store.UserPrincipal
+	TrustedProxies []*net.IPNet
+	cleanups       []func()
+}
+
+func (c *Context) Defer(fn func()) {
+	if fn != nil {
+		c.cleanups = append(c.cleanups, fn)
+	}
+}
+
+func (c *Context) RunCleanups() {
+	for i := len(c.cleanups) - 1; i >= 0; i-- {
+		c.cleanups[i]()
+	}
+	c.cleanups = nil
 }
 
 func (c *Context) Param(name string) string {
@@ -56,7 +71,17 @@ func (c *Context) ShouldBindJSON(dst any) error {
 	if c.Request.Body == nil {
 		return errors.New("empty request body")
 	}
-	dec := json.NewDecoder(io.LimitReader(c.Request.Body, 32<<20))
+	maxBytes := int64(4 << 20)
+	if c.Request.URL != nil {
+		p := c.Request.URL.Path
+		if strings.HasPrefix(p, "/api/auth/") {
+			maxBytes = 512 << 10
+		} else if strings.Contains(p, "/import") {
+			maxBytes = 16 << 20
+		}
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
+	dec := json.NewDecoder(c.Request.Body)
 	return dec.Decode(dst)
 }
 
@@ -146,26 +171,45 @@ func (c *Context) SessionID() string {
 }
 
 func (c *Context) ClientIP() string {
-	if xff := strings.TrimSpace(c.Request.Header.Get("X-Forwarded-For")); xff != "" {
-		if idx := strings.IndexByte(xff, ','); idx >= 0 {
-			xff = strings.TrimSpace(xff[:idx])
-		}
-		if xff != "" {
-			return xff
-		}
-	}
-	if xrip := strings.TrimSpace(c.Request.Header.Get("X-Real-IP")); xrip != "" {
-		return xrip
-	}
 	remote := strings.TrimSpace(c.Request.RemoteAddr)
-	if remote == "" || remote == "@" || strings.HasPrefix(remote, "/") || strings.HasSuffix(remote, ".sock") {
-		return "unix-local"
+	isUnix := remote == "" || remote == "@" || strings.HasPrefix(remote, "/") || strings.HasSuffix(remote, ".sock")
+	peerHost := remote
+	if isUnix {
+		peerHost = "unix-local"
+	} else if host, _, err := net.SplitHostPort(remote); err == nil && host != "" {
+		peerHost = host
 	}
-	host, _, err := net.SplitHostPort(remote)
-	if err == nil && host != "" {
-		return host
+
+	trustProxyHeaders := isUnix
+	if !trustProxyHeaders {
+		if peerIP := net.ParseIP(peerHost); peerIP != nil {
+			if peerIP.IsLoopback() {
+				trustProxyHeaders = true
+			} else {
+				for _, ipNet := range c.TrustedProxies {
+					if ipNet != nil && ipNet.Contains(peerIP) {
+						trustProxyHeaders = true
+						break
+					}
+				}
+			}
+		}
 	}
-	return remote
+
+	if trustProxyHeaders {
+		if xff := strings.TrimSpace(c.Request.Header.Get("X-Forwarded-For")); xff != "" {
+			if idx := strings.IndexByte(xff, ','); idx >= 0 {
+				xff = strings.TrimSpace(xff[:idx])
+			}
+			if xff != "" {
+				return xff
+			}
+		}
+		if xrip := strings.TrimSpace(c.Request.Header.Get("X-Real-IP")); xrip != "" {
+			return xrip
+		}
+	}
+	return peerHost
 }
 
 // --- Pooled Gzip Response Writer for JSON API payloads ---

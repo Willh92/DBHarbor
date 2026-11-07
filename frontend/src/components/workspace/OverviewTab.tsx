@@ -399,16 +399,130 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
       {
         title: t('Quick Actions'),
         key: 'actions',
-        width: 290,
+        width: isMobile ? 210 : 290,
         render: (_: any, r: ObjectItem) => {
           const isDataObj = r.type === 'TABLE' || r.type === 'VIEW';
+          const btnStyle = isMobile ? { minHeight: 32, minWidth: 32 } : undefined;
+          const writeTableItems: any[] =
+            canWrite && r.type === 'TABLE'
+              ? [
+                  {
+                    key: 'clone',
+                    icon: <CopyOutlined />,
+                    label: t('Clone or rename table'),
+                    onClick: () => {
+                      setCloneTarget(r);
+                      cloneForm.setFieldsValue({
+                        mode: 'COPY_DATA',
+                        targetName: `${r.name}_copy`,
+                      });
+                    },
+                  },
+                  {
+                    key: 'analyze',
+                    icon: <ToolOutlined />,
+                    label: t('Analyze Table'),
+                    onClick: () => handleAction(r, 'ANALYZE'),
+                  },
+                  {
+                    key: 'optimize',
+                    icon: <ToolOutlined />,
+                    label: t('Optimize / Vacuum Table'),
+                    onClick: () => handleAction(r, 'OPTIMIZE'),
+                  },
+                  {
+                    key: 'comment',
+                    icon: <EditOutlined />,
+                    label: t('Edit Table Comment'),
+                    onClick: () => {
+                      setCommentTarget(r);
+                      setCommentText(r.comment || '');
+                    },
+                  },
+                ]
+              : [];
+          const mobileTopDataItems: any[] =
+            isMobile && isDataObj
+              ? [
+                  {
+                    key: 'sql',
+                    icon: <CodeOutlined />,
+                    label: t('Open SQL Console for this table'),
+                    onClick: () =>
+                      openTab({
+                        key: `sql:${tab.connectionId}:${tab.database}:${r.name}`,
+                        title: `SQL - ${r.name}`,
+                        kind: 'sql_console',
+                        connectionId: tab.connectionId,
+                        connName: tab.connName,
+                        dbType: tab.dbType,
+                        database: tab.database,
+                        schema: tab.schema,
+                        table: r.name,
+                        initialSQL: `SELECT * FROM ${r.name} LIMIT 100;`,
+                      }),
+                  },
+                  {
+                    key: 'export',
+                    icon: <DownloadOutlined />,
+                    label: t('Export table'),
+                    onClick: () => onOpenTransfer('export', r.name),
+                  },
+                ]
+              : [];
+          const mobileDangerItems: any[] =
+            isMobile && canWrite
+              ? [
+                  ...(r.type === 'TABLE'
+                    ? [
+                        {
+                          key: 'truncate',
+                          danger: true,
+                          icon: <ClearOutlined />,
+                          label: t('Truncate table'),
+                          onClick: () => {
+                            Modal.confirm({
+                              title: t('Truncate all rows in table {name}?', { name: r.name }),
+                              okType: 'danger',
+                              onOk: () => handleAction(r, 'TRUNCATE'),
+                            });
+                          },
+                        },
+                      ]
+                    : []),
+                  {
+                    key: 'drop',
+                    danger: true,
+                    icon: <DeleteOutlined />,
+                    label: t('Drop object'),
+                    onClick: () => {
+                      Modal.confirm({
+                        title: t('Danger: Permanently drop {name}?', { name: r.name }),
+                        okType: 'danger',
+                        onOk: () => handleAction(r, 'DROP'),
+                      });
+                    },
+                  },
+                ]
+              : [];
+          const moreMenuItems: any[] = [
+            ...mobileTopDataItems,
+            ...(mobileTopDataItems.length > 0 && writeTableItems.length > 0 ? [{ type: 'divider' as const }] : []),
+            ...writeTableItems,
+            ...(mobileDangerItems.length > 0 && (mobileTopDataItems.length > 0 || writeTableItems.length > 0)
+              ? [{ type: 'divider' as const }]
+              : []),
+            ...mobileDangerItems,
+          ];
+
           return (
-            <Space size={2} style={{ whiteSpace: 'nowrap' }}>
+            <Space size={isMobile ? 4 : 2} style={{ whiteSpace: 'nowrap' }}>
               {isDataObj ? (
                 <>
                   <Button
                     size="small"
                     type="link"
+                    style={btnStyle}
                     icon={<TableOutlined />}
                     onClick={() =>
                       openTab({
@@ -430,6 +544,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                     <Button
                       size="small"
                       type="link"
+                      style={btnStyle}
                       icon={<EditOutlined />}
                       onClick={() =>
                         openTab({
@@ -448,44 +563,49 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                       {t('Structure')}
                     </Button>
                   ) : (
-                    <Button size="small" type="link" icon={<CodeOutlined />} onClick={() => openEditView(r)}>
+                    <Button size="small" type="link" style={btnStyle} icon={<CodeOutlined />} onClick={() => openEditView(r)}>
                       {canWrite ? t('Edit View SQL') : t('Inspect DDL')}
                     </Button>
                   )}
-                  <Tooltip title={t('Open SQL Console for this table')}>
-                    <Button
-                      size="small"
-                      type="text"
-                      icon={<CodeOutlined />}
-                      onClick={() =>
-                        openTab({
-                          key: `sql:${tab.connectionId}:${tab.database}:${r.name}`,
-                          title: `SQL - ${r.name}`,
-                          kind: 'sql_console',
-                          connectionId: tab.connectionId,
-                          connName: tab.connName,
-                          dbType: tab.dbType,
-                          database: tab.database,
-                          schema: tab.schema,
-                          table: r.name,
-                          initialSQL: `SELECT * FROM ${r.name} LIMIT 100;`,
-                        })
-                      }
-                    />
-                  </Tooltip>
-                  <Tooltip title={t('Export table')}>
-                    <Button
-                      size="small"
-                      type="text"
-                      icon={<DownloadOutlined />}
-                      onClick={() => onOpenTransfer('export', r.name)}
-                    />
-                  </Tooltip>
+                  {!isMobile && (
+                    <Tooltip title={t('Open SQL Console for this table')}>
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<CodeOutlined />}
+                        onClick={() =>
+                          openTab({
+                            key: `sql:${tab.connectionId}:${tab.database}:${r.name}`,
+                            title: `SQL - ${r.name}`,
+                            kind: 'sql_console',
+                            connectionId: tab.connectionId,
+                            connName: tab.connName,
+                            dbType: tab.dbType,
+                            database: tab.database,
+                            schema: tab.schema,
+                            table: r.name,
+                            initialSQL: `SELECT * FROM ${r.name} LIMIT 100;`,
+                          })
+                        }
+                      />
+                    </Tooltip>
+                  )}
+                  {!isMobile && (
+                    <Tooltip title={t('Export table')}>
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<DownloadOutlined />}
+                        onClick={() => onOpenTransfer('export', r.name)}
+                      />
+                    </Tooltip>
+                  )}
                 </>
               ) : (
                 <Button
                   size="small"
                   type="link"
+                  style={btnStyle}
                   icon={<EditOutlined />}
                   onClick={() => openRoutineOrTrigger(r)}
                 >
@@ -493,63 +613,38 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                 </Button>
               )}
 
-              {canWrite && r.type === 'TABLE' && (
-                <>
-                  <Tooltip title={t('Clone or rename table')}>
-                    <Button
-                      size="small"
-                      type="text"
-                      icon={<CopyOutlined />}
-                      onClick={() => {
-                        setCloneTarget(r);
-                        cloneForm.setFieldsValue({
-                          mode: 'COPY_DATA',
-                          targetName: `${r.name}_copy`,
-                        });
-                      }}
-                    />
-                  </Tooltip>
-                  <Dropdown
-                    trigger={['click']}
-                    menu={{
-                      items: [
-                        {
-                          key: 'analyze',
-                          icon: <ToolOutlined />,
-                          label: t('Analyze Table'),
-                          onClick: () => handleAction(r, 'ANALYZE'),
-                        },
-                        {
-                          key: 'optimize',
-                          icon: <ToolOutlined />,
-                          label: t('Optimize / Vacuum Table'),
-                          onClick: () => handleAction(r, 'OPTIMIZE'),
-                        },
-                        {
-                          key: 'comment',
-                          icon: <EditOutlined />,
-                          label: t('Edit Table Comment'),
-                          onClick: () => {
-                            setCommentTarget(r);
-                            setCommentText(r.comment || '');
-                          },
-                        },
-                      ],
+              {!isMobile && canWrite && r.type === 'TABLE' && (
+                <Tooltip title={t('Clone or rename table')}>
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<CopyOutlined />}
+                    onClick={() => {
+                      setCloneTarget(r);
+                      cloneForm.setFieldsValue({
+                        mode: 'COPY_DATA',
+                        targetName: `${r.name}_copy`,
+                      });
                     }}
-                  >
-                    <Button size="small" type="text" icon={<MoreOutlined />} />
-                  </Dropdown>
-                  <Popconfirm
-                    title={t('Truncate all rows in table {name}?', { name: r.name })}
-                    onConfirm={() => handleAction(r, 'TRUNCATE')}
-                  >
-                    <Tooltip title={t('Truncate table')}>
-                      <Button size="small" type="text" danger icon={<ClearOutlined />} />
-                    </Tooltip>
-                  </Popconfirm>
-                </>
+                  />
+                </Tooltip>
               )}
-              {canWrite && (
+              {moreMenuItems.length > 0 && (
+                <Dropdown trigger={['click']} placement="bottomRight" menu={{ items: moreMenuItems }}>
+                  <Button size="small" type="text" style={btnStyle} icon={<MoreOutlined />} />
+                </Dropdown>
+              )}
+              {!isMobile && canWrite && r.type === 'TABLE' && (
+                <Popconfirm
+                  title={t('Truncate all rows in table {name}?', { name: r.name })}
+                  onConfirm={() => handleAction(r, 'TRUNCATE')}
+                >
+                  <Tooltip title={t('Truncate table')}>
+                    <Button size="small" type="text" danger icon={<ClearOutlined />} />
+                  </Tooltip>
+                </Popconfirm>
+              )}
+              {!isMobile && canWrite && (
                 <Popconfirm
                   title={t('Danger: Permanently drop {name}?', { name: r.name })}
                   onConfirm={() => handleAction(r, 'DROP')}
@@ -567,6 +662,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
     [
       t,
       canWrite,
+      isMobile,
       tab.connectionId,
       tab.database,
       tab.schema,
@@ -624,7 +720,13 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
         <Space wrap size={6}>
           {canWrite && (
             <>
-              <Button size={isMobile ? 'small' : 'middle'} type="primary" icon={<PlusOutlined />} onClick={onOpenCreateTable}>
+              <Button
+                size={isMobile ? 'small' : 'middle'}
+                style={isMobile ? { height: 34, paddingInline: 12 } : undefined}
+                type="primary"
+                icon={<PlusOutlined />}
+                onClick={onOpenCreateTable}
+              >
                 {t('Create Table')}
               </Button>
               <Dropdown
@@ -663,7 +765,11 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                   ],
                 }}
               >
-                <Button size={isMobile ? 'small' : 'middle'} icon={<PlusOutlined />}>
+                <Button
+                  size={isMobile ? 'small' : 'middle'}
+                  style={isMobile ? { height: 34, paddingInline: 10 } : undefined}
+                  icon={<PlusOutlined />}
+                >
                   {t('New Object')}
                 </Button>
               </Dropdown>
@@ -703,7 +809,13 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
               )}
             </>
           )}
-          <Button size={isMobile ? 'small' : 'middle'} icon={<ReloadOutlined />} onClick={loadOverview}>
+          <Button
+            size={isMobile ? 'small' : 'middle'}
+            style={isMobile ? { width: 34, height: 34, padding: 0 } : undefined}
+            icon={<ReloadOutlined />}
+            onClick={loadOverview}
+            aria-label={t('Refresh')}
+          >
             {isMobile ? '' : t('Refresh')}
           </Button>
         </Space>
@@ -711,7 +823,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, maxWidth: '100%', width: isMobile ? '100%' : undefined, alignItems: 'center' }}>
           <div style={{ maxWidth: '100%', overflowX: 'auto' }}>
             <Segmented
-              size="small"
+              size={isMobile ? 'middle' : 'small'}
               value={categoryFilter}
               onChange={(val) => setCategoryFilter(val as any)}
               options={[
@@ -728,11 +840,11 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
             />
           </div>
           <Input
-            size={isMobile ? 'small' : 'middle'}
+            size="middle"
             allowClear
             prefix={<SearchOutlined />}
             placeholder={t('Filter objects...')}
-            style={{ width: isMobile ? '100%' : 210, maxWidth: '100%' }}
+            style={{ width: isMobile ? '100%' : 210, maxWidth: '100%', height: isMobile ? 34 : undefined }}
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
           />
@@ -816,7 +928,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
         rowSelection={{
           selectedRowKeys: selectedKeys,
           onChange: setSelectedKeys,
-          columnWidth: isMobile ? 32 : 40,
+          columnWidth: isMobile ? 38 : 40,
         }}
         pagination={{ pageSize: 50, simple: isMobile, showSizeChanger: !isMobile }}
         columns={overviewColumns}
@@ -901,7 +1013,15 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
       >
         <Form form={cloneForm} layout="vertical">
           <Form.Item name="mode" label={t('Operation')} rules={[{ required: true }]}>
-            <Radio.Group>
+            <Radio.Group
+              className="dbharbor-pill-radios"
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 6,
+                flexDirection: isMobile ? 'column' : 'row',
+              }}
+            >
               <Radio.Button value="COPY_DATA">{t('Copy Structure & Data')}</Radio.Button>
               <Radio.Button value="COPY_STRUCTURE">{t('Copy Structure Only')}</Radio.Button>
               <Radio.Button value="RENAME">{t('Rename Table')}</Radio.Button>

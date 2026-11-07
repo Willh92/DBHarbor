@@ -329,7 +329,7 @@ export const VersionUpdateModal: React.FC<Props> = ({
                 {t('Current Version')}:
               </Typography.Text>
               <Tag color="geekblue" style={{ fontWeight: 700, margin: 0 }}>
-                {checkData?.currentVersion || buildInfo?.displayVersion || 'v1.0.0'}
+                {checkData?.currentVersion || buildInfo?.displayVersion || 'v1.0.1'}
               </Tag>
               {buildInfo?.edition === 'desktop' && (
                 <Tag color="purple" style={{ margin: 0 }}>

@@ -15,11 +15,13 @@ import (
 )
 
 const (
-	captchaThreshold = 3
-	maxFailAttempts  = 5
-	failWindow       = 10 * time.Minute
-	lockoutDuration  = 15 * time.Minute
-	captchaAlphabet  = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+	captchaThreshold  = 3
+	maxFailAttempts   = 5
+	failWindow        = 10 * time.Minute
+	lockoutDuration   = 15 * time.Minute
+	maxLimiterEntries = 8192
+	maxCaptchaNonces  = 4096
+	captchaAlphabet   = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 )
 
 type attemptRecord struct {
@@ -28,13 +30,15 @@ type attemptRecord struct {
 	lockedUntil time.Time
 }
 
-// LoginProtector enforces brute-force rate limiting, progressive IP/account lockouts,
-// and stateless HMAC-signed offline SVG captcha challenges.
+// LoginProtector enforces brute-force rate limiting, progressive IP + account lockouts,
+// and single-use HMAC-signed offline SVG captcha challenges.
 type LoginProtector struct {
-	secret []byte
-	mu     sync.Mutex
-	byKey  map[string]*attemptRecord
-	byIP   map[string]*attemptRecord
+	secret       []byte
+	mu           sync.Mutex
+	byKey        map[string]*attemptRecord
+	byIP         map[string]*attemptRecord
+	byUser       map[string]*attemptRecord
+	issuedNonces map[string]int64 // nonce -> exp unix (single-use consumption)
 }
 
 type CheckStatus struct {
@@ -48,15 +52,18 @@ func NewLoginProtector(secret []byte) *LoginProtector {
 	cp := make([]byte, len(secret))
 	copy(cp, secret)
 	return &LoginProtector{
-		secret: cp,
-		byKey:  make(map[string]*attemptRecord),
-		byIP:   make(map[string]*attemptRecord),
+		secret:       cp,
+		byKey:        make(map[string]*attemptRecord),
+		byIP:         make(map[string]*attemptRecord),
+		byUser:       make(map[string]*attemptRecord),
+		issuedNonces: make(map[string]int64),
 	}
 }
 
 func (lp *LoginProtector) Check(ip, username string) CheckStatus {
 	now := time.Now()
-	key := ip + "|" + strings.ToLower(strings.TrimSpace(username))
+	normUser := strings.ToLower(strings.TrimSpace(username))
+	key := ip + "|" + normUser
 
 	lp.mu.Lock()
 	defer lp.mu.Unlock()
@@ -64,6 +71,10 @@ func (lp *LoginProtector) Check(ip, username string) CheckStatus {
 
 	recKey := lp.getActiveLocked(lp.byKey, key, now)
 	recIP := lp.getActiveLocked(lp.byIP, ip, now)
+	var recUser *attemptRecord
+	if normUser != "" {
+		recUser = lp.getActiveLocked(lp.byUser, normUser, now)
+	}
 
 	var lockedUntil time.Time
 	if recKey != nil && recKey.lockedUntil.After(now) {
@@ -71,6 +82,9 @@ func (lp *LoginProtector) Check(ip, username string) CheckStatus {
 	}
 	if recIP != nil && recIP.lockedUntil.After(lockedUntil) {
 		lockedUntil = recIP.lockedUntil
+	}
+	if recUser != nil && recUser.lockedUntil.After(lockedUntil) {
+		lockedUntil = recUser.lockedUntil
 	}
 	if !lockedUntil.IsZero() {
 		sec := int(lockedUntil.Sub(now).Seconds()) + 1
@@ -85,7 +99,11 @@ func (lp *LoginProtector) Check(ip, username string) CheckStatus {
 	if recIP != nil {
 		ipFails = recIP.failures
 	}
-	reqCaptcha := fails >= captchaThreshold || ipFails >= captchaThreshold
+	userFails := 0
+	if recUser != nil {
+		userFails = recUser.failures
+	}
+	reqCaptcha := fails >= captchaThreshold || ipFails >= captchaThreshold || userFails >= captchaThreshold
 	rem := maxFailAttempts - fails
 	if rem < 1 {
 		rem = 1
@@ -99,12 +117,17 @@ func (lp *LoginProtector) Check(ip, username string) CheckStatus {
 
 func (lp *LoginProtector) RecordFailure(ip, username string) CheckStatus {
 	now := time.Now()
-	key := ip + "|" + strings.ToLower(strings.TrimSpace(username))
+	normUser := strings.ToLower(strings.TrimSpace(username))
+	key := ip + "|" + normUser
 
 	lp.mu.Lock()
 	lp.pruneLocked(now)
 	rk := lp.bumpLocked(lp.byKey, key, now, maxFailAttempts)
 	ri := lp.bumpLocked(lp.byIP, ip, now, maxFailAttempts*2)
+	var ru *attemptRecord
+	if normUser != "" {
+		ru = lp.bumpLocked(lp.byUser, normUser, now, maxFailAttempts*2)
+	}
 	lp.mu.Unlock()
 
 	var lockedUntil time.Time
@@ -113,6 +136,9 @@ func (lp *LoginProtector) RecordFailure(ip, username string) CheckStatus {
 	}
 	if ri.lockedUntil.After(lockedUntil) {
 		lockedUntil = ri.lockedUntil
+	}
+	if ru != nil && ru.lockedUntil.After(lockedUntil) {
+		lockedUntil = ru.lockedUntil
 	}
 	if !lockedUntil.IsZero() {
 		return CheckStatus{
@@ -126,18 +152,42 @@ func (lp *LoginProtector) RecordFailure(ip, username string) CheckStatus {
 	if rem < 0 {
 		rem = 0
 	}
+	userFails := 0
+	if ru != nil {
+		userFails = ru.failures
+	}
 	return CheckStatus{
 		Locked:            false,
-		RequiresCaptcha:   rk.failures >= captchaThreshold || ri.failures >= captchaThreshold,
+		RequiresCaptcha:   rk.failures >= captchaThreshold || ri.failures >= captchaThreshold || userFails >= captchaThreshold,
 		RemainingAttempts: rem,
 	}
 }
 
 func (lp *LoginProtector) RecordSuccess(ip, username string) {
-	key := ip + "|" + strings.ToLower(strings.TrimSpace(username))
+	normUser := strings.ToLower(strings.TrimSpace(username))
+	key := ip + "|" + normUser
 	lp.mu.Lock()
 	delete(lp.byKey, key)
 	delete(lp.byIP, ip)
+	if normUser != "" {
+		delete(lp.byUser, normUser)
+	}
+	lp.mu.Unlock()
+}
+
+func (lp *LoginProtector) ResetUser(username string) {
+	normUser := strings.ToLower(strings.TrimSpace(username))
+	if normUser == "" {
+		return
+	}
+	lp.mu.Lock()
+	delete(lp.byUser, normUser)
+	suffix := "|" + normUser
+	for k := range lp.byKey {
+		if strings.HasSuffix(k, suffix) {
+			delete(lp.byKey, k)
+		}
+	}
 	lp.mu.Unlock()
 }
 
@@ -170,24 +220,54 @@ func (lp *LoginProtector) bumpLocked(m map[string]*attemptRecord, k string, now 
 	return r
 }
 
-func (lp *LoginProtector) pruneLocked(now time.Time) {
-	if len(lp.byKey) > 1024 {
-		for k, r := range lp.byKey {
-			if (!r.lockedUntil.IsZero() && now.After(r.lockedUntil)) || (r.lockedUntil.IsZero() && now.Sub(r.firstFailAt) > failWindow) {
-				delete(lp.byKey, k)
-			}
+func pruneAttemptMapLocked(m map[string]*attemptRecord, now time.Time) {
+	if len(m) <= 1024 {
+		return
+	}
+	for k, r := range m {
+		if (!r.lockedUntil.IsZero() && now.After(r.lockedUntil)) || (r.lockedUntil.IsZero() && now.Sub(r.firstFailAt) > failWindow) {
+			delete(m, k)
 		}
 	}
-	if len(lp.byIP) > 1024 {
-		for k, r := range lp.byIP {
-			if (!r.lockedUntil.IsZero() && now.After(r.lockedUntil)) || (r.lockedUntil.IsZero() && now.Sub(r.firstFailAt) > failWindow) {
-				delete(lp.byIP, k)
+	if len(m) > maxLimiterEntries {
+		// Evict oldest entries if map still exceeds hard cap under spoofed flood
+		excess := len(m) - maxLimiterEntries
+		for k := range m {
+			delete(m, k)
+			excess--
+			if excess <= 0 {
+				break
 			}
 		}
 	}
 }
 
-// GenerateCaptcha produces a stateless HMAC-signed challenge token and a distorted offline SVG image data URL.
+func (lp *LoginProtector) pruneLocked(now time.Time) {
+	pruneAttemptMapLocked(lp.byKey, now)
+	pruneAttemptMapLocked(lp.byIP, now)
+	pruneAttemptMapLocked(lp.byUser, now)
+
+	if len(lp.issuedNonces) > maxCaptchaNonces/2 {
+		nowUnix := now.Unix()
+		for n, exp := range lp.issuedNonces {
+			if exp < nowUnix {
+				delete(lp.issuedNonces, n)
+			}
+		}
+		if len(lp.issuedNonces) >= maxCaptchaNonces {
+			excess := len(lp.issuedNonces) - (maxCaptchaNonces - 256)
+			for n := range lp.issuedNonces {
+				delete(lp.issuedNonces, n)
+				excess--
+				if excess <= 0 {
+					break
+				}
+			}
+		}
+	}
+}
+
+// GenerateCaptcha produces a single-use HMAC-signed challenge token and a distorted offline SVG image data URL.
 func (lp *LoginProtector) GenerateCaptcha() (captchaToken string, imageDataURL string, err error) {
 	var rnd [16]byte
 	if _, err := io.ReadFull(rand.Reader, rnd[:]); err != nil {
@@ -199,7 +279,13 @@ func (lp *LoginProtector) GenerateCaptcha() (captchaToken string, imageDataURL s
 	}
 	code := string(chars[:])
 	nonce := hex.EncodeToString(rnd[5:13])
-	exp := time.Now().Add(3 * time.Minute).Unix()
+	now := time.Now()
+	exp := now.Add(3 * time.Minute).Unix()
+
+	lp.mu.Lock()
+	lp.pruneLocked(now)
+	lp.issuedNonces[nonce] = exp
+	lp.mu.Unlock()
 
 	sig := lp.signCaptcha(nonce, code, exp)
 	captchaToken = fmt.Sprintf("%s.%d.%s", nonce, exp, sig)
@@ -239,7 +325,8 @@ func (lp *LoginProtector) VerifyCaptcha(captchaToken, answer string) bool {
 	}
 	nonce := parts[0]
 	exp, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil || time.Now().Unix() > exp {
+	nowUnix := time.Now().Unix()
+	if err != nil || nowUnix > exp {
 		return false
 	}
 	cleanAns := strings.ToUpper(strings.TrimSpace(answer))
@@ -247,7 +334,18 @@ func (lp *LoginProtector) VerifyCaptcha(captchaToken, answer string) bool {
 		return false
 	}
 	expectedSig := lp.signCaptcha(nonce, cleanAns, exp)
-	return hmac.Equal([]byte(parts[2]), []byte(expectedSig))
+	if !hmac.Equal([]byte(parts[2]), []byte(expectedSig)) {
+		return false
+	}
+
+	// Single-use nonce consumption: each generated CAPTCHA can only be redeemed once
+	lp.mu.Lock()
+	issuedExp, exists := lp.issuedNonces[nonce]
+	if exists {
+		delete(lp.issuedNonces, nonce)
+	}
+	lp.mu.Unlock()
+	return exists && issuedExp >= nowUnix
 }
 
 func (lp *LoginProtector) signCaptcha(nonce, code string, exp int64) string {

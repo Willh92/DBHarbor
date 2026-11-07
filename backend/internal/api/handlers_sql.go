@@ -38,7 +38,7 @@ func (s *Server) getSQLDriverAccess(c *Context, requireWrite bool) (driver.SQLDr
 	if !s.authorizeConn(c, connID, requireWrite) {
 		return nil, driver.ConnectionConfig{}, false
 	}
-	drv, cfg, err := s.pool.Get(connID)
+	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return nil, cfg, false
@@ -56,7 +56,7 @@ func (s *Server) handleListDatabases(c *Context) {
 	if !s.authorizeConn(c, connID, false) {
 		return
 	}
-	drv, _, err := s.pool.Get(connID)
+	drv, _, err := s.acquireConnDriver(c, connID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
@@ -77,7 +77,7 @@ func (s *Server) handleCreateDatabase(c *Context) {
 	if !s.authorizeConn(c, connID, true) {
 		return
 	}
-	drv, cfg, err := s.pool.Get(connID)
+	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
@@ -110,7 +110,7 @@ func (s *Server) handleDropDatabase(c *Context) {
 	if !s.authorizeConn(c, connID, true) {
 		return
 	}
-	drv, cfg, err := s.pool.Get(connID)
+	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
@@ -168,7 +168,7 @@ func (s *Server) handleCreateSchema(c *Context) {
 	if !s.authorizeConn(c, connID, true) {
 		return
 	}
-	drv, cfg, err := s.pool.Get(connID)
+	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
@@ -206,7 +206,7 @@ func (s *Server) handleDropSchema(c *Context) {
 	if !s.authorizeConn(c, connID, true) {
 		return
 	}
-	drv, cfg, err := s.pool.Get(connID)
+	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
@@ -367,6 +367,12 @@ func (s *Server) handleBrowseData(c *Context) {
 		c.JSON(http.StatusBadRequest, H{"error": "Invalid request parameters"})
 		return
 	}
+	if !c.CanWrite() && strings.TrimSpace(req.Filter) != "" {
+		if err := sqlbase.ValidateReadOnlyScript("SELECT 1 WHERE " + req.Filter); err != nil {
+			c.JSON(http.StatusForbidden, H{"error": "Read-only mode: " + err.Error()})
+			return
+		}
+	}
 	if req.Page < 1 {
 		req.Page = 1
 	}
@@ -437,7 +443,7 @@ func (s *Server) handleListPartitions(c *Context) {
 	if !s.authorizeConn(c, connID, false) {
 		return
 	}
-	drv, _, err := s.pool.Get(connID)
+	drv, _, err := s.acquireConnDriver(c, connID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
@@ -460,7 +466,7 @@ func (s *Server) handleManagePartition(c *Context) {
 	if !s.authorizeConn(c, connID, true) {
 		return
 	}
-	drv, _, err := s.pool.Get(connID)
+	drv, _, err := s.acquireConnDriver(c, connID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
@@ -671,7 +677,7 @@ func (s *Server) handleExport(c *Context) {
 			baseName = "dbharbor_dump"
 		}
 	}
-	filename := fmt.Sprintf("%s_%s.%s", baseName, time.Now().Format("20060102_150405"), ext)
+	filename := fmt.Sprintf("%s_%s.%s", sanitizeExportName(baseName), time.Now().Format("20060102_150405"), ext)
 
 	c.Header("Content-Type", contentType)
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
@@ -685,6 +691,7 @@ func (s *Server) handleImport(c *Context) {
 	if !ok {
 		return
 	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, s.maxImportBytes())
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": "Please upload a data file to import"})

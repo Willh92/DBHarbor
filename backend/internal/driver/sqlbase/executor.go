@@ -63,6 +63,13 @@ var forbiddenReadOnlyKeywords = map[string]struct{}{
 	"COPY": {}, "ATTACH": {}, "DETACH": {}, "VACUUM": {}, "INTO": {},
 }
 
+var forbiddenReadOnlyFunctions = map[string]struct{}{
+	"PG_TERMINATE_BACKEND": {}, "PG_CANCEL_BACKEND": {}, "PG_RELOAD_CONF": {}, "PG_ROTATE_LOGFILE": {},
+	"PG_READ_FILE": {}, "PG_READ_BINARY_FILE": {}, "PG_LS_DIR": {}, "PG_STAT_FILE": {},
+	"LO_IMPORT": {}, "LO_EXPORT": {}, "LO_UNLINK": {}, "LO_CREATE": {}, "LO_FROM_BYTEA": {}, "LO_PUT": {},
+	"LOAD_EXTENSION": {}, "READFILE": {}, "WRITEFILE": {}, "FTS3_TOKENIZER": {},
+}
+
 var forbiddenPragmaNames = map[string]struct{}{
 	"WAL_CHECKPOINT": {}, "SHRINK_MEMORY": {}, "OPTIMIZE": {},
 	"INCREMENTAL_VACUUM": {}, "WRITABLE_SCHEMA": {},
@@ -184,6 +191,9 @@ func IsReadOnlySafeStatement(stmt string) (bool, string) {
 		for idx, tok := range tokens {
 			if _, bad := forbiddenReadOnlyKeywords[tok]; bad {
 				return false, fmt.Sprintf("keyword %q is not permitted in read-only mode", tok)
+			}
+			if _, badFn := forbiddenReadOnlyFunctions[tok]; badFn {
+				return false, fmt.Sprintf("function %q is not permitted in read-only mode", tok)
 			}
 			// Block locking reads: FOR UPDATE / FOR SHARE / FOR NO KEY UPDATE / FOR KEY SHARE
 			if tok == "FOR" && idx+1 < len(tokens) {
@@ -326,6 +336,25 @@ func IsDDLStatement(stmt string) bool {
 	return false
 }
 
+const maxQueryResultBytes = 32 << 20 // 32 MiB ceiling for interactive query result sets
+
+func approxRowBytes(row []any) int {
+	n := 24
+	for _, v := range row {
+		switch x := v.(type) {
+		case nil:
+			n += 8
+		case string:
+			n += 16 + len(x)
+		case []byte:
+			n += 24 + len(x)
+		default:
+			n += 16
+		}
+	}
+	return n
+}
+
 func ExecuteSingleQuery(ctx context.Context, db *sql.DB, stmt string, maxRows int) (driver.QueryResult, error) {
 	return ExecuteSingleQueryConn(ctx, db, stmt, maxRows)
 }
@@ -397,8 +426,12 @@ func ExecuteSingleQueryConn(ctx context.Context, q Queryer, stmt string, maxRows
 			initCap = maxRows
 		}
 		data := make([][]any, 0, initCap)
+		totalBytes := 0
+		truncated := false
+		truncatedByMem := false
 		for rows.Next() {
 			if len(data) >= maxRows {
+				truncated = true
 				break
 			}
 			for i := range rawVals {
@@ -411,10 +444,22 @@ func ExecuteSingleQueryConn(ctx context.Context, q Queryer, stmt string, maxRows
 			for i, v := range rawVals {
 				rowOut[i] = NormalizeValueFast(v, scanMeta[i])
 			}
+			rowBytes := approxRowBytes(rowOut)
+			if len(data) > 0 && totalBytes+rowBytes > maxQueryResultBytes {
+				truncated = true
+				truncatedByMem = true
+				break
+			}
+			totalBytes += rowBytes
 			data = append(data, rowOut)
 		}
 		if err := rows.Err(); err != nil {
 			return driver.QueryResult{}, err
+		}
+
+		msg := ""
+		if truncatedByMem {
+			msg = "Result truncated at 32 MB memory safety ceiling"
 		}
 
 		return driver.QueryResult{
@@ -424,6 +469,8 @@ func ExecuteSingleQueryConn(ctx context.Context, q Queryer, stmt string, maxRows
 			Total:     int64(len(data)),
 			ElapsedMs: time.Since(start).Milliseconds(),
 			IsSelect:  true,
+			Truncated: truncated,
+			Message:   msg,
 		}, nil
 	}
 

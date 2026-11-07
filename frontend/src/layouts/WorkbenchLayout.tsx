@@ -137,7 +137,7 @@ export const WorkbenchLayout: React.FC = () => {
     updateTab,
   } = useWorkbenchStore();
   const { locale, setLocale, t } = useI18n();
-  const { isMobile } = useResponsive();
+  const { isMobile, isTablet } = useResponsive();
   const maxMountedTabs = isMobile ? MAX_MOUNTED_TABS_MOBILE : MAX_MOUNTED_TABS_DESKTOP;
 
   const effectiveCanCreateConn = isDesktop || canCreateConn || role === 'admin';
@@ -175,6 +175,9 @@ export const WorkbenchLayout: React.FC = () => {
   const [securityInitialTab, setSecurityInitialTab] = useState<string>('2fa');
   const [securityHintDismissed, setSecurityHintDismissed] = useState(false);
   const [userMgmtOpen, setUserMgmtOpen] = useState(false);
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
+  const [mobileMoreView, setMobileMoreView] = useState<'root' | 'lang'>('root');
+  const keepMobileMoreOpenRef = useRef(false);
 
   // Version & GitHub Update Check state
   const [versionModalOpen, setVersionModalOpen] = useState(false);
@@ -560,7 +563,7 @@ export const WorkbenchLayout: React.FC = () => {
     [tabs, activeTabKey, lruTabKeys, renderTabContent]
   );
 
-  const displayVersion = updateCheck?.currentVersion || buildInfo?.displayVersion || 'v1.0.0';
+  const displayVersion = updateCheck?.currentVersion || buildInfo?.displayVersion || 'v1.0.1';
   const hasNewVersion = Boolean(updateCheck?.hasUpdate);
 
   const handleSidebarSplitterPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -709,8 +712,8 @@ export const WorkbenchLayout: React.FC = () => {
       <header
         className="workbench-top-header"
         style={{
-          height: isMobile ? 42 : 48,
-          padding: isMobile ? '0 8px' : '0 14px',
+          height: isMobile ? 48 : 54,
+          padding: isMobile ? '0 10px' : '0 16px',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
@@ -722,18 +725,19 @@ export const WorkbenchLayout: React.FC = () => {
           flexShrink: 0,
         }}
       >
-        <Space size={isMobile ? 6 : 8} style={{ minWidth: 0, overflow: 'hidden' }}>
+        <Space size={8} style={{ minWidth: 0, overflow: 'hidden' }}>
           <Button
             type="text"
-            size="small"
-            icon={sidebarCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+            size="middle"
+            style={isMobile ? { width: 36, height: 36 } : { width: 32, height: 32 }}
+            icon={sidebarCollapsed ? <MenuUnfoldOutlined style={isMobile ? { fontSize: 17 } : undefined} /> : <MenuFoldOutlined style={isMobile ? { fontSize: 17 } : undefined} />}
             onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
           />
-          <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 6 : 8, minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 7 : 8, minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap' }}>
             <span style={{ display: 'inline-flex', flexShrink: 0 }}>
-              <BrandLogo size={isMobile ? 22 : 26} />
+              <BrandLogo size={isMobile ? 24 : 26} />
             </span>
-            <Typography.Text strong style={{ fontSize: isMobile ? 15 : 16, flexShrink: 0 }}>
+            <Typography.Text strong style={{ fontSize: 16, flexShrink: 0 }}>
               DBHarbor
             </Typography.Text>
             {!isMobile && (
@@ -777,12 +781,12 @@ export const WorkbenchLayout: React.FC = () => {
         </Space>
 
         {isMobile ? (
-          <Space size={6} style={{ flexShrink: 0 }}>
+          <Space size={8} style={{ flexShrink: 0 }}>
             {effectiveCanCreateConn && (
               <Button
                 type="primary"
-                size="small"
-                icon={<PlusOutlined />}
+                style={{ width: 36, height: 36, padding: 0 }}
+                icon={<PlusOutlined style={{ fontSize: 16 }} />}
                 title={t('New Connection')}
                 onClick={() => {
                   setEditingConn(null);
@@ -797,99 +801,173 @@ export const WorkbenchLayout: React.FC = () => {
             >
               <Dropdown
                 trigger={['click']}
+                placement="bottomRight"
+                open={mobileMoreOpen}
+                onOpenChange={(nextOpen) => {
+                  if (!nextOpen && keepMobileMoreOpenRef.current) {
+                    keepMobileMoreOpenRef.current = false;
+                    return;
+                  }
+                  setMobileMoreOpen(nextOpen);
+                  if (!nextOpen) {
+                    setMobileMoreView('root');
+                  }
+                }}
                 menu={{
-                  items: [
-                    {
-                      key: 'theme',
-                      icon: darkMode ? <SunOutlined /> : <MoonOutlined />,
-                      label: darkMode ? t('Switch to Light Mode') : t('Switch to Dark Mode'),
-                      onClick: toggleDarkMode,
-                    },
-                    {
-                      key: 'lang',
-                      icon: <GlobalOutlined />,
-                      label: t('Language'),
-                      children: LOCALE_OPTIONS.map((opt) => ({
-                        key: `lang_${opt.value}`,
-                        label: `${opt.label}${locale === opt.value ? ' ✓' : ''}`,
-                        onClick: () => setLocale(opt.value),
-                      })),
-                    },
-                    {
-                      key: 'version',
-                      icon: <RocketOutlined />,
-                      label: hasNewVersion
-                        ? t('Update Available ({ver}) & Changelog', { ver: updateCheck?.latestVersion || '' })
-                        : t('Check Updates & Changelog ({ver})', { ver: displayVersion }),
-                      onClick: () => setVersionModalOpen(true),
-                    },
-                    ...(!isDesktop
+                  items:
+                    mobileMoreView === 'lang'
                       ? [
+                          {
+                            key: 'lang_back',
+                            icon: <ArrowLeftOutlined />,
+                            label: <Typography.Text strong>{t('Language')}</Typography.Text>,
+                            onClick: () => {
+                              keepMobileMoreOpenRef.current = true;
+                              setMobileMoreView('root');
+                            },
+                          },
                           { type: 'divider' as const },
-                          ...(role === 'admin'
+                          ...LOCALE_OPTIONS.map((opt) => ({
+                            key: `lang_${opt.value}`,
+                            label: (
+                              <div
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  gap: 16,
+                                  minWidth: 210,
+                                }}
+                              >
+                                <span>{opt.label}</span>
+                                {locale === opt.value ? (
+                                  <span style={{ color: '#1677ff', fontWeight: 700, flexShrink: 0 }}>✓</span>
+                                ) : null}
+                              </div>
+                            ),
+                            onClick: () => {
+                              setLocale(opt.value);
+                              setMobileMoreOpen(false);
+                              setMobileMoreView('root');
+                            },
+                          })),
+                        ]
+                      : [
+                          {
+                            key: 'theme',
+                            icon: darkMode ? <SunOutlined /> : <MoonOutlined />,
+                            label: darkMode ? t('Switch to Light Mode') : t('Switch to Dark Mode'),
+                            onClick: toggleDarkMode,
+                          },
+                          {
+                            key: 'lang',
+                            icon: <GlobalOutlined />,
+                            label: (
+                              <div
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  gap: 16,
+                                  width: '100%',
+                                }}
+                              >
+                                <span>{t('Language')}</span>
+                                <Typography.Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
+                                  {(LOCALE_OPTIONS.find((o) => o.value === locale) || LOCALE_OPTIONS[0]).short} ›
+                                </Typography.Text>
+                              </div>
+                            ),
+                            onClick: () => {
+                              keepMobileMoreOpenRef.current = true;
+                              setMobileMoreView('lang');
+                            },
+                          },
+                          {
+                            key: 'version',
+                            icon: <RocketOutlined />,
+                            label: hasNewVersion
+                              ? t('Update Available ({ver}) & Changelog', { ver: updateCheck?.latestVersion || '' })
+                              : t('Check Updates & Changelog ({ver})', { ver: displayVersion }),
+                            onClick: () => setVersionModalOpen(true),
+                          },
+                          ...(!isDesktop
                             ? [
+                                { type: 'divider' as const },
+                                ...(role === 'admin'
+                                  ? [
+                                      {
+                                        key: 'users',
+                                        icon: <TeamOutlined />,
+                                        label: t('Team & User Management'),
+                                        onClick: () => setUserMgmtOpen(true),
+                                      },
+                                      {
+                                        key: 'branding',
+                                        icon: <SafetyCertificateOutlined />,
+                                        label: t('Login Page Appearance'),
+                                        onClick: () => {
+                                          setSecurityInitialTab('branding');
+                                          setSecurityModalOpen(true);
+                                        },
+                                      },
+                                    ]
+                                  : []),
                                 {
-                                  key: 'users',
-                                  icon: <TeamOutlined />,
-                                  label: t('Team & User Management'),
-                                  onClick: () => setUserMgmtOpen(true),
+                                  key: '2fa',
+                                  icon: <SafetyCertificateOutlined />,
+                                  label: totpEnabled ? t('Account & 2FA (Enabled)') : t('Account & Enable 2FA'),
+                                  onClick: () => {
+                                    setSecurityInitialTab('2fa');
+                                    setSecurityModalOpen(true);
+                                  },
+                                },
+                                {
+                                  key: 'pwd',
+                                  icon: <KeyOutlined />,
+                                  label: t('Change Password'),
+                                  onClick: () => {
+                                    setSecurityInitialTab('password');
+                                    setSecurityModalOpen(true);
+                                  },
+                                },
+                                { type: 'divider' as const },
+                                {
+                                  key: 'logout',
+                                  danger: true,
+                                  icon: <LogoutOutlined />,
+                                  label: `${t('Sign Out')} (${displayName || username})`,
+                                  onClick: () => logout(true),
                                 },
                               ]
                             : []),
-                          {
-                            key: '2fa',
-                            icon: <SafetyCertificateOutlined />,
-                            label: totpEnabled ? t('Account & 2FA (Enabled)') : t('Account & Enable 2FA'),
-                            onClick: () => {
-                              setSecurityInitialTab('2fa');
-                              setSecurityModalOpen(true);
-                            },
-                          },
-                          {
-                            key: 'pwd',
-                            icon: <KeyOutlined />,
-                            label: t('Change Password'),
-                            onClick: () => {
-                              setSecurityInitialTab('password');
-                              setSecurityModalOpen(true);
-                            },
-                          },
-                          { type: 'divider' as const },
-                          {
-                            key: 'logout',
-                            danger: true,
-                            icon: <LogoutOutlined />,
-                            label: `${t('Sign Out')} (${displayName || username})`,
-                            onClick: () => logout(true),
-                          },
-                        ]
-                      : []),
-                  ],
+                        ],
                 }}
               >
-                <Button size="small" icon={<MoreOutlined />} />
+                <Button style={{ width: 36, height: 36, padding: 0 }} icon={<MoreOutlined style={{ fontSize: 17 }} />} />
               </Dropdown>
             </Badge>
           </Space>
         ) : (
-          <Space size={6} style={{ flexShrink: 0 }}>
+          <Space size={isTablet ? 6 : 8} style={{ flexShrink: 0 }}>
             {effectiveCanCreateConn && (
               <Button
                 type="primary"
-                size="small"
+                size="middle"
                 icon={<PlusOutlined />}
+                title={isTablet ? t('New Connection') : undefined}
                 onClick={() => {
                   setEditingConn(null);
                   setConnModalOpen(true);
                 }}
               >
-                <span className="workbench-btn-label">{t('New Connection')}</span>
+                {!isTablet && <span className="workbench-btn-label">{t('New Connection')}</span>}
               </Button>
             )}
             {!isDesktop && role === 'admin' && (
               <Tooltip title={t('Team & RBAC User Governance')}>
-                <Button size="small" icon={<TeamOutlined />} onClick={() => setUserMgmtOpen(true)}>
-                  <span className="workbench-btn-label">{t('Users')}</span>
+                <Button size="middle" icon={<TeamOutlined />} onClick={() => setUserMgmtOpen(true)}>
+                  {!isTablet && <span className="workbench-btn-label">{t('Users')}</span>}
                 </Button>
               </Tooltip>
             )}
@@ -897,28 +975,31 @@ export const WorkbenchLayout: React.FC = () => {
               <Tooltip title={t('Security Hardening, 2FA & Active Sessions')}>
                 <Badge dot={!totpEnabled || !passwordChanged} color={!passwordChanged ? 'red' : 'gold'}>
                   <Button
-                    size="small"
+                    size="middle"
                     icon={<SafetyCertificateOutlined style={{ color: totpEnabled ? '#52c41a' : undefined }} />}
                     onClick={() => {
                       setSecurityInitialTab('2fa');
                       setSecurityModalOpen(true);
                     }}
                   >
-                    <span className="workbench-btn-label">{t('Security / 2FA')}</span>
+                    {!isTablet && <span className="workbench-btn-label">{t('Security / 2FA')}</span>}
                   </Button>
                 </Badge>
               </Tooltip>
             )}
-            <LanguageSwitcher size="small" />
+            <LanguageSwitcher size="middle" />
             <Button
               type="text"
-              size="small"
+              size="middle"
+              style={{ width: 32, height: 32, padding: 0 }}
               icon={darkMode ? <SunOutlined /> : <MoonOutlined />}
               onClick={toggleDarkMode}
               title={t('Toggle Light / Dark Theme')}
             />
             {!isDesktop && (
               <Dropdown
+                trigger={['click']}
+                placement="bottomRight"
                 menu={{
                   items: [
                     ...(role === 'admin'
@@ -928,6 +1009,15 @@ export const WorkbenchLayout: React.FC = () => {
                             icon: <TeamOutlined />,
                             label: t('Team & User Management'),
                             onClick: () => setUserMgmtOpen(true),
+                          },
+                          {
+                            key: 'branding',
+                            icon: <SafetyCertificateOutlined />,
+                            label: t('Login Page Appearance'),
+                            onClick: () => {
+                              setSecurityInitialTab('branding');
+                              setSecurityModalOpen(true);
+                            },
                           },
                           { type: 'divider' as const },
                         ]
@@ -969,15 +1059,21 @@ export const WorkbenchLayout: React.FC = () => {
                   ],
                 }}
               >
-                <Button size="small" icon={<UserOutlined />}>
-                  <span className="workbench-btn-label">{displayName || username}</span>
-                  <Tag
-                    color={role === 'admin' ? 'gold' : role === 'readwrite' ? 'blue' : 'default'}
-                    className="workbench-header-tag-extra"
-                    style={{ margin: '0 0 0 4px', fontSize: 10, lineHeight: '16px', padding: '0 4px' }}
-                  >
-                    {role === 'admin' ? t('Admin') : role === 'readwrite' ? 'RW' : 'RO'}
-                  </Tag>
+                <Button
+                  size="middle"
+                  icon={<UserOutlined />}
+                  title={isTablet ? displayName || username : undefined}
+                >
+                  {!isTablet && <span className="workbench-btn-label">{displayName || username}</span>}
+                  {!isTablet && (
+                    <Tag
+                      color={role === 'admin' ? 'gold' : role === 'readwrite' ? 'blue' : 'default'}
+                      className="workbench-header-tag-extra"
+                      style={{ margin: '0 0 0 6px', fontSize: 11, lineHeight: '18px', padding: '0 5px' }}
+                    >
+                      {role === 'admin' ? t('Admin') : role === 'readwrite' ? 'RW' : 'RO'}
+                    </Tag>
+                  )}
                 </Button>
               </Dropdown>
             )}
@@ -1054,73 +1150,77 @@ export const WorkbenchLayout: React.FC = () => {
         )
       )}
 
-      {/* Main Split Body */}
+      {/* Main Split Body — Keep-Alive ConnectionSidebar prevents re-mounting & re-fetching metadata on toggle */}
       <div style={{ flex: 1, minHeight: 0, minWidth: 0, display: 'flex', overflow: 'hidden', position: 'relative' }}>
-        {!sidebarCollapsed && (
-          <>
-            {isNarrowViewport && (
-              <div
-                onClick={() => setSidebarCollapsed(true)}
-                style={{
+        {isNarrowViewport && (
+          <div
+            onClick={() => setSidebarCollapsed(true)}
+            style={{
+              position: 'absolute',
+              inset: 0,
+              background: 'rgba(0, 0, 0, 0.38)',
+              zIndex: 50,
+              opacity: sidebarCollapsed ? 0 : 1,
+              pointerEvents: sidebarCollapsed ? 'none' : 'auto',
+              transition: 'opacity 0.2s ease',
+            }}
+          />
+        )}
+        <aside
+          ref={asideRef}
+          aria-hidden={sidebarCollapsed}
+          style={
+            isNarrowViewport
+              ? {
                   position: 'absolute',
-                  inset: 0,
-                  background: 'rgba(0, 0, 0, 0.35)',
-                  zIndex: 50,
-                }}
-              />
-            )}
-            <aside
-              ref={asideRef}
-              style={
-                isNarrowViewport
-                  ? {
-                      position: 'absolute',
-                      top: 0,
-                      bottom: 0,
-                      left: 0,
-                      width: Math.min(286, Math.max(220, window.innerWidth - 48)),
-                      zIndex: 55,
-                      overflow: 'hidden',
-                      background: darkMode ? '#111318' : '#fafafa',
-                      boxShadow: '4px 0 18px rgba(0,0,0,0.28)',
-                      borderRight: '1px solid rgba(128,128,128,0.22)',
-                    }
-                  : {
-                      width: sidebarWidth,
-                      minWidth: 200,
-                      maxWidth: 'min(480px, 42vw)',
-                      flexShrink: 0,
-                      overflow: 'hidden',
-                      background: darkMode ? '#111318' : '#fafafa',
-                    }
+                  top: 0,
+                  bottom: 0,
+                  left: 0,
+                  width: Math.min(296, Math.max(232, window.innerWidth - 44)),
+                  zIndex: 55,
+                  overflow: 'hidden',
+                  background: darkMode ? '#111318' : '#fafafa',
+                  boxShadow: sidebarCollapsed ? 'none' : '4px 0 22px rgba(0,0,0,0.32)',
+                  borderRight: '1px solid rgba(128,128,128,0.22)',
+                  transform: sidebarCollapsed ? 'translateX(-104%)' : 'translateX(0)',
+                  pointerEvents: sidebarCollapsed ? 'none' : 'auto',
+                  transition: 'transform 0.22s cubic-bezier(0.22, 1, 0.36, 1)',
+                }
+              : {
+                  display: sidebarCollapsed ? 'none' : 'block',
+                  width: sidebarWidth,
+                  minWidth: 200,
+                  maxWidth: 'min(480px, 42vw)',
+                  flexShrink: 0,
+                  overflow: 'hidden',
+                  background: darkMode ? '#111318' : '#fafafa',
+                }
+          }
+        >
+          <ConnectionSidebar
+            onNewConnection={handleSidebarNewConnection}
+            onEditConnection={handleSidebarEditConnection}
+            onOpenCreateTable={handleSidebarOpenCreateTable}
+            onOpenTransfer={handleSidebarOpenTransfer}
+            onItemOpened={handleSidebarItemOpened}
+          />
+        </aside>
+        {!isNarrowViewport && !sidebarCollapsed && (
+          <div
+            ref={sidebarSplitterRef}
+            className="dbharbor-sidebar-splitter"
+            onPointerDown={handleSidebarSplitterPointerDown}
+            onDoubleClick={() => {
+              setSidebarWidth(272);
+              if (asideRef.current) {
+                asideRef.current.style.width = '272px';
               }
-            >
-              <ConnectionSidebar
-                onNewConnection={handleSidebarNewConnection}
-                onEditConnection={handleSidebarEditConnection}
-                onOpenCreateTable={handleSidebarOpenCreateTable}
-                onOpenTransfer={handleSidebarOpenTransfer}
-                onItemOpened={handleSidebarItemOpened}
-              />
-            </aside>
-            {!isNarrowViewport && (
-              <div
-                ref={sidebarSplitterRef}
-                className="dbharbor-sidebar-splitter"
-                onPointerDown={handleSidebarSplitterPointerDown}
-                onDoubleClick={() => {
-                  setSidebarWidth(272);
-                  if (asideRef.current) {
-                    asideRef.current.style.width = '272px';
-                  }
-                  localStorage.setItem('dbharbor_sidebar_width', '272');
-                  window.requestAnimationFrame(() => {
-                    window.dispatchEvent(new Event('dbharbor-layout-settled'));
-                  });
-                }}
-              />
-            )}
-          </>
+              localStorage.setItem('dbharbor_sidebar_width', '272');
+              window.requestAnimationFrame(() => {
+                window.dispatchEvent(new Event('dbharbor-layout-settled'));
+              });
+            }}
+          />
         )}
 
         <main style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
@@ -1245,14 +1345,14 @@ export const WorkbenchLayout: React.FC = () => {
             </div>
           ) : isMobile && activeTabObj ? (
             <div style={{ flex: 1, minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-              {/* Mobile Single-Pill Tab Switcher Bar */}
+              {/* Mobile Single-Pill Tab Switcher Bar (touch-sized, anti-mis-tap) */}
               <div
                 style={{
-                  height: 36,
+                  height: 42,
                   padding: '0 8px',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 4,
+                  gap: 6,
                   borderBottom: '1px solid rgba(128,128,128,0.16)',
                   background: darkMode ? '#14161c' : '#fafafa',
                   flexShrink: 0,
@@ -1260,6 +1360,7 @@ export const WorkbenchLayout: React.FC = () => {
               >
                 <Dropdown
                   trigger={['click']}
+                  placement="bottomLeft"
                   menu={{
                     selectedKeys: [activeTabObj.key],
                     items: tabs.map((tb, idx) => {
@@ -1267,14 +1368,22 @@ export const WorkbenchLayout: React.FC = () => {
                       return {
                         key: tb.key,
                         label: (
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, maxWidth: '72vw' }}>
-                            <Space size={6} style={{ minWidth: 0, overflow: 'hidden' }}>
+                          <div
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              gap: 10,
+                              width: 'min(76vw, 310px)',
+                            }}
+                          >
+                            <Space size={6} style={{ minWidth: 0, flex: 1, overflow: 'hidden' }}>
                               {b && (
                                 <span
                                   style={{
                                     fontSize: 10,
                                     fontWeight: 700,
-                                    padding: '0 4px',
+                                    padding: '1px 5px',
                                     borderRadius: 4,
                                     background: b.color,
                                     color: '#fff',
@@ -1288,9 +1397,30 @@ export const WorkbenchLayout: React.FC = () => {
                                 {tb.title}
                               </span>
                             </Space>
-                            <Typography.Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>
-                              #{idx + 1}
-                            </Typography.Text>
+                            <Space size={4} style={{ flexShrink: 0 }}>
+                              <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                                #{idx + 1}
+                              </Typography.Text>
+                              <span
+                                role="button"
+                                title={t('Close Tab')}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  closeTab(tb.key);
+                                }}
+                                style={{
+                                  width: 28,
+                                  height: 28,
+                                  borderRadius: 6,
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  opacity: 0.72,
+                                }}
+                              >
+                                <CloseOutlined style={{ fontSize: 12 }} />
+                              </span>
+                            </Space>
                           </div>
                         ),
                         onClick: () => setActiveTab(tb.key),
@@ -1299,14 +1429,14 @@ export const WorkbenchLayout: React.FC = () => {
                   }}
                 >
                   <Button
-                    size="small"
                     style={{
                       flex: 1,
+                      height: 34,
                       minWidth: 0,
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'space-between',
-                      padding: '0 8px',
+                      padding: '0 10px',
                       overflow: 'hidden',
                     }}
                   >
@@ -1316,7 +1446,7 @@ export const WorkbenchLayout: React.FC = () => {
                           style={{
                             fontSize: 10,
                             fontWeight: 700,
-                            padding: '0 4px',
+                            padding: '1px 5px',
                             borderRadius: 4,
                             background: DB_SHORT_LABELS[activeTabObj.dbType].color,
                             color: '#fff',
@@ -1338,18 +1468,35 @@ export const WorkbenchLayout: React.FC = () => {
                     </Space>
                   </Button>
                 </Dropdown>
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<CloseOutlined />}
-                  title={t('Close Tab')}
-                  onClick={() => closeTab(activeTabObj.key)}
-                />
+                {activeTabObj.dbType !== 'redis' && activeTabObj.dbType !== 'mongodb' && (
+                  <Button
+                    style={{ width: 34, height: 34, padding: 0, flexShrink: 0 }}
+                    icon={<CodeOutlined />}
+                    title={t('New SQL Console')}
+                    onClick={() =>
+                      openTab({
+                        key: `sql:${activeTabObj.connectionId}:${Date.now()}`,
+                        title: `SQL - ${activeTabObj.database || activeTabObj.connName}`,
+                        kind: 'sql_console',
+                        connectionId: activeTabObj.connectionId,
+                        connName: activeTabObj.connName,
+                        dbType: activeTabObj.dbType,
+                        database: activeTabObj.database,
+                        schema: activeTabObj.schema,
+                      })
+                    }
+                  />
+                )}
                 <Dropdown
                   trigger={['click']}
+                  placement="bottomRight"
                   menu={{ items: buildTabContextMenuItems(activeTabObj, activeTabIdx >= 0 ? activeTabIdx : 0) }}
                 >
-                  <Button type="text" size="small" icon={<MoreOutlined />} title={t('Tab Actions')} />
+                  <Button
+                    style={{ width: 34, height: 34, padding: 0, flexShrink: 0 }}
+                    icon={<MoreOutlined style={{ fontSize: 16 }} />}
+                    title={t('Tab Actions')}
+                  />
                 </Dropdown>
               </div>
 
@@ -1405,6 +1552,7 @@ export const WorkbenchLayout: React.FC = () => {
                   return (
                     <Dropdown
                       trigger={['click']}
+                      placement="bottomRight"
                       menu={{ items: buildTabContextMenuItems(activeObj, activeIdx >= 0 ? activeIdx : 0) }}
                     >
                       <Tooltip title={t('Tab Actions')}>

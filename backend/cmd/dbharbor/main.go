@@ -46,8 +46,50 @@ func main() {
 	}
 	defer st.Close()
 
+	if cfg.RecoverAdminCLI || cfg.Recovery.Enabled {
+		trigger := "config.json"
+		if cfg.RecoverAdminCLI {
+			trigger = "cli (-recover-admin)"
+		}
+		recRes, recErr := st.ExecuteAdminRecovery(store.AdminRecoveryRequest{
+			AdminUsername: cfg.Recovery.AdminUsername,
+			NewPassword:   cfg.Recovery.NewPassword,
+			Reset2FA:      cfg.Recovery.Reset2FA,
+			Source:        trigger,
+		})
+		if recErr != nil {
+			log.Fatalf("[DBHarbor] Emergency admin recovery failed: %v", recErr)
+		}
+		if !cfg.RecoverAdminCLI {
+			if dErr := config.DisarmRecoveryConfigFile(cfg.ConfigFile); dErr != nil {
+				log.Printf("[DBHarbor] WARNING: failed to disarm recovery block in %s: %v", cfg.ConfigFile, dErr)
+			}
+		}
+		fmt.Printf("\n============================================================\n")
+		fmt.Printf("  DBHarbor Emergency Admin Recovery Completed\n")
+		fmt.Printf("  Trigger         : %s\n", trigger)
+		fmt.Printf("  Admin Username  : %s (created=%v)\n", recRes.Username, recRes.CreatedNew)
+		if recRes.GeneratedPassword != "" {
+			fmt.Printf("  Temporary Pass  : %s\n", recRes.GeneratedPassword)
+			fmt.Printf("  Notice          : Save this password now and change it after sign-in!\n")
+		} else {
+			fmt.Printf("  Password Status : Updated from recovery input\n")
+		}
+		fmt.Printf("  2FA Reset       : %v\n", recRes.Reset2FA)
+		fmt.Printf("  Revoked Sessions: %d\n", recRes.RevokedSessions)
+		fmt.Printf("  DB Backup       : %s\n", recRes.BackupPath)
+		fmt.Printf("============================================================\n\n")
+		if cfg.RecoverAdminCLI {
+			return
+		}
+	}
+
 	if cfg.InitOnly {
-		fmt.Printf("[DBHarbor] Initialized data directory and administrator store at %s\n", cfg.DataDir)
+		if st.NeedsSetup() {
+			fmt.Printf("[DBHarbor] Initialized vault and metadata database at %s (first-run Web administrator setup pending)\n", cfg.DataDir)
+		} else {
+			fmt.Printf("[DBHarbor] Initialized data directory and administrator store at %s\n", cfg.DataDir)
+		}
 		return
 	}
 
@@ -55,7 +97,14 @@ func main() {
 	defer pm.CloseAll()
 
 	tm := auth.NewTokenManager(vault.DeriveBytes("jwt-signing-v1"))
-	router := api.NewRouter(st, pm, tm)
+	router := api.NewRouterWithOptions(st, pm, tm, api.RouterOptions{
+		ProtectorSecret:            vault.DeriveBytes("login-protector-hmac-v1"),
+		MaxImportMB:                cfg.MaxImportMB,
+		TrustedProxies:             cfg.TrustedProxies,
+		CORSOrigins:                cfg.CORSOrigins,
+		AllowPrivateNetForNonAdmin: cfg.Security.AllowPrivateNetworkForNonAdmin,
+		DuckDBCliPath:              cfg.Security.DuckDBCliPath,
+	})
 
 	ln, cleanupListener, endpointDisplay, err := config.PrepareListener(cfg)
 	if err != nil {

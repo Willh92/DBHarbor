@@ -574,7 +574,13 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
             <Space wrap>
               {canWrite && (
-                <Button type="primary" size="small" icon={<PlusOutlined />} onClick={openAddColumnModal}>
+                <Button
+                  type="primary"
+                  size="small"
+                  style={isMobile ? { height: 34, paddingInline: 12 } : undefined}
+                  icon={<PlusOutlined />}
+                  onClick={openAddColumnModal}
+                >
                   {t('Add Column (ADD COLUMN)')}
                 </Button>
               )}
@@ -588,6 +594,8 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
             </Space>
             <Space size={6} wrap>
               <Dropdown
+                trigger={['click']}
+                placement="bottomRight"
                 menu={{
                   items: [
                     { key: 'cp_sel', label: 'SELECT (Copy)', onClick: () => handleGenerateSQL('select', false) },
@@ -601,12 +609,21 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
                   ],
                 }}
               >
-                <Button size="small" icon={<CodeOutlined />}>
+                <Button
+                  size="small"
+                  style={isMobile ? { height: 34, paddingInline: 10 } : undefined}
+                  icon={<CodeOutlined />}
+                >
                   {t('Generate SQL')}
                 </Button>
               </Dropdown>
-              <Button size="small" icon={<ReloadOutlined />} onClick={loadStructure}>
-                {t('Refresh Structure')}
+              <Button
+                size="small"
+                style={isMobile ? { height: 34, paddingInline: 10 } : undefined}
+                icon={<ReloadOutlined />}
+                onClick={loadStructure}
+              >
+                {isMobile ? '' : t('Refresh Structure')}
               </Button>
             </Space>
           </div>

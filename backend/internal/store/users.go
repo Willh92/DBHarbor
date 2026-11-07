@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -14,7 +15,131 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-var validUsernameRe = regexp.MustCompile(`^[a-zA-Z0-9._@-]{2,64}$`)
+var (
+	validUsernameRe       = regexp.MustCompile(`^[a-zA-Z0-9._@-]{2,64}$`)
+	ErrAlreadyInitialized = errors.New("administrator account has already been initialized")
+)
+
+// NeedsSetup returns true when no user accounts exist yet and initial administrator setup is required.
+func (s *Store) NeedsSetup() bool {
+	if s.initialized.Load() {
+		return false
+	}
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
+	if s.initialized.Load() {
+		return false
+	}
+	var cnt int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&cnt); err == nil && cnt > 0 {
+		s.initialized.Store(true)
+		return false
+	}
+	return true
+}
+
+// SetupInitialAdmin atomically creates the very first administrator account (and optional login branding)
+// when the user store is empty. Subsequent calls always return ErrAlreadyInitialized.
+func (s *Store) SetupInitialAdmin(
+	username string,
+	displayName string,
+	password string,
+	branding *LoginBrandingConfig,
+) (User, error) {
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
+
+	if s.initialized.Load() {
+		return User{}, ErrAlreadyInitialized
+	}
+
+	uname := strings.TrimSpace(username)
+	if !validUsernameRe.MatchString(uname) {
+		return User{}, errors.New("username must be 2-64 characters using letters, numbers, '.', '_', '-', or '@'")
+	}
+	if len(password) < 8 {
+		return User{}, errors.New("administrator password must be at least 8 characters")
+	}
+	dname := strings.TrimSpace(displayName)
+	if len(dname) > 64 {
+		dname = dname[:64]
+	}
+
+	var validatedBranding *LoginBrandingConfig
+	var brandingJSON string
+	if branding != nil {
+		clean, bErr := NormalizeAndValidateLoginBranding(*branding)
+		if bErr != nil {
+			return User{}, bErr
+		}
+		enc, mErr := json.Marshal(clean)
+		if mErr != nil {
+			return User{}, mErr
+		}
+		validatedBranding = &clean
+		brandingJSON = string(enc)
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return User{}, err
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return User{}, err
+	}
+
+	var existing int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&existing); err != nil {
+		_ = tx.Rollback()
+		return User{}, err
+	}
+	if existing > 0 {
+		_ = tx.Rollback()
+		s.initialized.Store(true)
+		return User{}, ErrAlreadyInitialized
+	}
+
+	id := crypto.NewUUID()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.Exec(
+		`INSERT INTO users (id, username, display_name, password_hash, role, disabled, can_create_conn, conn_scope, password_changed, created_at)
+		 VALUES (?, ?, ?, ?, ?, 0, 1, 'all', 1, ?)`,
+		id, uname, dname, string(hash), RoleAdmin, now,
+	); err != nil {
+		_ = tx.Rollback()
+		return User{}, err
+	}
+
+	if validatedBranding != nil {
+		if _, err := tx.Exec(
+			`INSERT INTO system_settings (key, value, updated_at) VALUES ('login_branding', ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+			brandingJSON, now,
+		); err != nil {
+			_ = tx.Rollback()
+			return User{}, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return User{}, err
+	}
+
+	s.initialized.Store(true)
+	if validatedBranding != nil {
+		s.brandingMu.Lock()
+		s.branding = *validatedBranding
+		s.brandingMu.Unlock()
+	}
+	s.refreshPrincipal(id)
+	u, err := s.GetUserByID(id)
+	if err != nil {
+		return User{}, err
+	}
+	return *u, nil
+}
 
 func NormalizeRole(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
@@ -288,6 +413,7 @@ func (s *Store) CreateUser(in CreateUserInput) (User, error) {
 	if err != nil {
 		return User{}, err
 	}
+	s.initialized.Store(true)
 	s.refreshPrincipal(id)
 	u, err := s.GetUserByID(id)
 	if err != nil {
@@ -512,6 +638,23 @@ func (s *Store) DeleteUser(targetUserID, actorUserID string) ([]string, []string
 
 // --- Connection Access Control, Duplication & Sanitized Import/Export ---
 
+func redactHostDataDirPrefix(filePath, dataDir string) string {
+	fp := strings.TrimSpace(filePath)
+	if fp == "" || fp == ":memory:" || strings.TrimSpace(dataDir) == "" {
+		return fp
+	}
+	absData, err1 := filepath.Abs(dataDir)
+	absFile, err2 := filepath.Abs(fp)
+	if err1 != nil || err2 != nil {
+		return filepath.Base(fp)
+	}
+	rel, err := filepath.Rel(absData, absFile)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return filepath.Base(fp)
+	}
+	return filepath.ToSlash(rel)
+}
+
 func (s *Store) ListConnectionsForPrincipal(p UserPrincipal) ([]SavedConnection, error) {
 	all, err := s.ListConnections()
 	if err != nil {
@@ -526,6 +669,7 @@ func (s *Store) ListConnectionsForPrincipal(p UserPrincipal) ([]SavedConnection,
 
 	filtered := make([]SavedConnection, 0, len(all))
 	for _, c := range all {
+		c.FilePath = redactHostDataDirPrefix(c.FilePath, s.dataDir)
 		isOwner := c.OwnerID != "" && c.OwnerID == p.ID
 		if isOwner {
 			c.Editable = p.Role != RoleReadOnly

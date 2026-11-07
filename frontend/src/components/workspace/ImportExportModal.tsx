@@ -252,6 +252,7 @@ export const ImportExportModal: React.FC<Props> = ({
 
                 <Form.Item label={t('Export Format')} style={{ marginBottom: 14 }}>
                   <Radio.Group
+                    className="dbharbor-pill-radios"
                     value={exportFormat}
                     onChange={(e) => setExportFormat(e.target.value)}
                     style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}
@@ -311,6 +312,7 @@ export const ImportExportModal: React.FC<Props> = ({
               <Form layout="vertical">
                 <Form.Item label={t('Import File Format')} style={{ marginBottom: 12 }}>
                   <Radio.Group
+                    className="dbharbor-pill-radios"
                     value={importFormat}
                     onChange={(e) => setImportFormat(e.target.value)}
                     style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}

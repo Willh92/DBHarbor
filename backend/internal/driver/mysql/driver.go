@@ -97,6 +97,7 @@ func New(cfg driver.ConnectionConfig, variantType, productName string, defaultPo
 	db.SetMaxOpenConns(12)
 	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(15 * time.Minute)
+	db.SetConnMaxIdleTime(3 * time.Minute)
 	return &Driver{cfg: cfg, variantType: variantType, productName: productName, db: db}, nil
 }
 

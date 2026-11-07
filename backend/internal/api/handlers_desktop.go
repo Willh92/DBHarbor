@@ -1,10 +1,13 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -352,6 +355,19 @@ var protectedInternalFiles = map[string]bool{
 	".secret.key":         true,
 	".master.key":         true,
 	"ui_prefs.json":       true,
+	"config.json":         true,
+}
+
+func hasWindowsADS(s string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	trimmed := strings.TrimSpace(s)
+	if len(trimmed) >= 2 && trimmed[1] == ':' &&
+		((trimmed[0] >= 'a' && trimmed[0] <= 'z') || (trimmed[0] >= 'A' && trimmed[0] <= 'Z')) {
+		return strings.IndexByte(trimmed[2:], ':') >= 0
+	}
+	return strings.IndexByte(trimmed, ':') >= 0
 }
 
 func cleanDBFilePathCandidate(raw string) string {
@@ -367,6 +383,27 @@ func cleanDBFilePathCandidate(raw string) string {
 		s = s[:qIdx]
 	}
 	return strings.TrimSpace(s)
+}
+
+func resolveCandidateAbsPath(baseDataDir, cleaned string) (string, error) {
+	if filepath.IsAbs(cleaned) {
+		return filepath.Abs(cleaned)
+	}
+	if baseDataDir != "" {
+		return filepath.Abs(filepath.Join(baseDataDir, cleaned))
+	}
+	return filepath.Abs(cleaned)
+}
+
+func evalExistingSymlinkPath(absPath string) string {
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil && resolved != "" {
+		return resolved
+	}
+	parent := filepath.Dir(absPath)
+	if resolvedParent, err := filepath.EvalSymlinks(parent); err == nil && resolvedParent != "" {
+		return filepath.Join(resolvedParent, filepath.Base(absPath))
+	}
+	return absPath
 }
 
 func isPathWithinDir(targetPath, baseDir string) bool {
@@ -389,22 +426,18 @@ func isPathWithinDir(targetPath, baseDir string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func (s *Server) isProtectedInternalPath(candidatePath string) bool {
-	cleaned := cleanDBFilePathCandidate(candidatePath)
-	if cleaned == "" || cleaned == ":memory:" {
-		return false
-	}
-	absTarget, err := filepath.Abs(cleaned)
-	if err != nil {
-		return false
+func isProtectedMatch(absTarget, absBase string) bool {
+	if isPathWithinDir(absTarget, filepath.Join(absBase, ".backups")) ||
+		isPathWithinDir(absTarget, filepath.Join(absBase, "backups")) {
+		return true
 	}
 	baseName := strings.ToLower(filepath.Base(absTarget))
-	if !protectedInternalFiles[baseName] && !strings.HasPrefix(baseName, "dbharbor.db") {
-		return false
+	// Strip any trailing Windows ADS or dots/spaces just in case
+	if cIdx := strings.IndexByte(baseName, ':'); cIdx >= 0 {
+		baseName = baseName[:cIdx]
 	}
-	baseDataDir := s.resolveBaseDataDir()
-	absBase, err := filepath.Abs(baseDataDir)
-	if err != nil {
+	baseName = strings.TrimRight(baseName, ". ")
+	if !protectedInternalFiles[baseName] && !strings.HasPrefix(baseName, "dbharbor.db") {
 		return false
 	}
 	targetParent := filepath.Clean(filepath.Dir(absTarget))
@@ -415,18 +448,146 @@ func (s *Server) isProtectedInternalPath(candidatePath string) bool {
 	return targetParent == cleanBase
 }
 
+func (s *Server) isProtectedInternalPath(candidatePath string) bool {
+	cleaned := cleanDBFilePathCandidate(candidatePath)
+	if cleaned == "" || cleaned == ":memory:" {
+		return false
+	}
+	baseDataDir := s.resolveBaseDataDir()
+	absBase, err := filepath.Abs(baseDataDir)
+	if err != nil {
+		return false
+	}
+	absTarget, err := resolveCandidateAbsPath(baseDataDir, cleaned)
+	if err != nil {
+		return false
+	}
+	if isProtectedMatch(absTarget, absBase) {
+		return true
+	}
+	// Also test against CWD-relative interpretation if cleaned was relative
+	if !filepath.IsAbs(cleaned) {
+		if cwdAbs, cErr := filepath.Abs(cleaned); cErr == nil && isProtectedMatch(cwdAbs, absBase) {
+			return true
+		}
+	}
+	realTarget := evalExistingSymlinkPath(absTarget)
+	realBase := evalExistingSymlinkPath(absBase)
+	return isProtectedMatch(realTarget, realBase)
+}
+
+func (s *Server) normalizeConnectionFilePathForWebUser(c *Context, rawFilePath string) string {
+	trimmed := strings.TrimSpace(rawFilePath)
+	if s.desktop.Enabled || c.IsAdmin() || trimmed == "" || trimmed == ":memory:" {
+		return rawFilePath
+	}
+	low := strings.ToLower(trimmed)
+	if strings.HasPrefix(low, "file:") || filepath.IsAbs(trimmed) || strings.ContainsAny(trimmed, `/\:`) || trimmed == "." || trimmed == ".." {
+		return rawFilePath
+	}
+	if s.isProtectedInternalPath(trimmed) {
+		return rawFilePath
+	}
+	return filepath.ToSlash(filepath.Join("local_databases", trimmed))
+}
+
 func (s *Server) validateConnectionFilePath(c *Context, dbType, rawFilePath string) (int, string) {
 	cleaned := cleanDBFilePathCandidate(rawFilePath)
 	if cleaned == "" || cleaned == ":memory:" {
 		return http.StatusOK, ""
 	}
+	if hasWindowsADS(cleaned) {
+		return http.StatusBadRequest, "Invalid database file path"
+	}
 	if s.isProtectedInternalPath(cleaned) {
-		return http.StatusForbidden, "Access denied: connecting directly to DBHarbor's internal metadata database is prohibited"
+		return http.StatusForbidden, "Access denied: connecting directly to DBHarbor's internal metadata or configuration files is prohibited"
 	}
 	if !s.desktop.Enabled && !c.IsAdmin() {
 		baseDataDir := s.resolveBaseDataDir()
-		if !isPathWithinDir(cleaned, baseDataDir) {
-			return http.StatusForbidden, "Permission denied: non-admin accounts can only open database files inside the server application data directory"
+		localDBDir := filepath.Join(baseDataDir, "local_databases")
+		_ = os.MkdirAll(localDBDir, 0o700)
+		absTarget, err := resolveCandidateAbsPath(baseDataDir, cleaned)
+		if err != nil || !isPathWithinDir(absTarget, localDBDir) {
+			return http.StatusForbidden, "Permission denied: non-admin accounts can only open database files inside the server local_databases directory"
+		}
+		realTarget := evalExistingSymlinkPath(absTarget)
+		realLocal := evalExistingSymlinkPath(localDBDir)
+		if !isPathWithinDir(realTarget, realLocal) {
+			return http.StatusForbidden, "Permission denied: symbolic links escaping the local_databases sandbox are prohibited"
+		}
+	}
+	return http.StatusOK, ""
+}
+
+func isRestrictedInternalIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate()
+}
+
+func extractHostsFromMongoURI(rawURI string) []string {
+	uStr := strings.TrimSpace(rawURI)
+	if uStr == "" {
+		return nil
+	}
+	if parsed, err := url.Parse(uStr); err == nil && parsed.Host != "" {
+		var hosts []string
+		for _, part := range strings.Split(parsed.Host, ",") {
+			hp := strings.TrimSpace(part)
+			if hp == "" {
+				continue
+			}
+			if h, _, sErr := net.SplitHostPort(hp); sErr == nil {
+				hosts = append(hosts, strings.Trim(h, "[]"))
+			} else {
+				hosts = append(hosts, strings.Trim(hp, "[]"))
+			}
+		}
+		return hosts
+	}
+	return nil
+}
+
+func (s *Server) validateRemoteEndpointForWebUser(c *Context, cfg driver.ConnectionConfig) (int, string) {
+	if s.desktop.Enabled || c.IsAdmin() || s.opts.AllowPrivateNetForNonAdmin {
+		return http.StatusOK, ""
+	}
+	dbType := strings.ToLower(strings.TrimSpace(cfg.Type))
+	if dbType == "sqlite" || dbType == "duckdb" {
+		return http.StatusOK, ""
+	}
+
+	var candidates []string
+	if h := strings.TrimSpace(cfg.Host); h != "" {
+		candidates = append(candidates, strings.Trim(h, "[]"))
+	}
+	if strings.TrimSpace(cfg.URI) != "" {
+		candidates = append(candidates, extractHostsFromMongoURI(cfg.URI)...)
+	}
+
+	for _, host := range candidates {
+		if host == "" {
+			continue
+		}
+		if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+			return http.StatusForbidden, "Permission denied: non-admin accounts cannot connect to loopback, link-local, or private internal network addresses unless allowed by an administrator"
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			if isRestrictedInternalIP(ip) {
+				return http.StatusForbidden, "Permission denied: non-admin accounts cannot connect to loopback, link-local, or private internal network addresses unless allowed by an administrator"
+			}
+			continue
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		cancel()
+		if err == nil {
+			for _, addr := range addrs {
+				if isRestrictedInternalIP(addr.IP) {
+					return http.StatusForbidden, "Permission denied: target hostname resolves to a restricted internal or loopback address"
+				}
+			}
 		}
 	}
 	return http.StatusOK, ""
@@ -451,9 +612,11 @@ func listFilesystemRoots(baseDataDir string, sandboxed bool) []H {
 
 	if baseDataDir != "" {
 		localDBDir := filepath.Join(baseDataDir, "local_databases")
-		_ = os.MkdirAll(localDBDir, 0o755)
+		_ = os.MkdirAll(localDBDir, 0o700)
 		addRoot("Local DBs", localDBDir)
-		addRoot("Data Dir", baseDataDir)
+		if !sandboxed {
+			addRoot("Data Dir", baseDataDir)
+		}
 	}
 	if sandboxed {
 		return roots
@@ -479,7 +642,7 @@ func (s *Server) handleBrowseLocalFS(c *Context) {
 	}
 	baseDataDir := s.resolveBaseDataDir()
 	localDBDir := filepath.Join(baseDataDir, "local_databases")
-	_ = os.MkdirAll(localDBDir, 0o755)
+	_ = os.MkdirAll(localDBDir, 0o700)
 	sandboxed := !s.desktop.Enabled && !c.IsAdmin()
 
 	rawPath := strings.TrimSpace(c.Query("path"))
@@ -494,18 +657,21 @@ func (s *Server) handleBrowseLocalFS(c *Context) {
 	if targetDir == "" || targetDir == ":memory:" {
 		targetDir = defaultDir
 	}
-	if abs, err := filepath.Abs(targetDir); err == nil {
+	if abs, err := resolveCandidateAbsPath(baseDataDir, targetDir); err == nil {
 		targetDir = abs
 	}
-	if sandboxed && !isPathWithinDir(targetDir, baseDataDir) {
-		c.JSON(http.StatusForbidden, H{"error": "Permission denied: non-admin accounts can only browse inside the server application data directory"})
-		return
+	realLocalDBDir := evalExistingSymlinkPath(localDBDir)
+	if sandboxed {
+		if !isPathWithinDir(targetDir, localDBDir) || !isPathWithinDir(evalExistingSymlinkPath(targetDir), realLocalDBDir) {
+			c.JSON(http.StatusForbidden, H{"error": "Permission denied: non-admin accounts can only browse inside the server local_databases directory"})
+			return
+		}
 	}
 	if st, err := os.Stat(targetDir); err != nil {
 		targetDir = defaultDir
 	} else if !st.IsDir() {
 		targetDir = filepath.Dir(targetDir)
-		if sandboxed && !isPathWithinDir(targetDir, baseDataDir) {
+		if sandboxed && (!isPathWithinDir(targetDir, localDBDir) || !isPathWithinDir(evalExistingSymlinkPath(targetDir), realLocalDBDir)) {
 			targetDir = defaultDir
 		}
 	}
@@ -523,6 +689,9 @@ func (s *Server) handleBrowseLocalFS(c *Context) {
 			continue
 		}
 		fullEntryPath := filepath.Join(targetDir, name)
+		if sandboxed && !isPathWithinDir(evalExistingSymlinkPath(fullEntryPath), realLocalDBDir) {
+			continue
+		}
 		isDir := de.IsDir()
 		if !isDir && s.isProtectedInternalPath(fullEntryPath) {
 			continue
@@ -561,14 +730,18 @@ func (s *Server) handleBrowseLocalFS(c *Context) {
 	})
 
 	parentDir := filepath.Dir(targetDir)
-	if parentDir == targetDir || (sandboxed && !isPathWithinDir(parentDir, baseDataDir)) {
+	if parentDir == targetDir || (sandboxed && !isPathWithinDir(parentDir, localDBDir)) {
 		parentDir = ""
+	}
+	reportedDataDir := baseDataDir
+	if sandboxed {
+		reportedDataDir = localDBDir
 	}
 
 	c.JSON(http.StatusOK, H{
 		"currentDir": targetDir,
 		"parentDir":  parentDir,
-		"dataDir":    baseDataDir,
+		"dataDir":    reportedDataDir,
 		"roots":      listFilesystemRoots(baseDataDir, sandboxed),
 		"entries":    entries,
 	})
@@ -579,7 +752,7 @@ func (s *Server) handleUploadLocalDBFile(c *Context) {
 		c.JSON(http.StatusForbidden, H{"error": "Permission denied: your account is not authorized to upload database files"})
 		return
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 512<<20)
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, s.maxImportBytes())
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": "Please select a local database file to upload"})

@@ -23,6 +23,7 @@ func init() {
 		Key: "encrypt", Label: "Encryption (encrypt)", Type: "select", Target: "options", DefaultValue: "disable",
 		SelectOptions: []driver.SelectOption{
 			{Label: "Disabled (disable)", Value: "disable"},
+			{Label: "Verified TLS (encrypt=true)", Value: "verified"},
 			{Label: "Skip Certificate Verification (true + TrustServerCertificate)", Value: "true"},
 		},
 	})
@@ -66,9 +67,15 @@ func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
 	q := u.Query()
 	q.Set("database", dbName)
 	enc := cfg.Option("encrypt", "disable")
-	q.Set("encrypt", enc)
-	if enc == "true" {
+	switch enc {
+	case "verified":
+		q.Set("encrypt", "true")
+		q.Set("TrustServerCertificate", "false")
+	case "true":
+		q.Set("encrypt", "true")
 		q.Set("TrustServerCertificate", "true")
+	default:
+		q.Set("encrypt", enc)
 	}
 	u.RawQuery = q.Encode()
 
@@ -78,6 +85,8 @@ func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
 	}
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(3)
+	db.SetConnMaxLifetime(15 * time.Minute)
+	db.SetConnMaxIdleTime(3 * time.Minute)
 	return &Driver{cfg: cfg, db: db}, nil
 }
 
@@ -303,7 +312,16 @@ func (d *Driver) ManageObject(ctx context.Context, req driver.ObjectActionReques
 	}
 	conn, cErr := d.db.Conn(ctx)
 	if cErr == nil {
-		defer conn.Close()
+		defer func() {
+			defaultDB := d.cfg.Database
+			if defaultDB == "" {
+				defaultDB = "master"
+			}
+			if req.Database != "" && req.Database != defaultDB {
+				_, _ = conn.ExecContext(context.Background(), "USE "+sqlbase.QuoteIdent(sqlbase.DialectSQLServer, defaultDB))
+			}
+			_ = conn.Close()
+		}()
 		if req.Database != "" {
 			_, _ = conn.ExecContext(ctx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectSQLServer, req.Database))
 		}
@@ -324,7 +342,21 @@ func (d *Driver) ManageObject(ctx context.Context, req driver.ObjectActionReques
 
 func (d *Driver) ExecuteSQL(ctx context.Context, database, query string, maxRows int) ([]driver.QueryResult, error) {
 	if database != "" {
-		_, _ = d.db.ExecContext(ctx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectSQLServer, database))
+		conn, cErr := d.db.Conn(ctx)
+		if cErr == nil {
+			defer func() {
+				defaultDB := d.cfg.Database
+				if defaultDB == "" {
+					defaultDB = "master"
+				}
+				if defaultDB != database {
+					_, _ = conn.ExecContext(context.Background(), "USE "+sqlbase.QuoteIdent(sqlbase.DialectSQLServer, defaultDB))
+				}
+				_ = conn.Close()
+			}()
+			_, _ = conn.ExecContext(ctx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectSQLServer, database))
+			return sqlbase.ExecuteMultiSQLConn(ctx, conn, query, maxRows)
+		}
 	}
 	return sqlbase.ExecuteMultiSQL(ctx, d.db, query, maxRows)
 }

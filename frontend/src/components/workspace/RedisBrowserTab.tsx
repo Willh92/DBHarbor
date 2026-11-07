@@ -382,10 +382,11 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
               resizable: false,
               onHeaderCell: () => ({ 'data-copy-skip': 'true' } as any),
               render: (_: any, r: KVCollectionItem) => (
-                <Space size={2} data-copy-skip="true">
+                <Space size={6} data-copy-skip="true">
                   <Button
                     size="small"
                     type="text"
+                    style={isMobile ? { minWidth: 32, minHeight: 32 } : undefined}
                     icon={<EditOutlined />}
                     title={t('Edit')}
                     onClick={() => {
@@ -398,13 +399,9 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
                       setItemModalOpen(true);
                     }}
                   />
-                  <Button
-                    size="small"
-                    type="text"
-                    danger
-                    icon={<DeleteOutlined />}
+                  <Popconfirm
                     title={t('Delete')}
-                    onClick={async () => {
+                    onConfirm={async () => {
                       await api.kvMutateItem(tab.connectionId, {
                         db: dbIndex,
                         key: detailKey,
@@ -415,21 +412,30 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
                       });
                       loadKeyDetail(detailKey);
                     }}
-                  />
+                  >
+                    <Button
+                      size="small"
+                      type="text"
+                      danger
+                      style={isMobile ? { minWidth: 32, minHeight: 32 } : undefined}
+                      icon={<DeleteOutlined />}
+                      title={t('Delete')}
+                    />
+                  </Popconfirm>
                 </Space>
               ),
             },
           ]
         : []),
     ];
-  }, [detail?.key, detail?.type, tab.connectionId, dbIndex, loadKeyDetail, canWrite, itemForm, t]);
+  }, [detail?.key, detail?.type, tab.connectionId, dbIndex, loadKeyDetail, canWrite, itemForm, isMobile, t]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minWidth: 0, minHeight: 0, padding: isMobile ? 6 : 12, gap: 8, overflow: 'hidden' }}>
       {isMobile && (
         <Segmented
           block
-          size="small"
+          size="middle"
           value={mobilePane}
           onChange={(v) => setMobilePane(v as 'keys' | 'value' | 'cli')}
           options={[
@@ -445,10 +451,10 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
           className="dbharbor-redis-left"
           style={isMobile ? { display: mobilePane === 'keys' ? 'flex' : 'none', flex: 1, maxHeight: 'none' } : undefined}
         >
-          <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap', flexShrink: 0 }}>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap', flexShrink: 0, alignItems: 'center' }}>
             <Select
-              size="small"
-              style={{ width: 108 }}
+              size={isMobile ? 'middle' : 'small'}
+              style={{ width: 108, height: isMobile ? 34 : undefined }}
               value={dbIndex}
               onChange={(v) => {
                 setDbIndex(v);
@@ -457,8 +463,8 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
               options={dbOptions}
             />
             <Input
-              size="small"
-              style={{ flex: 1, minWidth: 100 }}
+              size={isMobile ? 'middle' : 'small'}
+              style={{ flex: 1, minWidth: 100, height: isMobile ? 34 : undefined }}
               prefix={<SearchOutlined />}
               placeholder={t('Key pattern, e.g. user:*')}
               value={pattern}
@@ -466,15 +472,27 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
               onPressEnter={() => loadKeys(dbIndex, pattern)}
             />
             <Tooltip title={t('Refresh')}>
-              <Button size="small" icon={<ReloadOutlined />} onClick={() => loadKeys()} />
+              <Button
+                size="small"
+                style={isMobile ? { width: 34, height: 34, padding: 0 } : undefined}
+                icon={<ReloadOutlined />}
+                onClick={() => loadKeys()}
+              />
             </Tooltip>
             {canWrite && (
               <Tooltip title={t('New Redis Key (DB{db})', { db: dbIndex })}>
-                <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => setNewKeyOpen(true)} />
+                <Button
+                  size="small"
+                  style={isMobile ? { width: 34, height: 34, padding: 0 } : undefined}
+                  type="primary"
+                  icon={<PlusOutlined />}
+                  onClick={() => setNewKeyOpen(true)}
+                />
               </Tooltip>
             )}
             <Dropdown
               trigger={['click']}
+              placement="bottomRight"
               menu={{
                 items: [
                   {
@@ -526,12 +544,20 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
                 ],
               }}
             >
-              <Button size="small" icon={<MoreOutlined />} />
+              <Button
+                size="small"
+                style={isMobile ? { width: 34, height: 34, padding: 0 } : undefined}
+                icon={<MoreOutlined />}
+              />
             </Dropdown>
             {canWrite && (
               <Upload showUploadList={false} accept=".json" beforeUpload={handleImportKeysFile}>
                 <Tooltip title={t('Import Keys (.json)')}>
-                  <Button size="small" icon={<UploadOutlined />} />
+                  <Button
+                    size="small"
+                    style={isMobile ? { width: 34, height: 34, padding: 0 } : undefined}
+                    icon={<UploadOutlined />}
+                  />
                 </Tooltip>
               </Upload>
             )}
@@ -563,13 +589,13 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
               rowSelection={
                 canWrite
                   ? {
-                      columnWidth: 34,
+                      columnWidth: isMobile ? 38 : 40,
                       selectedRowKeys: checkedKeys,
                       onChange: setCheckedKeys,
                     }
                   : undefined
               }
-              pagination={{ pageSize: 50, size: 'small', responsive: true }}
+              pagination={{ pageSize: 50, size: 'small', simple: isMobile, responsive: true }}
               onRow={(r) => ({
                 onClick: () => {
                   loadKeyDetail(r.key);

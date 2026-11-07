@@ -21,6 +21,7 @@ import {
   DeleteOutlined,
   DownloadOutlined,
   EditOutlined,
+  MoreOutlined,
   PlayCircleOutlined,
   PlusOutlined,
   ReloadOutlined,
@@ -260,56 +261,119 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
       <Tabs
         size="small"
         tabBarExtraContent={
-          <Space size={6} wrap>
-            {canWrite && (
-              <Button size="small" icon={<UploadOutlined />} onClick={() => setImportOpen(true)}>
-                {t('Import Documents')}
-              </Button>
-            )}
+          isMobile ? (
             <Dropdown
+              trigger={['click']}
+              placement="bottomRight"
               menu={{
                 items: [
-                  { key: 'json', label: 'JSON Array (.json)', onClick: () => handleExport('json') },
-                  { key: 'jsonl', label: 'JSON Lines / NDJSON (.jsonl)', onClick: () => handleExport('jsonl') },
-                  { key: 'csv', label: 'CSV (.csv)', onClick: () => handleExport('csv') },
-                  { key: 'csv_bom', label: 'CSV Excel UTF-8 BOM (.csv)', onClick: () => handleExport('csv_bom') },
+                  ...(canWrite
+                    ? [
+                        {
+                          key: 'import',
+                          icon: <UploadOutlined />,
+                          label: t('Import Documents'),
+                          onClick: () => setImportOpen(true),
+                        },
+                        {
+                          key: 'rename',
+                          icon: <EditOutlined />,
+                          label: t('Rename Collection'),
+                          onClick: () => {
+                            setNewCollName(tab.table || '');
+                            setRenameOpen(true);
+                          },
+                        },
+                      ]
+                    : []),
+                  {
+                    key: 'users',
+                    icon: <TeamOutlined />,
+                    label: t('Users & Grants'),
+                    onClick: () =>
+                      openTab({
+                        key: `dbusers:${tab.connectionId}`,
+                        title: `${tab.connName} (${t('Users & Grants')})`,
+                        kind: 'db_users',
+                        connectionId: tab.connectionId,
+                        connName: tab.connName,
+                        dbType: tab.dbType,
+                        database: tab.database,
+                      }),
+                  },
+                  { type: 'divider' as const },
+                  {
+                    type: 'group' as const,
+                    label: t('Export Collection'),
+                    children: [
+                      { key: 'exp_json', icon: <DownloadOutlined />, label: 'JSON Array (.json)', onClick: () => handleExport('json') },
+                      { key: 'exp_jsonl', icon: <DownloadOutlined />, label: 'JSON Lines / NDJSON (.jsonl)', onClick: () => handleExport('jsonl') },
+                      { key: 'exp_csv', icon: <DownloadOutlined />, label: 'CSV (.csv)', onClick: () => handleExport('csv') },
+                      { key: 'exp_csv_bom', icon: <DownloadOutlined />, label: 'CSV Excel UTF-8 BOM (.csv)', onClick: () => handleExport('csv_bom') },
+                    ],
+                  },
                 ],
               }}
             >
-              <Button size="small" icon={<DownloadOutlined />}>
-                {t('Export Collection')}
-              </Button>
-            </Dropdown>
-            {canWrite && (
               <Button
                 size="small"
-                icon={<EditOutlined />}
-                onClick={() => {
-                  setNewCollName(tab.table || '');
-                  setRenameOpen(true);
+                style={{ width: 32, height: 32, padding: 0, marginLeft: 4 }}
+                icon={<MoreOutlined />}
+                title={t('Actions')}
+              />
+            </Dropdown>
+          ) : (
+            <Space size={6} wrap>
+              {canWrite && (
+                <Button size="small" icon={<UploadOutlined />} onClick={() => setImportOpen(true)}>
+                  {t('Import Documents')}
+                </Button>
+              )}
+              <Dropdown
+                menu={{
+                  items: [
+                    { key: 'json', label: 'JSON Array (.json)', onClick: () => handleExport('json') },
+                    { key: 'jsonl', label: 'JSON Lines / NDJSON (.jsonl)', onClick: () => handleExport('jsonl') },
+                    { key: 'csv', label: 'CSV (.csv)', onClick: () => handleExport('csv') },
+                    { key: 'csv_bom', label: 'CSV Excel UTF-8 BOM (.csv)', onClick: () => handleExport('csv_bom') },
+                  ],
                 }}
               >
-                {t('Rename Collection')}
+                <Button size="small" icon={<DownloadOutlined />}>
+                  {t('Export Collection')}
+                </Button>
+              </Dropdown>
+              {canWrite && (
+                <Button
+                  size="small"
+                  icon={<EditOutlined />}
+                  onClick={() => {
+                    setNewCollName(tab.table || '');
+                    setRenameOpen(true);
+                  }}
+                >
+                  {t('Rename Collection')}
+                </Button>
+              )}
+              <Button
+                size="small"
+                icon={<TeamOutlined />}
+                onClick={() =>
+                  openTab({
+                    key: `dbusers:${tab.connectionId}`,
+                    title: `${tab.connName} (${t('Users & Grants')})`,
+                    kind: 'db_users',
+                    connectionId: tab.connectionId,
+                    connName: tab.connName,
+                    dbType: tab.dbType,
+                    database: tab.database,
+                  })
+                }
+              >
+                {t('Users & Grants')}
               </Button>
-            )}
-            <Button
-              size="small"
-              icon={<TeamOutlined />}
-              onClick={() =>
-                openTab({
-                  key: `dbusers:${tab.connectionId}`,
-                  title: `${tab.connName} (${t('Users & Grants')})`,
-                  kind: 'db_users',
-                  connectionId: tab.connectionId,
-                  connName: tab.connName,
-                  dbType: tab.dbType,
-                  database: tab.database,
-                })
-              }
-            >
-              {t('Users & Grants')}
-            </Button>
-          </Space>
+            </Space>
+          )
         }
         items={[
           {
@@ -320,26 +384,32 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                 <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
                   <Input
                     addonBefore="Filter"
-                    style={{ width: 300, maxWidth: '100%', fontFamily: 'monospace' }}
-                    size="small"
+                    style={{ width: isMobile ? '100%' : 300, maxWidth: '100%', fontFamily: 'monospace' }}
+                    size={isMobile ? 'middle' : 'small'}
                     value={filterJson}
                     onChange={(e) => setFilterJson(e.target.value)}
                     onPressEnter={() => loadDocs(1, pageSize)}
                   />
                   <Input
                     addonBefore="Sort"
-                    style={{ width: 190, maxWidth: '100%', fontFamily: 'monospace' }}
-                    size="small"
+                    style={{ width: isMobile ? '100%' : 190, maxWidth: '100%', fontFamily: 'monospace' }}
+                    size={isMobile ? 'middle' : 'small'}
                     value={sortJson}
                     onChange={(e) => setSortJson(e.target.value)}
                     onPressEnter={() => loadDocs(1, pageSize)}
                   />
-                  <Button size="small" type="primary" onClick={() => loadDocs(1, pageSize)}>
+                  <Button
+                    size="small"
+                    style={isMobile ? { height: 34, paddingInline: 12 } : undefined}
+                    type="primary"
+                    onClick={() => loadDocs(1, pageSize)}
+                  >
                     {t('Query')}
                   </Button>
                   {canWrite && (
                     <Button
                       size="small"
+                      style={isMobile ? { height: 34, paddingInline: 12 } : undefined}
                       icon={<PlusOutlined />}
                       onClick={() => {
                         setEditingId(null);
@@ -355,14 +425,24 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                       title={t('Delete {count} selected documents?', { count: selectedIds.length })}
                       onConfirm={handleBatchDelete}
                     >
-                      <Button size="small" danger icon={<DeleteOutlined />}>
+                      <Button
+                        size="small"
+                        style={isMobile ? { height: 34, paddingInline: 10 } : undefined}
+                        danger
+                        icon={<DeleteOutlined />}
+                      >
                         {t('Delete Selected ({count})', { count: selectedIds.length })}
                       </Button>
                     </Popconfirm>
                   )}
-                  <Button size="small" icon={<ReloadOutlined />} onClick={() => loadDocs()} />
-                  <Segmented
+                  <Button
                     size="small"
+                    style={isMobile ? { width: 34, height: 34, padding: 0 } : undefined}
+                    icon={<ReloadOutlined />}
+                    onClick={() => loadDocs()}
+                  />
+                  <Segmented
+                    size={isMobile ? 'middle' : 'small'}
                     value={viewMode}
                     onChange={(v) => setViewMode(v as 'json' | 'table')}
                     options={[
@@ -451,7 +531,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                     rowSelection={
                       canWrite
                         ? {
-                            columnWidth: 40,
+                            columnWidth: isMobile ? 38 : 40,
                             selectedRowKeys: selectedIds,
                             onChange: setSelectedIds,
                           }
@@ -467,6 +547,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                 <div style={{ marginTop: 12, textAlign: 'right' }}>
                   <Pagination
                     size="small"
+                    simple={isMobile}
                     current={page}
                     pageSize={pageSize}
                     total={total}

@@ -3,6 +3,7 @@ import { ConfigProvider, Spin, theme as antdTheme } from 'antd';
 import type { Locale } from 'antd/es/locale';
 import enUS from 'antd/locale/en_US';
 import { api } from './api/client';
+import { useViewportPopupClamp } from './hooks/useViewportPopupClamp';
 import { useI18n } from './i18n/useI18n';
 import { useWorkbenchStore } from './store/useWorkbenchStore';
 
@@ -19,6 +20,8 @@ export const App: React.FC = () => {
   const { locale, t } = useI18n();
   const [antdLocale, setAntdLocale] = useState<Locale>(enUS);
 
+  useViewportPopupClamp();
+
   useEffect(() => {
     if (isDesktop) return;
     const handler = () => logout(false);
@@ -28,10 +31,17 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     document.documentElement.lang = locale;
-    document.title = isDesktop
-      ? `DBHarbor — ${t('Multi-Database Desktop Workbench')}`
-      : `DBHarbor — ${t('Multi-Database Web Workbench')}`;
-  }, [isDesktop, locale, t]);
+    if (isDesktop || token) {
+      document.title = isDesktop
+        ? `DBHarbor — ${t('Multi-Database Desktop Workbench')}`
+        : `DBHarbor — ${t('Multi-Database Web Workbench')}`;
+      const iconLink = document.querySelector('link[rel="icon"]') as HTMLLinkElement | null;
+      if (iconLink && iconLink.getAttribute('href') !== '/favicon.svg') {
+        iconLink.type = 'image/svg+xml';
+        iconLink.href = '/favicon.svg';
+      }
+    }
+  }, [isDesktop, token, locale, t]);
 
   useEffect(() => {
     const themeStr = darkMode ? 'dark' : 'light';
@@ -75,7 +85,7 @@ export const App: React.FC = () => {
 
   const loadingFallback = (
     <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <Spin size="large" tip={t('Loading DBHarbor Workbench...')} />
+      <Spin size="large" tip={isDesktop || token ? t('Loading DBHarbor Workbench...') : undefined} />
     </div>
   );
 
@@ -86,7 +96,25 @@ export const App: React.FC = () => {
         algorithm: darkMode ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
         token: {
           colorPrimary: '#1677ff',
-          borderRadius: 6,
+          borderRadius: 7,
+          controlHeight: 35,
+          controlHeightSM: 32,
+          controlHeightLG: 42,
+        },
+        components: {
+          Button: {
+            paddingInlineSM: 12,
+            paddingInline: 15,
+          },
+          Input: {
+            paddingInlineSM: 10,
+          },
+          Select: {
+            controlHeightSM: 32,
+          },
+          Pagination: {
+            itemSizeSM: 26,
+          },
         },
       }}
     >

@@ -9,8 +9,10 @@ services:
     environment:
       - DBHARBOR_PORT=8787
       - DBHARBOR_DATA_DIR=/app/data
-      - DBHARBOR_ADMIN_USER=admin
-      - DBHARBOR_ADMIN_PASS=admin123
+      # Leave unset to launch the interactive Web Initial Administrator Setup Wizard on first boot,
+      # or set both variables below for headless automated bootstrap (password >= 8 chars):
+      # - DBHARBOR_ADMIN_USER=ops_admin
+      # - DBHARBOR_ADMIN_PASS=ChangeMe_StrongPass!2026
     restart: unless-stopped
 
   # Optional local database lab: docker compose --profile dev-dbs up -d

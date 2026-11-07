@@ -2,8 +2,10 @@ package auth
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -23,10 +25,17 @@ type Claims struct {
 	UserID    string `json:"uid"`
 	Username  string `json:"username"`
 	SessionID string `json:"sid,omitempty"`
+	Nonce     string `json:"jti,omitempty"`
 	Purpose   string `json:"purpose,omitempty"`
 	Issuer    string `json:"iss,omitempty"`
 	IssuedAt  int64  `json:"iat"`
 	ExpiresAt int64  `json:"exp"`
+}
+
+func randomJTI() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 type SessionValidator func(sessionID string) bool
@@ -36,6 +45,7 @@ type TokenManager struct {
 	mu               sync.RWMutex
 	revokedSessions  map[string]int64 // sid -> exp unix
 	usedTickets      map[string]int64 // ticket sig -> exp unix
+	challengeFails   map[string]int   // 2fa challenge sig -> failed attempts
 	sessionValidator SessionValidator
 }
 
@@ -46,7 +56,56 @@ func NewTokenManager(secret []byte) *TokenManager {
 		secret:          cp,
 		revokedSessions: make(map[string]int64),
 		usedTickets:     make(map[string]int64),
+		challengeFails:  make(map[string]int),
 	}
+}
+
+// Record2FAChallengeAttempt tracks failed 2FA attempts on a challenge token and consumes it on success or after 5 failures.
+func (tm *TokenManager) Record2FAChallengeAttempt(tokenStr string, succeeded bool) (exhausted bool) {
+	parts := strings.Split(strings.TrimSpace(tokenStr), ".")
+	if len(parts) != 3 {
+		return true
+	}
+	sig := parts[2]
+	nowUnix := time.Now().Unix()
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.pruneLocked(nowUnix)
+	if _, used := tm.usedTickets[sig]; used {
+		return true
+	}
+	if succeeded {
+		tm.usedTickets[sig] = nowUnix + 600
+		delete(tm.challengeFails, sig)
+		return false
+	}
+	tm.challengeFails[sig]++
+	if tm.challengeFails[sig] >= 5 {
+		tm.usedTickets[sig] = nowUnix + 600
+		delete(tm.challengeFails, sig)
+		return true
+	}
+	if len(tm.challengeFails) > 2048 {
+		for k := range tm.challengeFails {
+			delete(tm.challengeFails, k)
+			if len(tm.challengeFails) <= 1024 {
+				break
+			}
+		}
+	}
+	return false
+}
+
+// Is2FAChallengeConsumed returns true if the 2FA challenge token has already been used or exhausted.
+func (tm *TokenManager) Is2FAChallengeConsumed(tokenStr string) bool {
+	parts := strings.Split(strings.TrimSpace(tokenStr), ".")
+	if len(parts) != 3 {
+		return true
+	}
+	tm.mu.RLock()
+	_, used := tm.usedTickets[parts[2]]
+	tm.mu.RUnlock()
+	return used
 }
 
 func (tm *TokenManager) SetSessionValidator(fn SessionValidator) {
@@ -107,6 +166,7 @@ func (tm *TokenManager) Issue2FAChallengeToken(userID, username string, ttl time
 	return tm.signClaims(Claims{
 		UserID:   userID,
 		Username: username,
+		Nonce:    randomJTI(),
 		Purpose:  Purpose2FAChallenge,
 		Issuer:   "dbharbor",
 	}, ttl)
@@ -120,6 +180,7 @@ func (tm *TokenManager) IssueExportTicket(userID, username, sessionID string, tt
 		UserID:    userID,
 		Username:  username,
 		SessionID: sessionID,
+		Nonce:     randomJTI(),
 		Purpose:   PurposeExportTicket,
 		Issuer:    "dbharbor",
 	}, ttl)

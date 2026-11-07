@@ -16,7 +16,7 @@ import (
 
 // Build-time overridable metadata via -ldflags.
 var (
-	Version   = "1.0.0"
+	Version   = "1.0.1"
 	Edition   = "server"  // "server" or "desktop"
 	Channel   = "release" // "release" or "preview"
 	GitCommit = "HEAD"
@@ -493,8 +493,9 @@ func (c *Checker) fetchOnline(ctx context.Context, localeKey string, channelKey 
 			}
 			result.HasUpdate = CompareSemver(Version, result.LatestVersion) < 0
 		}
-		// Only overwrite localized built-in changelog with English fallback if GitHub has a newer version than local binary
-		if !usedFallbackEN || (parsedVer != "" && CompareSemver(Version, parsedVer) < 0) {
+		// Only overwrite localized built-in changelog when GitHub HEAD has a strictly newer version than the local binary
+		// (or when embedded changelog is empty), preventing older remote HEAD files from downgrading newer local builds.
+		if strings.TrimSpace(result.ChangelogMarkdown) == "" || (parsedVer != "" && CompareSemver(Version, parsedVer) < 0) {
 			result.ChangelogMarkdown = fetchedMD
 			result.ChangelogSource = "github_changelog"
 			if usedFallbackEN {

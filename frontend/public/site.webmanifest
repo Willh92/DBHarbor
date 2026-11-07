@@ -1,10 +1,9 @@
 {
-  "name": "DBHarbor — Multi-Database Web Workbench",
-  "short_name": "DBHarbor",
-  "description": "Cross-Platform Multi-Model Web Database Workbench (RDBMS · OLAP · KV · Document)",
+  "name": "Data Console",
+  "short_name": "Console",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#071a3e",
+  "background_color": "#0b1120",
   "theme_color": "#1677ff",
   "icons": [
     {

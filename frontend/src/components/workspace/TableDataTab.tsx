@@ -32,6 +32,7 @@ import {
   EyeOutlined,
   FilterOutlined,
   FormOutlined,
+  MoreOutlined,
   PlusOutlined,
   ReloadOutlined,
   SearchOutlined,
@@ -692,6 +693,21 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
     [canWrite, displayedColumns, visibleColumns, focusedCell, combinedDataSource, handleCellChange, primaryKeys, t]
   );
 
+  const openPasteDialog = async (defaultMode: 'new_rows' | 'overwrite_cells') => {
+    if (!canWrite) return;
+    let initialClip = '';
+    if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
+      try {
+        initialClip = (await navigator.clipboard.readText()) || '';
+      } catch {
+        // Ignore clipboard read permission errors; user can paste manually into textarea
+      }
+    }
+    setPasteMode(defaultMode);
+    setPasteText(initialClip);
+    setPasteModalOpen(true);
+  };
+
   const triggerToolbarPaste = async (preferredMode: 'new_rows' | 'overwrite_cells' = 'new_rows') => {
     if (!canWrite) return;
     if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
@@ -981,17 +997,30 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
 
   const gridWrapRef = useRef<HTMLDivElement | null>(null);
   const [gridBodyHeight, setGridBodyHeight] = useState<number>(360);
+  const cellLongPressTimerRef = useRef<number | null>(null);
+  const cellTouchStartRef = useRef<{ x: number; y: number } | null>(null);
+  const cellLongPressFiredRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    return () => {
+      if (cellLongPressTimerRef.current !== null) {
+        window.clearTimeout(cellLongPressTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const el = gridWrapRef.current;
     if (!el) return;
+    const heightThreshold = isMobile ? 6 : 2;
     const measure = () => {
       if ((window as any).__DBHARBOR_LAYOUT_DRAGGING__) return;
       if (el.clientHeight <= 0) return;
+      el.style.setProperty('--dbharbor-grid-total-h', `${Math.max(180, el.clientHeight - 2)}px`);
       const thead = el.querySelector('.ant-table-thead') as HTMLElement | null;
-      const headH = thead && thead.offsetHeight > 0 ? thead.offsetHeight : 39;
+      const headH = thead && thead.offsetHeight > 0 ? thead.offsetHeight : 38;
       const nextH = Math.max(56, Math.floor(el.clientHeight - headH - 2));
-      setGridBodyHeight((prev) => (prev === nextH ? prev : nextH));
+      setGridBodyHeight((prev) => (Math.abs(prev - nextH) >= heightThreshold ? nextH : prev));
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -1024,26 +1053,43 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
     [combinedDataSource, fillerRows]
   );
 
+  const maxRowNum = Math.max(1, (page - 1) * pageSize + rows.length);
+  const rowIndexDigits = Math.max(2, String(maxRowNum).length);
+  const rowIndexColWidth = isMobile
+    ? (newRows.length > 0 ? 92 : 66) + Math.max(0, rowIndexDigits - 2) * 7
+    : 76 + Math.max(0, rowIndexDigits - 4) * 7;
+
   const tableColumns = useMemo(
     () => [
       {
         key: '__rowIndex',
         title: '#',
-        width: isMobile ? 46 : 68,
-        minWidth: isMobile ? 44 : 62,
+        width: rowIndexColWidth,
+        minWidth: rowIndexColWidth,
         resizable: false,
         fixed: 'left' as const,
         align: 'center' as const,
-        onHeaderCell: () => ({ 'data-copy-skip': 'true' } as any),
+        onHeaderCell: () =>
+          ({
+            'data-copy-skip': 'true',
+            className: 'dbharbor-row-index-cell',
+            style: { paddingInline: 5, overflow: 'hidden' },
+          } as any),
         onCell: (record: Record<string, any>) =>
           record.__isFillerRow
             ? {
                 'data-copy-skip': 'true',
+                className: 'dbharbor-row-index-cell',
+                style: { paddingInline: 5, overflow: 'hidden' },
                 onClick: () => {
                   if (canWrite) materializeFillerRow();
                 },
               }
-            : ({ 'data-copy-skip': 'true' } as any),
+            : ({
+                'data-copy-skip': 'true',
+                className: 'dbharbor-row-index-cell',
+                style: { paddingInline: 5, overflow: 'hidden' },
+              } as any),
         render: (_: any, record: Record<string, any>, idx: number) => {
           if (record.__isFillerRow) {
             if (canWrite && record.__isFirstFiller) {
@@ -1055,8 +1101,8 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                     display: 'inline-flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    opacity: 0.42,
-                    fontSize: 11,
+                    opacity: 0.45,
+                    fontSize: isMobile ? 13 : 11,
                   }}
                 >
                   <PlusOutlined />
@@ -1069,6 +1115,84 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
           const rk = String(record.__rowKey);
           const isNew = rk.startsWith('new_');
           const rowNumber = (page - 1) * pageSize + (idx - topNewRows.length) + 1;
+
+          if (isNew) {
+            const btnDim = isMobile ? 28 : 20;
+            return (
+              <div
+                data-copy-skip="true"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: isMobile ? 4 : 3,
+                  minHeight: btnDim,
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {!isMobile && (
+                  <Tag color="green" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 3px' }}>
+                    +
+                  </Tag>
+                )}
+                <Tooltip title={t('Edit Row in Form / Inspector')}>
+                  <span
+                    role="button"
+                    tabIndex={-1}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setInspectSearch('');
+                      setInspectRow(record);
+                    }}
+                    style={{
+                      width: btnDim,
+                      height: btnDim,
+                      borderRadius: 6,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: 'pointer',
+                      color: '#1677ff',
+                      background: 'rgba(22, 119, 255, 0.12)',
+                      flexShrink: 0,
+                    }}
+                  >
+                    {isMobile ? (
+                      <FormOutlined style={{ fontSize: 13 }} />
+                    ) : (
+                      <ExpandOutlined style={{ fontSize: 11 }} />
+                    )}
+                  </span>
+                </Tooltip>
+                <Tooltip title={t('Remove staged row')}>
+                  <span
+                    role="button"
+                    tabIndex={-1}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setNewRows((prev) => prev.filter((r) => r.__rowKey !== rk));
+                      setSelectedRowKeys((prev) => prev.filter((k) => String(k) !== rk));
+                    }}
+                    style={{
+                      width: btnDim,
+                      height: btnDim,
+                      borderRadius: 6,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: 'pointer',
+                      color: '#ff4d4f',
+                      background: 'rgba(255, 77, 79, 0.12)',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <CloseOutlined style={{ fontSize: isMobile ? 12 : 10 }} />
+                  </span>
+                </Tooltip>
+              </div>
+            );
+          }
+
           return (
             <div
               data-copy-skip="true"
@@ -1076,60 +1200,25 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                gap: isMobile ? 2 : 4,
-                height: 20,
-                lineHeight: '20px',
+                gap: isMobile ? 4 : 4,
+                minHeight: isMobile ? 28 : 20,
                 whiteSpace: 'nowrap',
               }}
             >
-              {isNew ? (
-                <>
-                  <Tag color="green" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 3px' }}>
-                    NEW
-                  </Tag>
-                  <Tooltip title={t('Remove staged row')}>
-                    <span
-                      role="button"
-                      tabIndex={-1}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setNewRows((prev) => prev.filter((r) => r.__rowKey !== rk));
-                        setSelectedRowKeys((prev) => prev.filter((k) => String(k) !== rk));
-                      }}
-                      style={{
-                        width: 15,
-                        height: 15,
-                        borderRadius: 3,
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        cursor: 'pointer',
-                        opacity: 0.72,
-                        color: '#ff4d4f',
-                      }}
-                    >
-                      <CloseOutlined style={{ fontSize: 9 }} />
-                    </span>
-                  </Tooltip>
-                </>
-              ) : (
-                <span
-                  style={{
-                    minWidth: isMobile ? 16 : 22,
-                    height: 20,
-                    lineHeight: '20px',
-                    textAlign: 'right',
-                    fontSize: 11,
-                    color: 'rgba(140, 140, 140, 0.95)',
-                    fontVariantNumeric: 'tabular-nums',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'flex-end',
-                  }}
-                >
-                  {rowNumber}
-                </span>
-              )}
+              <span
+                style={{
+                  minWidth: isMobile ? 18 : 22,
+                  textAlign: 'right',
+                  fontSize: isMobile ? 11.5 : 11,
+                  color: 'rgba(140, 140, 140, 0.95)',
+                  fontVariantNumeric: 'tabular-nums',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'flex-end',
+                }}
+              >
+                {rowNumber}
+              </span>
               <Tooltip title={t('Inspect Row & JSON')}>
                 <span
                   role="button"
@@ -1140,20 +1229,20 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                     setInspectRow(record);
                   }}
                   style={{
-                    width: 18,
-                    height: 18,
-                    borderRadius: 4,
+                    width: isMobile ? 26 : 18,
+                    height: isMobile ? 26 : 18,
+                    borderRadius: isMobile ? 6 : 4,
                     display: 'inline-flex',
                     alignItems: 'center',
                     justifyContent: 'center',
                     cursor: 'pointer',
-                    opacity: 0.68,
+                    opacity: isMobile ? 0.78 : 0.68,
                     lineHeight: 1,
                     flexShrink: 0,
                   }}
                   className="dbharbor-row-inspect-btn"
                 >
-                  <ExpandOutlined style={{ fontSize: 11, display: 'block' }} />
+                  <ExpandOutlined style={{ fontSize: isMobile ? 12 : 11, display: 'block' }} />
                 </span>
               </Tooltip>
             </div>
@@ -1215,11 +1304,84 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
               } as any;
             }
             return {
-              onClick: () => {
-                setFocusedCell({ rowKey: record.__rowKey, col: col.name });
+              onTouchStart: isMobile
+                ? (e: React.TouchEvent) => {
+                    if (cellLongPressTimerRef.current !== null) {
+                      window.clearTimeout(cellLongPressTimerRef.current);
+                      cellLongPressTimerRef.current = null;
+                    }
+                    cellLongPressFiredRef.current = false;
+                    const t0 = e.touches[0];
+                    if (!t0) return;
+                    const cx = t0.clientX;
+                    const cy = t0.clientY;
+                    cellTouchStartRef.current = { x: cx, y: cy };
+                    cellLongPressTimerRef.current = window.setTimeout(() => {
+                      cellLongPressTimerRef.current = null;
+                      cellLongPressFiredRef.current = true;
+                      setFocusedCell({ rowKey: record.__rowKey, col: col.name });
+                      setCtxMenu({
+                        open: true,
+                        x: cx,
+                        y: cy,
+                        record,
+                        col,
+                      });
+                    }, 480);
+                  }
+                : undefined,
+              onTouchMove: isMobile
+                ? (e: React.TouchEvent) => {
+                    if (cellLongPressTimerRef.current === null || !cellTouchStartRef.current) return;
+                    const t0 = e.touches[0];
+                    if (!t0) return;
+                    if (Math.hypot(t0.clientX - cellTouchStartRef.current.x, t0.clientY - cellTouchStartRef.current.y) > 8) {
+                      window.clearTimeout(cellLongPressTimerRef.current);
+                      cellLongPressTimerRef.current = null;
+                    }
+                  }
+                : undefined,
+              onTouchEnd: isMobile
+                ? () => {
+                    if (cellLongPressTimerRef.current !== null) {
+                      window.clearTimeout(cellLongPressTimerRef.current);
+                      cellLongPressTimerRef.current = null;
+                    }
+                  }
+                : undefined,
+              onTouchCancel: isMobile
+                ? () => {
+                    if (cellLongPressTimerRef.current !== null) {
+                      window.clearTimeout(cellLongPressTimerRef.current);
+                      cellLongPressTimerRef.current = null;
+                    }
+                  }
+                : undefined,
+              onClick: (e: React.MouseEvent) => {
+                if (cellLongPressFiredRef.current) {
+                  cellLongPressFiredRef.current = false;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  return;
+                }
+                const rk = record.__rowKey;
+                if (
+                  isMobile &&
+                  canWrite &&
+                  focusedCell?.rowKey === rk &&
+                  focusedCell?.col === col.name &&
+                  !(editingCell?.rowKey === rk && editingCell?.col === col.name) &&
+                  !String(rk).startsWith('new_')
+                ) {
+                  editBackupRef.current = { rowKey: rk, col: col.name, prevVal: record[col.name] };
+                  setEditingCell({ rowKey: rk, col: col.name });
+                  return;
+                }
+                setFocusedCell({ rowKey: rk, col: col.name });
               },
               onContextMenu: (e: React.MouseEvent) => {
                 e.preventDefault();
+                if (isMobile && cellLongPressFiredRef.current) return;
                 setFocusedCell({ rowKey: record.__rowKey, col: col.name });
                 setCtxMenu({
                   open: true,
@@ -1229,7 +1391,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                   col,
                 });
               },
-            };
+            } as any;
           },
           render: (val: any, record: Record<string, any>) => {
             if (record.__isFillerRow) {
@@ -1369,16 +1531,23 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                     }
                   }}
                   suffix={
-                    col.nullable ? (
+                    col.nullable && (!isMobile || isEditing || isFocused) ? (
                       <Tag
                         style={{ cursor: 'pointer', margin: 0, fontSize: 10 }}
+                        onPointerDown={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          handleCellChange(rk, col.name, null);
+                          setEditingCell(null);
+                        }}
                         onMouseDown={(e) => {
                           e.preventDefault();
+                          e.stopPropagation();
                           handleCellChange(rk, col.name, null);
                           setEditingCell(null);
                         }}
                       >
-                        {t('Set NULL')}
+                        {isMobile ? 'NULL' : t('Set NULL')}
                       </Tag>
                     ) : undefined
                   }
@@ -1436,7 +1605,9 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
       dirtyUpdates,
       page,
       pageSize,
+      rowIndexColWidth,
       topNewRows.length,
+      newRows.length,
       canWrite,
       isMobile,
       combinedDataSource.length,
@@ -1486,28 +1657,54 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
         label: t('Copy with Column Headers (TSV)'),
         onClick: () => handleCopyRows('tsv_header', multiSelected),
       },
-      {
-        key: 'copy-more',
-        icon: <CopyOutlined />,
-        label: t('Copy Row As...'),
-        children: [
-          {
-            key: 'copy-json',
-            label: t('Copy as JSON Array'),
-            onClick: () => handleCopyRows('json', multiSelected),
+      isMobile
+        ? {
+            type: 'group' as const,
+            key: 'copy-more',
+            label: t('Copy Row As...'),
+            children: [
+              {
+                key: 'copy-json',
+                icon: <CopyOutlined />,
+                label: t('Copy as JSON Array'),
+                onClick: () => handleCopyRows('json', multiSelected),
+              },
+              {
+                key: 'copy-sql',
+                icon: <CopyOutlined />,
+                label: t('Copy as INSERT SQL'),
+                onClick: () => handleCopyRows('sql', multiSelected),
+              },
+              {
+                key: 'copy-csv',
+                icon: <CopyOutlined />,
+                label: t('Copy as CSV'),
+                onClick: () => handleCopyRows('csv', multiSelected),
+              },
+            ],
+          }
+        : {
+            key: 'copy-more',
+            icon: <CopyOutlined />,
+            label: t('Copy Row As...'),
+            children: [
+              {
+                key: 'copy-json',
+                label: t('Copy as JSON Array'),
+                onClick: () => handleCopyRows('json', multiSelected),
+              },
+              {
+                key: 'copy-sql',
+                label: t('Copy as INSERT SQL'),
+                onClick: () => handleCopyRows('sql', multiSelected),
+              },
+              {
+                key: 'copy-csv',
+                label: t('Copy as CSV'),
+                onClick: () => handleCopyRows('csv', multiSelected),
+              },
+            ],
           },
-          {
-            key: 'copy-sql',
-            label: t('Copy as INSERT SQL'),
-            onClick: () => handleCopyRows('sql', multiSelected),
-          },
-          {
-            key: 'copy-csv',
-            label: t('Copy as CSV'),
-            onClick: () => handleCopyRows('csv', multiSelected),
-          },
-        ],
-      },
       { type: 'divider' },
       {
         key: 'filter-eq',
@@ -1612,6 +1809,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
     selectedRowKeys,
     combinedDataSource,
     canWrite,
+    isMobile,
     t,
     handleCopyRows,
     handleCellChange,
@@ -1625,7 +1823,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
   }, [visibleColumns, colFilterSearch]);
 
   const columnVisibilityPopoverContent = (
-    <div style={{ width: 230 }}>
+    <div style={{ width: 'min(230px, calc(100vw - 48px))' }}>
       <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
         <Input
           size="small"
@@ -1733,53 +1931,78 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
       {/* Top Action & WHERE Filter Toolbar */}
       {isMobile ? (
         <div
+          className="dbharbor-no-scrollbar"
           style={{
             flexShrink: 0,
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
-            gap: 4,
+            gap: 6,
             marginBottom: 6,
             minWidth: 0,
             overflowX: 'auto',
           }}
         >
-          <Space size={4} style={{ flexShrink: 0 }}>
+          <Space size={6} style={{ flexShrink: 0 }}>
             {canWrite && (
-              <Dropdown.Button
-                size="small"
-                type="primary"
-                icon={<PlusOutlined />}
-                onClick={handleAddRowInline}
-                menu={{
-                  items: [
-                    {
-                      key: 'inline',
-                      icon: <PlusOutlined />,
-                      label: t('Add Row Inline'),
-                      onClick: handleAddRowInline,
-                    },
-                    {
-                      key: 'form',
-                      icon: <FormOutlined />,
-                      label: t('Insert Form'),
-                      onClick: openFormInsertModal,
-                    },
-                    {
-                      key: 'paste',
-                      icon: <SnippetsOutlined />,
-                      label: t('Paste Rows'),
-                      onClick: () => triggerToolbarPaste('new_rows'),
-                    },
-                  ],
-                }}
-              >
-                {t('Add')}
-              </Dropdown.Button>
+              <Space.Compact size="middle">
+                <Button
+                  type="primary"
+                  style={{ height: 34, padding: '0 10px' }}
+                  icon={<PlusOutlined />}
+                  onClick={openFormInsertModal}
+                >
+                  {t('Add')}
+                </Button>
+                <Dropdown
+                  trigger={['click']}
+                  menu={{
+                    items: [
+                      {
+                        key: 'form',
+                        icon: <FormOutlined />,
+                        label: t('Insert Form'),
+                        onClick: openFormInsertModal,
+                      },
+                      {
+                        key: 'inline',
+                        icon: <PlusOutlined />,
+                        label: t('Add Row Inline'),
+                        onClick: handleAddRowInline,
+                      },
+                       {
+                         key: 'paste',
+                         icon: <SnippetsOutlined />,
+                         label: t('Paste Rows'),
+                         onClick: () =>
+                           focusedCell ? openPasteDialog('overwrite_cells') : triggerToolbarPaste('new_rows'),
+                       },
+                       ...(focusedCell
+                         ? [
+                             {
+                               key: 'paste_cells',
+                               icon: <SnippetsOutlined />,
+                               label: t('Paste into Cells Here'),
+                               onClick: () => triggerToolbarPaste('overwrite_cells'),
+                             },
+                           ]
+                         : []),
+                       {
+                         key: 'paste_modal',
+                         icon: <SnippetsOutlined />,
+                         label: t('Paste...'),
+                         onClick: () => openPasteDialog(focusedCell ? 'overwrite_cells' : 'new_rows'),
+                       },
+                    ],
+                  }}
+                >
+                  <Button type="primary" style={{ height: 34, width: 28, padding: 0 }} icon={<MoreOutlined />} />
+                </Dropdown>
+              </Space.Compact>
             )}
-            <Badge dot={Boolean(appliedFilter.trim())}>
+            <Badge dot={Boolean(appliedFilter.trim())} offset={[-2, 2]}>
               <Button
-                size="small"
+                style={{ height: 34, padding: '0 10px' }}
                 type={mobileFilterOpen || Boolean(appliedFilter.trim()) ? 'primary' : 'default'}
                 ghost={mobileFilterOpen || Boolean(appliedFilter.trim())}
                 icon={<FilterOutlined />}
@@ -1789,18 +2012,26 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
               </Button>
             </Badge>
             {visibleColumns.length > 0 && (
-              <Popover trigger="click" placement="bottomLeft" content={columnVisibilityPopoverContent}>
-                <Button size="small" icon={<SettingOutlined />}>
-                  {hiddenCols.length > 0 ? `${displayedColumns.length}/${visibleColumns.length}` : t('Columns')}
+              <Popover trigger="click" placement="bottom" content={columnVisibilityPopoverContent}>
+                <Button
+                  style={{
+                    height: 34,
+                    width: hiddenCols.length > 0 ? undefined : 34,
+                    padding: hiddenCols.length > 0 ? '0 8px' : 0,
+                  }}
+                  icon={<SettingOutlined />}
+                  title={t('Columns')}
+                >
+                  {hiddenCols.length > 0 ? `${displayedColumns.length}/${visibleColumns.length}` : null}
                 </Button>
               </Popover>
             )}
           </Space>
 
-          <Space size={4} style={{ flexShrink: 0 }}>
+          <Space size={6} style={{ flexShrink: 0 }}>
             {hasActiveFilterOrSort && (
               <Button
-                size="small"
+                style={{ width: 34, height: 34, padding: 0 }}
                 icon={<DownloadOutlined />}
                 onClick={handleExportFiltered}
                 title={t('Export Filtered')}
@@ -1808,10 +2039,15 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
             )}
             {combinedDataSource.length > 0 && (
               <Dropdown trigger={['click']} menu={{ items: copyMenuItems }} placement="bottomRight">
-                <Button size="small" icon={<CopyOutlined />} title={t('Copy')} />
+                <Button style={{ width: 34, height: 34, padding: 0 }} icon={<CopyOutlined />} title={t('Copy')} />
               </Dropdown>
             )}
-            <Button size="small" icon={<ReloadOutlined />} onClick={() => loadData()} title={t('Refresh Data')} />
+            <Button
+              style={{ width: 34, height: 34, padding: 0 }}
+              icon={<ReloadOutlined />}
+              onClick={() => loadData()}
+              title={t('Refresh Data')}
+            />
           </Space>
         </div>
       ) : (
@@ -1846,6 +2082,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
 
             {combinedDataSource.length > 0 && (
               <Dropdown.Button
+                trigger={['click']}
                 size="small"
                 icon={<CopyOutlined />}
                 onClick={() => handleCopyRows('tsv')}
@@ -1874,7 +2111,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
             </Button>
 
             {visibleColumns.length > 0 && (
-              <Popover trigger="click" placement="bottomLeft" content={columnVisibilityPopoverContent}>
+              <Popover trigger="click" placement="bottom" content={columnVisibilityPopoverContent}>
                 <Button size="small" icon={<SettingOutlined />}>
                   {hiddenCols.length > 0
                     ? `${t('Visible Columns')} (${displayedColumns.length}/${visibleColumns.length})`
@@ -2180,6 +2417,9 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                   'data-copy-skip': 'true',
                 } as any)
               : ({
+                  className: String(record.__rowKey || '').startsWith('new_')
+                    ? 'dbharbor-staged-new-row'
+                    : undefined,
                   'data-row-key': record.__rowKey,
                 } as any)
           }
@@ -2189,7 +2429,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
               setSelectedRowKeys(keys.filter((k) => !String(k).startsWith('__filler_'))),
             getCheckboxProps: (record) =>
               record.__isFillerRow ? { disabled: true, style: { display: 'none' } } : {},
-            columnWidth: isMobile ? 32 : 40,
+            columnWidth: isMobile ? 38 : 40,
             fixed: true,
           }}
           onChange={(_, __, sorter: any) => {
@@ -2207,69 +2447,95 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
         />
       </div>
 
-      {/* Mobile Sticky Bottom Bar for Staged Mutations & Row Selection */}
-      {isMobile && canWrite && (pendingChangeCount > 0 || selectedRowKeys.length > 0) && (
+      {/* Mobile Sticky Bottom Bar for Staged Mutations & Row Selection (36px touch targets + anti-mis-tap isolation) */}
+      {isMobile && ((canWrite && pendingChangeCount > 0) || selectedRowKeys.length > 0) && (
         <div
+          className="dbharbor-no-scrollbar"
           style={{
             flexShrink: 0,
-            marginTop: 4,
-            padding: '5px 8px',
-            borderRadius: 6,
+            marginTop: 6,
+            padding: '6px 8px',
+            borderRadius: 8,
             background: 'rgba(22, 119, 255, 0.08)',
             border: '1px solid rgba(22, 119, 255, 0.24)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            gap: 6,
+            gap: 8,
             overflowX: 'auto',
           }}
         >
-          <Space size={4} style={{ flexShrink: 0 }}>
-            {pendingChangeCount > 0 && (
+          <Space size={6} style={{ flexShrink: 0 }}>
+            {canWrite && pendingChangeCount > 0 && (
               <>
                 <Button
-                  size="small"
                   type="primary"
+                  style={{ height: 36, padding: '0 12px', fontWeight: 600 }}
                   icon={<CheckOutlined />}
                   loading={saving}
                   onClick={() => handleCommitChanges(false)}
                 >
                   {`${t('Save Changes')} (${pendingChangeCount})`}
                 </Button>
-                <Button size="small" icon={<EyeOutlined />} onClick={handlePreviewSQL}>
+                <Button style={{ height: 36, padding: '0 10px' }} icon={<EyeOutlined />} onClick={handlePreviewSQL}>
                   SQL
                 </Button>
-                <Button
-                  size="small"
-                  icon={<CloseOutlined />}
-                  onClick={() => loadData(page, pageSize, appliedFilter, sortSpec)}
+                <Popconfirm
+                  title={t('Discard all unsaved row changes?')}
+                  onConfirm={() => loadData(page, pageSize, appliedFilter, sortSpec)}
                 >
-                  {t('Discard')}
-                </Button>
+                  <Button style={{ height: 36, padding: '0 10px' }} icon={<CloseOutlined />}>
+                    {t('Discard')}
+                  </Button>
+                </Popconfirm>
               </>
             )}
             {selectedRowKeys.length > 0 && (
               <>
-                <Button size="small" icon={<EditOutlined />} onClick={openBatchEditModal}>
-                  {`${t('Batch Edit')} (${selectedRowKeys.length})`}
-                </Button>
-                <Popconfirm
-                  title={t('Delete {count} selected row(s)?', { count: selectedRowKeys.length })}
-                  onConfirm={() => {
-                    const onlyNew = selectedRowKeys.every((k) => String(k).startsWith('new_'));
-                    if (onlyNew) {
-                      setNewRows((prev) => prev.filter((r) => !selectedRowKeys.includes(r.__rowKey)));
-                      setSelectedRowKeys([]);
-                    } else {
-                      handleCommitChanges(true);
-                    }
-                  }}
-                >
-                  <Button size="small" danger icon={<DeleteOutlined />} />
-                </Popconfirm>
+                <Dropdown trigger={['click']} placement="top" menu={{ items: copyMenuItems }}>
+                  <Button style={{ height: 36, padding: '0 10px' }} icon={<CopyOutlined />}>
+                    {`${t('Copy')} (${selectedRowKeys.length})`}
+                  </Button>
+                </Dropdown>
+                {canWrite && (
+                  <>
+                    <Button style={{ height: 36, padding: '0 10px' }} icon={<EditOutlined />} onClick={openBatchEditModal}>
+                      {t('Batch Edit')}
+                    </Button>
+                    <Button
+                      style={{ height: 36, padding: '0 10px' }}
+                      icon={<PlusOutlined />}
+                      onClick={() =>
+                        handleDuplicateRows(combinedDataSource.filter((r) => selectedRowKeys.includes(r.__rowKey)))
+                      }
+                    >
+                      {t('Duplicate')}
+                    </Button>
+                  </>
+                )}
               </>
             )}
           </Space>
+
+          {canWrite && selectedRowKeys.length > 0 && (
+            <div style={{ flexShrink: 0, marginLeft: 'auto' }}>
+              <Popconfirm
+                placement="topRight"
+                title={t('Delete {count} selected row(s)?', { count: selectedRowKeys.length })}
+                onConfirm={() => {
+                  const onlyNew = selectedRowKeys.every((k) => String(k).startsWith('new_'));
+                  if (onlyNew) {
+                    setNewRows((prev) => prev.filter((r) => !selectedRowKeys.includes(r.__rowKey)));
+                    setSelectedRowKeys([]);
+                  } else {
+                    handleCommitChanges(true);
+                  }
+                }}
+              >
+                <Button danger style={{ height: 36, minWidth: 40, padding: '0 10px' }} icon={<DeleteOutlined />} />
+              </Popconfirm>
+            </div>
+          )}
         </div>
       )}
 
@@ -2301,7 +2567,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
             {t('Tip: Ctrl+C copies clean TSV rows for Notepad/Excel; Ctrl+V pastes single or multiple rows; right-click any cell for quick actions.')}
           </Typography.Text>
         )}
-        <div style={{ flexShrink: 0, marginLeft: 'auto' }}>
+        <div style={{ flexShrink: 0, marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
           <Pagination
             size="small"
             simple={isMobile}
@@ -2317,6 +2583,23 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
               loadData(p, ps, appliedFilter, sortSpec);
             }}
           />
+          {isMobile && (
+            <Select
+              size="small"
+              popupMatchSelectWidth={false}
+              value={pageSize}
+              style={{ height: 28 }}
+              options={[50, 100, 200, 500].map((n) => ({
+                value: n,
+                label: `${n} / ${t('page')}`,
+              }))}
+              onChange={(ps) => {
+                setPage(1);
+                setPageSize(ps);
+                loadData(1, ps, appliedFilter, sortSpec);
+              }}
+            />
+          )}
         </div>
       </div>
 
@@ -2380,7 +2663,11 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
         okText={t('Apply Paste')}
       >
         <Space direction="vertical" size={10} style={{ width: '100%' }}>
-          <Radio.Group value={pasteMode} onChange={(e) => setPasteMode(e.target.value)}>
+          <Radio.Group
+            value={pasteMode}
+            onChange={(e) => setPasteMode(e.target.value)}
+            style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: 6 }}
+          >
             <Radio value="new_rows">{t('Insert as New Staged Row(s)')}</Radio>
             <Radio value="overwrite_cells" disabled={!focusedCell}>
               {t('Overwrite Starting from Active Cell')}
@@ -2509,34 +2796,51 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
         }
         footer={
           inspectRow && canWrite ? (
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-              <Space size={6}>
-                <Button
-                  size="small"
-                  icon={<PlusOutlined />}
-                  onClick={() => {
-                    handleDuplicateRows([inspectRow]);
-                    setInspectRow(null);
-                  }}
-                >
-                  {t('Duplicate Row')}
-                </Button>
-                <Popconfirm
-                  title={t('Delete this row permanently?')}
-                  onConfirm={() => {
-                    const target = inspectRow;
-                    setInspectRow(null);
-                    handleDeleteSingleRow(target);
-                  }}
-                >
-                  <Button size="small" danger icon={<DeleteOutlined />}>
-                    {t('Delete Row')}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <Space size={8}>
+                {!String(inspectRow.__rowKey || '').startsWith('new_') && (
+                  <Button
+                    size={isMobile ? 'middle' : 'small'}
+                    icon={<PlusOutlined />}
+                    onClick={() => {
+                      handleDuplicateRows([inspectRow]);
+                      setInspectRow(null);
+                    }}
+                  >
+                    {t('Duplicate Row')}
                   </Button>
-                </Popconfirm>
+                )}
+                {String(inspectRow.__rowKey || '').startsWith('new_') ? (
+                  <Button
+                    size={isMobile ? 'middle' : 'small'}
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={() => {
+                      const targetKey = inspectRow.__rowKey;
+                      setInspectRow(null);
+                      setNewRows((prev) => prev.filter((r) => r.__rowKey !== targetKey));
+                    }}
+                  >
+                    {t('Discard')}
+                  </Button>
+                ) : (
+                  <Popconfirm
+                    title={t('Delete this row permanently?')}
+                    onConfirm={() => {
+                      const target = inspectRow;
+                      setInspectRow(null);
+                      handleDeleteSingleRow(target);
+                    }}
+                  >
+                    <Button size={isMobile ? 'middle' : 'small'} danger icon={<DeleteOutlined />}>
+                      {t('Delete Row')}
+                    </Button>
+                  </Popconfirm>
+                )}
               </Space>
               {pendingChangeCount > 0 && (
                 <Button
-                  size="small"
+                  size={isMobile ? 'middle' : 'small'}
                   type="primary"
                   icon={<CheckOutlined />}
                   loading={saving}
@@ -2578,7 +2882,43 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                         ({c.type})
                       </Typography.Text>
                     </Typography.Text>
-                    <Space size={4}>
+                    <Space size={4} style={{ flexShrink: 0 }}>
+                      {!String(inspectRow.__rowKey || '').startsWith('new_') && (
+                        <>
+                          <Tag
+                            style={{ cursor: 'pointer', margin: 0, fontSize: 10 }}
+                            title={
+                              isNullVal
+                                ? `${t('Filter')}: ${c.name} IS NULL`
+                                : `${t('Filter')}: ${c.name} = ${strVal.slice(0, 24)}`
+                            }
+                            onClick={() => {
+                              applyQuickWhereClause(
+                                isNullVal ? `${c.name} IS NULL` : `${c.name} = ${escapeSQLVal(strVal)}`
+                              );
+                              setInspectRow(null);
+                            }}
+                          >
+                            <FilterOutlined style={{ fontSize: 9, marginRight: 2 }} />=
+                          </Tag>
+                          <Tag
+                            style={{ cursor: 'pointer', margin: 0, fontSize: 10 }}
+                            title={
+                              isNullVal
+                                ? `${t('Filter')}: ${c.name} IS NOT NULL`
+                                : `${t('Filter')}: ${c.name} != ${strVal.slice(0, 24)}`
+                            }
+                            onClick={() => {
+                              applyQuickWhereClause(
+                                isNullVal ? `${c.name} IS NOT NULL` : `${c.name} != ${escapeSQLVal(strVal)}`
+                              );
+                              setInspectRow(null);
+                            }}
+                          >
+                            <FilterOutlined style={{ fontSize: 9, marginRight: 2 }} />!=
+                          </Tag>
+                        </>
+                      )}
                       {canWrite && c.nullable && (
                         <Tag
                           color={isNullVal ? 'orange' : undefined}

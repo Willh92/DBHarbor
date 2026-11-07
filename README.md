@@ -3,7 +3,7 @@
 **Language**: **English** | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | [日本語](./README.ja.md)
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.0-1677ff.svg)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-v1.0.1-1677ff.svg)](./CHANGELOG.md)
 [![CGO_ENABLED=0](https://img.shields.io/badge/Go-CGO__ENABLED%3D0-00ADD8.svg)](https://github.com/Willh92/DBHarbor.git)
 
 A zero-dependency, single-binary cross-platform Web Database Workbench combining **phpMyAdmin's intuitive visual table & data operations** with **modern multi-engine IDE power**.
@@ -21,16 +21,16 @@ A zero-dependency, single-binary cross-platform Web Database Workbench combining
   - **Relational RDBMS**: MySQL, MariaDB, TiDB, OceanBase, PostgreSQL, KingbaseES, SQLite 3, SQL Server, Oracle (pure-Go without Instant Client), Dameng (DM8)
   - **Key-Value & Document NoSQL**: Redis (DB0–15 browser, 6 data structure editors, embedded CLI), MongoDB (JSON & Table views, BSON CRUD, index & `RunCommand` console)
 - **Complete Visual Schema Designer, Privileges & SQL Operations**:
-  - **Visual Table Structure, Routines, Triggers & DB Privilege Governance**: Add, modify, rename, or drop columns; alter data types, defaults, comments, and `NULL` constraints; manage indexes & foreign keys; visually create & edit functions, procedures, and triggers with dialect-smart DDL templates; manage database-level users & grants (`GRANT` / `REVOKE`, Redis ACL, MongoDB roles); rename/clone tables; create views; transactional lossless table rebuilds on SQLite; live DDL preview.
+  - **Visual Table Structure, Routines, Triggers & DB Privilege Governance**: Add, modify, rename, or drop columns; alter data types, defaults, comments, and `NULL` constraints; manage indexes & foreign keys; visually create & edit functions, procedures, and triggers with dialect-smart DDL templates; manage database-level users & grants (`GRANT` / `REVOKE`, Redis ACL, MongoDB roles); rename/clone tables; create views; transactional lossless table rebuilds on SQLite; instant single-catalog SQLite object listing; live DDL preview.
   - **Navicat-Style Full-Height Data Grid & Smart Multi-Tab SQL Console**: Full-height data grid with click-to-insert blank rows, batch column editing, single/multi-row TSV clipboard copy & paste (`Ctrl+C` / `Ctrl+V` compatible with Notepad & Excel), local DB file browser/upload (`SQLite 3` / `DuckDB`), plus an embedded tree-shaken Monaco Editor with schema-aware autocomplete, `Ctrl/Cmd + Enter` execution, `EXPLAIN` query plans, SQL formatting, query cancellation (`AbortController`), execution history, and saved snippets.
-  - **Streaming Import, Export & SQL Runner**: Full-database & multi-table SQL Dump, single-table/filtered/custom-query/MongoDB/Redis streaming exports & imports (`SQL`, `CSV-BOM`, `CSV`, `JSON`, `JSONL`, `Markdown`), batched transactional file imports, and direct paste-to-execute multi-statement SQL scripts.
-- **Enterprise Multi-User RBAC, Login Hardening & RFC 6238 TOTP 2FA**:
-  - Web Server Edition provides 3-tier multi-user RBAC (`Admin` / `Read-Write` / `Read-Only`) with shared/private connection isolation, sliding-window IP/account anti-bruteforce rate limiting (`HTTP 429`), stateless HMAC SVG captcha, offline SVG QR code TOTP 2FA setup + 8 single-use recovery codes, revocable device sessions, security audit logs, and AES-256-GCM encrypted connection credentials.
-- **Native Dark Window Theme, Mobile Responsive Workbench & Multi-Language UI**:
-  - Native OS dark title bar synchronization on Desktop (`Win32 DWM`, `macOS DarkAqua`, `Linux GTK3`), plus a dedicated responsive mobile workbench (`<= 640px`) with bottom-sheet row editors and zero horizontal overflow.
+  - **Streaming Import, Export & SQL Runner**: Full-database & multi-table SQL Dump, single-table/filtered/custom-query/MongoDB/Redis streaming exports & imports (`SQL`, `CSV-BOM`, `CSV`, `JSON`, `JSONL`, `Markdown`), memory-capped streaming result readers for DuckDB & MongoDB, batched transactional file imports, and direct paste-to-execute multi-statement SQL scripts.
+- **Enterprise Web Server Security, RBAC, Login Branding & Emergency Recovery *(Web Server Edition Only)***:
+  - **Zero-Default-Credential Setup, Login Branding & Anti-Indexing**: First-run **Initial Administrator Setup** wizard (`>= 8` char password, no weak default `admin123`), zero-leakage Sign-In page, customizable browser `<title>`, top emblem (`<= 128 KB` custom logo synced to Favicon), heading & subtitle, plus triple anti-search-engine indexing (`/robots.txt`, `X-Robots-Tag`, `<meta name="robots">`).
+  - **Multi-User RBAC, TOTP 2FA & Hardened Sandboxing**: 3-tier RBAC (`Admin` / `Read-Write` / `Read-Only`), vault-derived single-use CAPTCHA tokens, `trustedProxies`-aware rate limiting (`HTTP 429`), offline SVG QR code RFC 6238 TOTP 2FA + 8 single-use recovery codes + bounded 2FA attempt limits, verified TLS certificate modes, `<DataDir>/local_databases/` sandboxing (with SQLite `ATTACH` disabled and DuckDB external file access disabled in Web mode), SSRF private-network guard for non-admins, reference-counted concurrent connection pool leases, connection-pinned SQL Server `USE [db]`, and persistent `<DataDir>/config.json` with auto-disarming **Emergency Admin Recovery**.
+- **Native Dark Window Theme, Mobile Touch Workbench & Multi-Language UI**:
+  - Native OS dark title bar synchronization on Desktop (`Win32 DWM`, `macOS DarkAqua`, `Linux GTK3`), plus a dedicated touch-first mobile workbench (`<= 640px`) featuring flicker-free GPU CSS `position: sticky` headers, touch column width drag-resizing & double-tap auto-expand, sidebar/table `[⋮]` & long-press menus, mobile SQL quick-symbol bar, tap-to-inspect cells, bottom-sheet row editors, `keep-alive` sidebar object caching, and global viewport popup clamping.
   - Supports both **TCP** and **Unix Domain Socket (`AF_UNIX`)** listening (`-unix-socket`, `-unix-socket-perm`, `-unix-socket-group`).
-  - Built-in i18n UI & documentation in **English (`en-US`)**, **Simplified Chinese (`zh-CN`)**, **Traditional Chinese (`zh-TW`)**, and **Japanese (`ja-JP`)**.
-  - Online version update checker, configurable update reminder switch, and changelog sync powered by `Willh92/DBHarbor` on GitHub.
+  - Built-in i18n UI & documentation in **English (`en-US`)**, **Simplified Chinese (`zh-CN`)**, **Traditional Chinese (`zh-TW`)**, and **Japanese (`ja-JP`)**, plus online update checking & one-command service binary upgrades.
 
 ---
 
@@ -52,16 +52,16 @@ npm test
 
 ### Two Editions (`dist/`)
 
-1. **Desktop GUI Edition (`dbharbor-desktop-<os>-<arch>` & `DBHarbor-darwin-<arch>.app`) — Pure Local Client**:
+1. **Desktop GUI Edition (`dbharbor-desktop-<os>-<arch>` & `DBHarbor-darwin-<arch>.app`) — Pure Zero-Login Local Client**:
    - Double-click the executable (e.g. `dbharbor-desktop-windows-amd64.exe` or `DBHarbor-darwin-arm64.app`) to launch a native OS application window directly (`Win32 + Edge WebView2` on Windows without any console window, `Cocoa NSWindow + WKWebView` on macOS, `GTK3 + WebKit2GTK` on Linux).
-   - **No Account / Login System**: Operates as a pure local desktop client — boots straight into the workbench with native OS Save As dialogs and an AES-256-GCM encrypted local vault isolated via same-site loopback protection.
+   - **Pure Local Mode (NO User Account System)**: Boots straight into the workbench with zero login wall, native OS file/Save As dialogs, full local file access, and an AES-256-GCM encrypted local connection vault isolated via same-site loopback protection. Server-only features (`<DataDir>/config.json`, Initial Setup Wizard, Login Branding, Admin Recovery Mode, and Web Server local-file/network sandboxing) do **not** apply to Desktop GUI Edition.
 2. **Web Server Edition (`dbharbor-<os>-<arch>`) — Self-Hosted / Team Service**:
    - Launch `./dist/dbharbor-<os>-<arch>` (or `-version` to inspect build info) and open `http://localhost:8787` (or bind a Unix Domain Socket via `-unix-socket`).
-   - **Default initial credentials**: `admin` / `admin123` (change password and enable 2FA immediately via **Security / 2FA** in the top bar).
+   - **Initial Administrator Setup & Anti-Indexing**: No hardcoded weak default credentials — on first visit when the user store is empty, DBHarbor opens a one-time **Initial Administrator Setup** wizard (`>= 8` char password) where you create the primary administrator and optionally customize login page branding (or pass `-admin-user` / `-admin-pass` for headless bootstrap). Built-in `/robots.txt`, `X-Robots-Tag`, and `<meta name="robots">` automatically block search engine indexing.
 
 ---
 
-## Default OS Data Directories & CLI Flags
+## Default OS Data Directories, CLI Flags & Persistent `config.json`
 
 DBHarbor **never** writes runtime state into the current startup directory unless explicitly requested via `-data-dir`. By default, internal metadata (`dbharbor.db`) and the AES-256-GCM master key (`.secret.key`) are stored in standard OS application directories:
 
@@ -71,24 +71,73 @@ DBHarbor **never** writes runtime state into the current startup directory unles
 | **macOS** | `~/Library/Application Support/DBHarbor/data` | `/Library/Application Support/DBHarbor/data` |
 | **Linux** | `$XDG_DATA_HOME/dbharbor` (`~/.local/share/dbharbor`) | `/var/lib/dbharbor` |
 
-### CLI Options & Environment Variables
+### CLI Options & Environment Variables *(Web Server Edition)*
+
+Configuration precedence: **`Explicit CLI flags > DBHARBOR_* environment variables > <DataDir>/config.json > Built-in defaults`**.
 
 | CLI Flag | Environment Variable | Default | Description |
 | :--- | :--- | :--- | :--- |
+| `-config` | `DBHARBOR_CONFIG_FILE` | `<DataDir>/config.json` | Path to persistent Web Server JSON configuration file (`0600`) |
 | `-host` | `DBHARBOR_HOST` | `0.0.0.0` | TCP bind address (or `unix:/path/to/dbharbor.sock` shorthand) |
 | `-port` | `DBHARBOR_PORT` | `8787` | HTTP TCP port |
 | `-unix-socket` | `DBHARBOR_UNIX_SOCKET` | *(empty)* | Listen on Unix Domain Socket instead of TCP (e.g. `/run/dbharbor/dbharbor.sock`) |
 | `-unix-socket-perm` | `DBHARBOR_UNIX_SOCKET_PERM` | `0660` | Octal file mode applied to the Unix Domain Socket |
 | `-unix-socket-group` | `DBHARBOR_UNIX_SOCKET_GROUP` | *(empty)* | POSIX group name or GID assigned to the Unix Domain Socket (e.g. `www-data`, `nginx`) |
-| `-data-dir` | `DBHARBOR_DATA_DIR` | *(OS standard)* | Custom directory for SQLite metadata store & encryption key |
-| `-admin-user` | `DBHARBOR_ADMIN_USER` | `admin` | Initial admin username on first bootstrap (only when users table is empty) |
-| `-admin-pass` | `DBHARBOR_ADMIN_PASS` | `admin123` | Initial admin password on first bootstrap (min 6 chars when customized) |
-| `-init-only` | — | `false` | Initialize encryption vault & initial admin account in `-data-dir`, then exit |
-| `-idle-ttl` | — | `30` | Idle database connection pool eviction timeout (minutes) |
+| `-data-dir` | `DBHARBOR_DATA_DIR` | *(OS standard)* | Custom directory for SQLite metadata store, `config.json`, & `.secret.key` |
+| `-admin-user` | `DBHARBOR_ADMIN_USER` | *(empty — Web Setup)* | Optional headless initial admin username (only used when users table is empty) |
+| `-admin-pass` | `DBHARBOR_ADMIN_PASS` | *(empty — Web Setup)* | Optional headless initial admin password (**min 8 chars**; omit to use Web Setup Wizard) |
+| `-idle-ttl` | `DBHARBOR_IDLE_TTL` | `30` | Idle database connection pool eviction timeout (minutes) |
+| — | `DBHARBOR_MAX_IMPORT_MB` | `256` | Maximum file import upload body size in MB (also configurable in `config.json`) |
+| — | `DBHARBOR_TRUSTED_PROXIES` | *(loopback)* | Comma-separated proxy IPs/CIDRs trusted for `X-Forwarded-For` / `X-Real-IP` |
+| — | `DBHARBOR_CORS_ORIGINS` | *(same-origin)* | Comma-separated allowed cross-origin origins |
+| — | `DBHARBOR_DUCKDB_PATH` | *(auto)* | Server-controlled DuckDB CLI binary path (`security.duckdbCliPath`) |
+| — | `DBHARBOR_ALLOW_PRIVATE_NET_NON_ADMIN` | `false` | Allow non-admin Web users to connect to private/loopback network targets |
+| `-init-only` | — | `false` | Initialize encryption vault, `config.json`, & initial admin account in `-data-dir`, then exit |
+| `-recover-admin` | — | `false` | Run one-shot emergency administrator password/2FA recovery and exit |
+| `-recover-user` | — | *(primary admin)* | Target admin username for `-recover-admin` |
+| `-recover-pass` | — | *(empty)* | New password (`>= 8` chars) or `auto` (random 16-char password) for `-recover-admin` |
+| `-reset-2fa` | — | `false` | Also clear TOTP 2FA & recovery codes during `-recover-admin` |
 | `-open` | — | `false` | Open system browser automatically on TCP startup |
 | `-version` | — | `false` | Print version, commit, and platform info |
 
-> **Local File Security Boundary**: DBHarbor's internal metadata database (`dbharbor.db`) and encryption keys (`.secret.key`) are automatically hidden and protected from user database connections. In Web Server Edition, non-admin (`Read-Write`) accounts are strictly sandboxed within `<DataDir>` (defaulting to `<DataDir>/local_databases`) when browsing or creating SQLite / DuckDB files, while `Admin` accounts and Desktop GUI Edition retain full host directory access.
+### Persistent Server Configuration (`<DataDir>/config.json`) & Emergency Admin Recovery *(Web Server Edition Only)*
+
+On startup, **Web Server Edition** automatically generates `<DataDir>/config.json` with `0600` permissions if it does not exist:
+
+```json
+{
+  "host": "0.0.0.0",
+  "port": 8787,
+  "unixSocket": "",
+  "unixSocketPerm": "0660",
+  "unixSocketGroup": "",
+  "idleConnTTLMinutes": 30,
+  "maxImportMB": 256,
+  "trustedProxies": ["127.0.0.1/32", "::1/128"],
+  "corsAllowedOrigins": [],
+  "security": {
+    "allowPrivateNetworkForNonAdmin": false,
+    "duckdbCliPath": ""
+  },
+  "recovery": {
+    "enabled": false,
+    "adminUsername": "admin",
+    "newPassword": "",
+    "reset2FA": false
+  }
+}
+```
+
+If an administrator forgets their password or loses their 2FA device & recovery codes, **Web Server Edition** provides two host-verified recovery paths:
+
+1. **Edit `<DataDir>/config.json` & Restart Service**:
+   Set `"recovery": { "enabled": true, "adminUsername": "admin", "newPassword": "YourNewStrongPassword", "reset2FA": true }` (minimum 8 characters, or `"newPassword": "auto"` to generate a random 16-character password printed to server startup logs) and restart DBHarbor. On boot, DBHarbor snapshots `dbharbor.db` to `<DataDir>/.backups/`, resets the password/2FA, revokes all active sessions for that admin, records an audit event, and **immediately disarms `config.json` (`"enabled": false`, `"newPassword": ""`)** so plaintext passwords never remain on disk.
+2. **One-Shot CLI Recovery**:
+   ```bash
+   dbharbor -data-dir /var/lib/dbharbor -recover-admin -recover-pass auto -reset-2fa
+   ```
+
+> **Web Server Local File & Network Security Boundary**: DBHarbor's internal metadata (`dbharbor.db`), `config.json`, and encryption keys (`.secret.key`) are always hidden and blocked from database connections. In **Web Server Edition**, non-admin (`Read-Write`) accounts are strictly sandboxed within `<DataDir>/local_databases/` when browsing, uploading, or creating SQLite / DuckDB files (with SQLite `ATTACH` disabled, DuckDB `enable_external_access = false` & server-controlled `security.duckdbCliPath`, and private-network SSRF targets blocked unless `security.allowPrivateNetworkForNonAdmin` is enabled). **Desktop GUI Edition** operates in pure local mode with full host file access.
 
 ---
 
@@ -110,14 +159,17 @@ DBHarbor **never** writes runtime state into the current startup directory unles
 
 ## Auto-Start Service Installation, Online Upgrade & Initial Admin Bootstrap
 
-Cross-platform service managers are provided in `scripts/` (and bundled into `dist/`). They support **automatic GitHub Releases binary download with `SHA256SUMS.txt` verification** when no local binary is present (`--download`, `--version`, `--mirror`), custom installation directories (`--install-dir` / `-InstallDir`), **secure initial administrator account bootstrap** (`--admin-user` / `--admin-pass` and `-AdminUser` / `-AdminPass` — wiped immediately after first-run initialization without leaking credentials in process arguments), and **one-command online upgrades** (`upgrade` / `-Action Upgrade`):
+Cross-platform service installers for **Web Server Edition** are provided in `scripts/` (and bundled into `dist/`). They support:
+- **Online GitHub Releases Download & Mandatory Checksum Verification**: Auto-downloads matching OS/Arch binaries (`--download`, `--version`, `--mirror` / `-Mirror`) with **fail-closed `SHA256SUMS.txt` verification** and a pre-install `-version` binary smoke test before touching any running service.
+- **Headless Initial Admin Bootstrap**: `--admin-user` / `--admin-pass` and `-AdminUser` / `-AdminPass` (`>= 8` characters; wiped immediately after initialization without leaking credentials in process arguments).
+- **Lock-Safe One-Command Online Upgrades (`upgrade` / `update` & `-Action Upgrade` / `-Action Update`)**: Preserves existing service flags, quoted `ExecStart` / `launchd` `ProgramArguments` paths, and `DataDir`, with graceful shutdown polling + atomic `.old` hot-replacement on Windows.
 
 ### 1. Linux (`systemd` System / User & `OpenRC`)
 
 ```bash
 chmod +x ./dist/install-service.sh
 
-# Standard TCP system service + initial admin bootstrap
+# Standard TCP system service + initial admin bootstrap (>= 8 char password)
 # (Defaults to /usr/local/bin/dbharbor & /var/lib/dbharbor, or pass --install-dir /opt/dbharbor)
 sudo ./dist/install-service.sh install \
   --user dbharbor \
@@ -142,7 +194,8 @@ sudo ./dist/install-service.sh install \
 # Non-root user service (systemd --user)
 ./dist/install-service.sh install --user-mode --port 8787
 
-# One-command online upgrade from GitHub Releases (supports --version <tag> and --mirror <url>)
+# One-command online upgrade (or 'update') with SHA256SUMS.txt verification & -version preflight
+# (Supports --version <tag> and --mirror <url>, e.g. --mirror https://ghfast.top)
 sudo ./dist/install-service.sh upgrade
 
 # Lifecycle management
@@ -166,7 +219,7 @@ sudo ./dist/install-service.sh install \
 # Current logged-in user LaunchAgent (~/Library/LaunchAgents/io.dbharbor.server.plist)
 ./dist/install-service.sh install --user-mode --port 8787
 
-# Upgrade / check status / tail logs / uninstall
+# Online upgrade (preserves custom LaunchDaemon / LaunchAgent binary path) / status / logs / uninstall
 sudo ./dist/install-service.sh upgrade
 ./dist/install-service.sh status
 ./dist/install-service.sh logs
@@ -176,7 +229,7 @@ sudo ./dist/install-service.sh upgrade
 ### 3. Windows (`ScheduledTask` Service + `icacls` ACL Hardening)
 
 ```powershell
-# Install auto-start background service (auto-downloads from GitHub Releases if needed, stores data in C:\ProgramData\DBHarbor\data)
+# Install auto-start background service (auto-downloads & verifies SHA256SUMS.txt if needed; data in C:\ProgramData\DBHarbor\data)
 powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 `
   -Action Install `
   -ServiceAccount "NT AUTHORITY\LocalService" `
@@ -185,7 +238,7 @@ powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 `
   -AdminPass "StrongPass!2026" `
   -HostAddr "127.0.0.1" -Port 8787
 
-# Online Upgrade / Status / Restart / Uninstall
+# Online Upgrade (or -Action Update; supports -Version <tag> and -Mirror <url>) / Status / Restart / Uninstall
 powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 -Action Upgrade
 powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 -Action Status
 powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 -Action Restart
@@ -199,9 +252,9 @@ powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 -Action Unin
 Ready-to-use configuration templates are included in [`deploy/`](./deploy).
 
 ### Key Reverse Proxy Best Practices for DBHarbor
-1. **Forward Real Client IP** (`X-Real-IP` and `X-Forwarded-For`): Ensures DBHarbor's anti-bruteforce rate limiter, active device session tracker, and security audit log identify real client IPs instead of the proxy loopback address.
+1. **Forward Real Client IP & Configure `trustedProxies`**: Forward `X-Real-IP` and `X-Forwarded-For` (and add non-loopback proxy IPs/CIDRs to `trustedProxies` in `<DataDir>/config.json` or `DBHARBOR_TRUSTED_PROXIES`) so DBHarbor's anti-bruteforce rate limiter, active device session tracker, and security audit log identify real client IPs securely.
 2. **Disable Response Buffering** (`proxy_buffering off;` / `flush_interval -1`): Enables zero-memory streaming downloads for multi-gigabyte SQL Dump / CSV / JSONL exports.
-3. **Increase Upload Body Limit** (`client_max_body_size 512m;`): Allows uploading large `.sql`, `.csv`, or `.json` files for batch import.
+3. **Increase Upload Body Limit** (`client_max_body_size 512m;`): Allows uploading large `.sql`, `.csv`, or `.json` files for batch import (adjust `maxImportMB` in `config.json` if needed).
 
 ### Option A: Nginx + Unix Domain Socket (Recommended Same-Host Setup)
 

@@ -31,6 +31,7 @@ import {
   UserOutlined,
 } from '@ant-design/icons';
 import { api } from '../../api/client';
+import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
 import type { ManagedUser, UserRole } from '../../types';
@@ -43,6 +44,7 @@ interface Props {
 
 export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
   const { t } = useI18n();
+  const { isMobile } = useResponsive();
   const { username: currentUsername, connections, reloadConnections } = useWorkbenchStore();
 
   const [users, setUsers] = useState<ManagedUser[]>([]);
@@ -215,6 +217,13 @@ export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
           </Space>
         }
         width="min(960px, calc(100vw - 24px))"
+        style={isMobile ? { top: 10 } : undefined}
+        styles={{
+          body: {
+            maxHeight: isMobile ? 'calc(100dvh - 120px)' : 'calc(100dvh - 160px)',
+            overflowY: 'auto',
+          },
+        }}
         onCancel={onClose}
         footer={null}
         destroyOnClose
@@ -262,7 +271,7 @@ export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
           loading={loading}
           dataSource={filteredUsers}
           scroll={{ x: 860 }}
-          pagination={{ pageSize: 10, size: 'small', showSizeChanger: false }}
+          pagination={{ pageSize: 10, size: 'small', simple: isMobile, showSizeChanger: false }}
           columns={[
             {
               title: t('Account'),
@@ -443,6 +452,13 @@ export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
         open={editorOpen}
         title={editingUser ? t('Edit User: {user}', { user: editingUser.username }) : t('Create Team User')}
         width="min(560px, calc(100vw - 24px))"
+        style={isMobile ? { top: 10 } : undefined}
+        styles={{
+          body: {
+            maxHeight: isMobile ? 'calc(100dvh - 120px)' : 'calc(100dvh - 160px)',
+            overflowY: 'auto',
+          },
+        }}
         onCancel={() => setEditorOpen(false)}
         onOk={handleSaveUser}
         confirmLoading={savingUser}
@@ -496,6 +512,9 @@ export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
           >
             <Select
               disabled={Boolean(editingUser && editingUser.username === currentUsername)}
+              optionRender={(opt) => (
+                <div style={{ whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.4 }}>{opt.label}</div>
+              )}
               options={[
                 {
                   value: 'admin',
@@ -527,7 +546,7 @@ export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
           {watchedRole !== 'admin' && (
             <>
               <Form.Item name="connScope" label={t('Shared Connection Visibility')}>
-                <Radio.Group>
+                <Radio.Group style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: 6 }}>
                   <Radio value="all">{t('All Shared Connections')}</Radio>
                   <Radio value="selected">{t('Selected Shared Connections Only')}</Radio>
                 </Radio.Group>

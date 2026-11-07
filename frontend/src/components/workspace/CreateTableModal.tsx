@@ -17,6 +17,7 @@ import {
 import { DeleteOutlined, EyeOutlined, PlusOutlined } from '@ant-design/icons';
 import { api } from '../../api/client';
 import { ResizableTable } from '../common/ResizableTable';
+import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
 import type { ColumnDef } from '../../types';
@@ -41,6 +42,7 @@ export const CreateTableModal: React.FC<Props> = ({
   onCreated,
 }) => {
   const { drivers } = useWorkbenchStore();
+  const { isMobile } = useResponsive();
   const { t } = useI18n();
   const drv = drivers.find((d) => d.type === dbType);
   const typeOptions = useMemo(
@@ -241,6 +243,13 @@ export const CreateTableModal: React.FC<Props> = ({
       open={open}
       title={`${t('Visual Create Table')} — ${database}${schema ? '.' + schema : ''} (${drv?.name || dbType})`}
       width="min(920px, calc(100vw - 16px))"
+      style={isMobile ? { top: 10 } : undefined}
+      styles={{
+        body: {
+          maxHeight: isMobile ? 'calc(100dvh - 150px)' : 'calc(100dvh - 190px)',
+          overflowY: 'auto',
+        },
+      }}
       onCancel={onClose}
       footer={
         <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>

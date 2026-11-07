@@ -48,7 +48,7 @@ func (s *Server) handlePrivListUsers(c *Context) {
 	if !s.authorizeConn(c, connID, false) {
 		return
 	}
-	drv, cfg, err := s.pool.Get(connID)
+	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
@@ -69,7 +69,7 @@ func (s *Server) handlePrivGetUserGrants(c *Context) {
 	if !s.authorizeConn(c, connID, false) {
 		return
 	}
-	drv, cfg, err := s.pool.Get(connID)
+	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
@@ -107,19 +107,10 @@ func (s *Server) handlePrivPreview(c *Context) {
 		c.JSON(http.StatusBadRequest, H{"error": "Invalid privilege action parameters"})
 		return
 	}
-	stmts, err := dbprivs.BuildStatements(sc.Type, req)
+	preview, err := dbprivs.BuildRedactedStatements(sc.Type, req)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
-	}
-	// Redact plaintext password in preview statements while keeping valid structure
-	preview := make([]string, len(stmts))
-	for i, st := range stmts {
-		if req.Password != "" {
-			preview[i] = strings.ReplaceAll(st, req.Password, "********")
-		} else {
-			preview[i] = st
-		}
 	}
 	c.JSON(http.StatusOK, H{"statements": preview})
 }
@@ -129,7 +120,7 @@ func (s *Server) handlePrivExecute(c *Context) {
 	if !s.authorizeConn(c, connID, true) {
 		return
 	}
-	drv, cfg, err := s.pool.Get(connID)
+	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
@@ -140,15 +131,8 @@ func (s *Server) handlePrivExecute(c *Context) {
 		return
 	}
 	start := time.Now()
-	stmts, err := dbprivs.ExecuteAction(c.Request.Context(), cfg.Type, drv, req)
-	redacted := make([]string, len(stmts))
-	for i, st := range stmts {
-		if req.Password != "" {
-			redacted[i] = strings.ReplaceAll(st, req.Password, "********")
-		} else {
-			redacted[i] = st
-		}
-	}
+	redacted, _ := dbprivs.BuildRedactedStatements(cfg.Type, req)
+	_, err = dbprivs.ExecuteAction(c.Request.Context(), cfg.Type, drv, req)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error(), "statements": redacted})
 		return

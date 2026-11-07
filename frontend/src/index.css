@@ -126,6 +126,35 @@ html[data-theme='light'] {
   max-width: calc(100vw - 24px);
 }
 
+.ant-message .ant-message-notice-content {
+  max-width: calc(100vw - 24px);
+  word-break: break-word;
+}
+
+/* Global viewport max-size guardrails for all floating popups across desktop & mobile */
+.ant-dropdown,
+.ant-dropdown-menu-submenu-popup,
+.ant-popover,
+.ant-popconfirm,
+.ant-select-dropdown,
+.ant-picker-dropdown,
+.ant-tooltip {
+  max-width: calc(100vw - 16px);
+}
+
+.ant-dropdown .ant-dropdown-menu,
+.ant-dropdown-menu-submenu-popup .ant-dropdown-menu {
+  max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 24px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+
+.ant-dropdown-menu-submenu-popup {
+  z-index: 1070 !important;
+}
+
 .ant-card-head-wrapper {
   flex-wrap: wrap;
   row-gap: 4px;
@@ -158,10 +187,10 @@ html[data-theme='light'] {
   }
 }
 
-@media (max-height: 680px) {
+@media (min-width: 769px) and (max-height: 680px) {
   .workbench-top-header {
-    height: 40px !important;
-    padding: 0 10px !important;
+    height: 46px !important;
+    padding: 0 12px !important;
   }
 
   .workbench-bottom-footer {
@@ -198,7 +227,8 @@ html[data-theme='light'] {
 
 /* Responsive top header, table footer & bottom footer adaptation on narrow windows */
 @media (max-width: 960px) {
-  .table-footer-tip {
+  .table-footer-tip,
+  .workbench-btn-label {
     display: none !important;
   }
 }
@@ -217,10 +247,6 @@ html[data-theme='light'] {
 }
 
 @media (max-width: 640px) {
-  .workbench-btn-label {
-    display: none !important;
-  }
-
   .workbench-top-header {
     padding: 0 8px !important;
   }
@@ -440,13 +466,263 @@ html[data-theme='dark'] *::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.38);
 }
 
+/* Prevent Ant Design Badge wrappers from shifting button vertical baseline alignment */
+.ant-badge:not(.ant-badge-not-a-wrapper) {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+
+/* Flush right-aligned Ant Design Checkbox without trailing label padding */
+.dbharbor-checkbox-end {
+  margin-inline-end: 0 !important;
+}
+
+.dbharbor-checkbox-end > span:last-child {
+  padding-inline-end: 0 !important;
+}
+
+/* Clean multi-line wrapping pill radios for Import/Export & Clone/Rename modals */
+.dbharbor-pill-radios .ant-radio-button-wrapper {
+  border-radius: 6px !important;
+  border-inline-start-width: 1px !important;
+}
+
+.dbharbor-pill-radios .ant-radio-button-wrapper::before {
+  display: none !important;
+}
+
+/* Keep inline cell editing single-line inputs compact so activating cell edit never expands table row height */
+.dbharbor-full-height-grid .ant-table-tbody > tr > td input.ant-input-sm {
+  height: 24px;
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+
+/* Eliminate Ant Design Popover / Popconfirm / Tooltip / Dropdown / Select post-expansion jitter:
+   rc-trigger computes popup (left, top) and --arrow-x from getBoundingClientRect(). Any scale() or translate()
+   during enter motion alters the measured box mid-flight and triggers a visible snap + arrow jump on animationend.
+   Keeping transform: none with a crisp pure-opacity fade guarantees 0px position & arrow drift from frame 0. */
+@keyframes dbharborPopupFadeIn {
+  0% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes dbharborPopupFadeOut {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.ant-popover,
+.ant-popconfirm,
+.ant-tooltip,
+.ant-dropdown,
+.ant-dropdown-menu-submenu-popup,
+.ant-select-dropdown,
+.ant-picker-dropdown {
+  backface-visibility: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.ant-popover[class*='ant-zoom-'],
+.ant-popconfirm[class*='ant-zoom-'],
+.ant-tooltip[class*='ant-zoom-'],
+.ant-dropdown[class*='ant-slide-'],
+.ant-dropdown[class*='ant-zoom-'],
+.ant-dropdown-menu-submenu-popup[class*='ant-zoom-'],
+.ant-dropdown-menu-submenu-popup[class*='ant-slide-'],
+.ant-select-dropdown[class*='ant-slide-'],
+.ant-picker-dropdown[class*='ant-slide-'] {
+  transform: none !important;
+}
+
+.ant-popover[class*='-enter'],
+.ant-popover[class*='-appear'],
+.ant-popconfirm[class*='-enter'],
+.ant-popconfirm[class*='-appear'],
+.ant-tooltip[class*='-enter'],
+.ant-tooltip[class*='-appear'],
+.ant-dropdown[class*='-enter'],
+.ant-dropdown[class*='-appear'],
+.ant-dropdown-menu-submenu-popup[class*='-enter'],
+.ant-dropdown-menu-submenu-popup[class*='-appear'],
+.ant-select-dropdown[class*='-enter'],
+.ant-select-dropdown[class*='-appear'],
+.ant-picker-dropdown[class*='-enter'],
+.ant-picker-dropdown[class*='-appear'] {
+  opacity: 0;
+  transform: none !important;
+  animation-duration: 0.12s !important;
+  animation-timing-function: ease-out !important;
+}
+
+.ant-popover[class*='-enter-active'],
+.ant-popover[class*='-appear-active'],
+.ant-popconfirm[class*='-enter-active'],
+.ant-popconfirm[class*='-appear-active'],
+.ant-tooltip[class*='-enter-active'],
+.ant-tooltip[class*='-appear-active'],
+.ant-dropdown[class*='-enter-active'],
+.ant-dropdown[class*='-appear-active'],
+.ant-dropdown-menu-submenu-popup[class*='-enter-active'],
+.ant-dropdown-menu-submenu-popup[class*='-appear-active'],
+.ant-select-dropdown[class*='-enter-active'],
+.ant-select-dropdown[class*='-appear-active'],
+.ant-picker-dropdown[class*='-enter-active'],
+.ant-picker-dropdown[class*='-appear-active'] {
+  animation-name: dbharborPopupFadeIn !important;
+  animation-fill-mode: both !important;
+  transform: none !important;
+}
+
+.ant-popover[class*='-leave'],
+.ant-popconfirm[class*='-leave'],
+.ant-tooltip[class*='-leave'],
+.ant-dropdown[class*='-leave'],
+.ant-dropdown-menu-submenu-popup[class*='-leave'],
+.ant-select-dropdown[class*='-leave'],
+.ant-picker-dropdown[class*='-leave'] {
+  transform: none !important;
+  animation-duration: 0.09s !important;
+  animation-timing-function: ease-out !important;
+}
+
+.ant-popover[class*='-leave-active'],
+.ant-popconfirm[class*='-leave-active'],
+.ant-tooltip[class*='-leave-active'],
+.ant-dropdown[class*='-leave-active'],
+.ant-dropdown-menu-submenu-popup[class*='-leave-active'],
+.ant-select-dropdown[class*='-leave-active'],
+.ant-picker-dropdown[class*='-leave-active'] {
+  animation-name: dbharborPopupFadeOut !important;
+  animation-fill-mode: both !important;
+  transform: none !important;
+}
+
+/* Hide scrollbar chrome on compact mobile horizontal action strips while retaining swipe scrollability */
+.dbharbor-no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.dbharbor-no-scrollbar::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 /* Navicat-style full-height data grid: pins horizontal scrollbar to bottom and renders clean blank filler rows */
-.dbharbor-full-height-grid .ant-table-body {
+.dbharbor-full-height-grid:not(.dbharbor-touch-sticky-grid) .ant-table-body {
   height: var(--dbharbor-grid-body-h, auto) !important;
   min-height: var(--dbharbor-grid-body-h, 0px) !important;
   max-height: var(--dbharbor-grid-body-h, none) !important;
   overflow-y: auto !important;
   overflow-x: auto !important;
+}
+
+/* Single-container native GPU CSS sticky header mode for mobile / coarse-pointer touch devices:
+   eliminates rc-table split-header JS scrollLeft synchronization lag & flickering during touch drag */
+.dbharbor-touch-sticky-grid .ant-table-content {
+  overflow: auto !important;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+.dbharbor-touch-sticky-grid.dbharbor-full-height-grid .ant-table-content {
+  height: var(--dbharbor-grid-total-h, calc(var(--dbharbor-grid-body-h, 280px) + 38px)) !important;
+  min-height: var(--dbharbor-grid-total-h, calc(var(--dbharbor-grid-body-h, 280px) + 38px)) !important;
+  max-height: var(--dbharbor-grid-total-h, calc(var(--dbharbor-grid-body-h, 280px) + 38px)) !important;
+}
+
+.dbharbor-touch-sticky-grid:not(.dbharbor-full-height-grid) .ant-table-content {
+  max-height: var(--dbharbor-sticky-max-h, 65dvh) !important;
+}
+
+.dbharbor-touch-sticky-grid table {
+  border-collapse: separate !important;
+  border-spacing: 0 !important;
+}
+
+.dbharbor-touch-sticky-grid .ant-table-thead > tr > th,
+.dbharbor-touch-sticky-grid .ant-table-thead > tr > td {
+  position: sticky !important;
+  top: 0 !important;
+  z-index: 6 !important;
+  transition: none !important;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+}
+
+.dbharbor-touch-sticky-grid .ant-table-thead > tr > th.ant-table-cell-fix-left,
+.dbharbor-touch-sticky-grid .ant-table-thead > tr > th.ant-table-cell-fix-right,
+.dbharbor-touch-sticky-grid .ant-table-thead > tr > td.ant-table-cell-fix-left,
+.dbharbor-touch-sticky-grid .ant-table-thead > tr > td.ant-table-cell-fix-right {
+  z-index: 9 !important;
+}
+
+.dbharbor-touch-sticky-grid .ant-table-tbody > tr > td.ant-table-cell-fix-left,
+.dbharbor-touch-sticky-grid .ant-table-tbody > tr > td.ant-table-cell-fix-right {
+  z-index: 3 !important;
+  transition: none !important;
+}
+
+.dbharbor-touch-sticky-grid .ant-table-cell,
+.dbharbor-touch-sticky-grid .ant-table-cell::before,
+.dbharbor-touch-sticky-grid .ant-table-cell::after {
+  transition: none !important;
+}
+
+html[data-theme='light'] .dbharbor-touch-sticky-grid .ant-table-thead > tr > th,
+html[data-theme='light'] .dbharbor-touch-sticky-grid .ant-table-thead > tr > td {
+  background: #f5f7fa !important;
+  border-bottom: 1px solid #e5e7eb !important;
+}
+
+html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-thead > tr > th,
+html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-thead > tr > td {
+  background: #1c1f26 !important;
+  border-bottom: 1px solid #2e3340 !important;
+}
+
+html[data-theme='light'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr > td.ant-table-cell-fix-left,
+html[data-theme='light'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr > td.ant-table-cell-fix-right {
+  background: #ffffff !important;
+}
+
+html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr > td.ant-table-cell-fix-left,
+html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr > td.ant-table-cell-fix-right {
+  background: #14161c !important;
+}
+
+html[data-theme='light'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.ant-table-row-selected > td.ant-table-cell-fix-left,
+html[data-theme='light'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.ant-table-row-selected > td.ant-table-cell-fix-right {
+  background: #e6f4ff !important;
+}
+
+html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.ant-table-row-selected > td.ant-table-cell-fix-left,
+html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.ant-table-row-selected > td.ant-table-cell-fix-right {
+  background: #112545 !important;
+}
+
+/* Staged new row highlight across both desktop and mobile grids */
+html[data-theme='light'] .ant-table-tbody > tr.dbharbor-staged-new-row > td.ant-table-cell,
+html[data-theme='light'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.dbharbor-staged-new-row > td.ant-table-cell-fix-left,
+html[data-theme='light'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.dbharbor-staged-new-row > td.ant-table-cell-fix-right {
+  background: #f0fdf4 !important;
+}
+
+html[data-theme='dark'] .ant-table-tbody > tr.dbharbor-staged-new-row > td.ant-table-cell,
+html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.dbharbor-staged-new-row > td.ant-table-cell-fix-left,
+html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.dbharbor-staged-new-row > td.ant-table-cell-fix-right {
+  background: #11241b !important;
 }
 
 .dbharbor-filler-row > td.ant-table-cell {
@@ -474,6 +750,133 @@ html[data-theme='dark'] *::-webkit-scrollbar-thumb:hover {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
+/* Coarse-pointer & mobile touch ergonomics: larger hit targets, anti-mis-tap spacing, touch-friendly column drag handles */
+@media (max-width: 768px), (pointer: coarse) {
+  .dbharbor-col-resizer {
+    width: 18px;
+    right: 0;
+    z-index: 8;
+    touch-action: none;
+  }
+
+  .dbharbor-col-resizer::after {
+    top: 22%;
+    bottom: 22%;
+    right: 2px;
+    width: 3px;
+    border-radius: 2px;
+    background: rgba(128, 128, 128, 0.36);
+  }
+
+  .dbharbor-col-resizer:active::after,
+  .dbharbor-col-resizer.is-dragging::after {
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: #1677ff;
+  }
+
+  .ant-table-thead > tr > th.dbharbor-resizable-th.ant-table-cell {
+    padding-right: 18px !important;
+  }
+
+  /* Clamp all floating dropdowns, popovers & popconfirms inside narrow mobile viewports */
+  .ant-dropdown,
+  .ant-dropdown-menu-submenu-popup,
+  .ant-popover,
+  .ant-popconfirm,
+  .ant-select-dropdown {
+    max-width: calc(100vw - 16px) !important;
+  }
+
+  .ant-dropdown-menu-submenu-popup {
+    z-index: 1070 !important;
+  }
+
+  .ant-dropdown .ant-dropdown-menu,
+  .ant-dropdown-menu-submenu-popup .ant-dropdown-menu {
+    max-width: calc(100vw - 16px);
+    max-height: min(72dvh, 460px);
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+  }
+
+  .ant-popover .ant-popover-inner {
+    max-width: calc(100vw - 16px);
+  }
+
+  .ant-popconfirm-title,
+  .ant-popconfirm-description {
+    word-break: break-word;
+  }
+
+  .ant-dropdown-menu .ant-dropdown-menu-item,
+  .ant-dropdown-menu .ant-dropdown-menu-submenu-title {
+    min-height: 40px;
+    padding: 8px 14px !important;
+    display: flex;
+    align-items: center;
+    font-size: 13.5px;
+  }
+
+  .ant-popconfirm-buttons,
+  .ant-popover-buttons {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 10px;
+  }
+
+  .ant-popconfirm-buttons .ant-btn,
+  .ant-popover-buttons .ant-btn {
+    min-height: 34px !important;
+    min-width: 64px;
+    padding: 4px 12px !important;
+    font-size: 13px !important;
+  }
+
+  .ant-table-wrapper .ant-checkbox-inner {
+    width: 18px;
+    height: 18px;
+  }
+
+  .ant-table-wrapper .ant-table-thead > tr > th.ant-table-selection-column,
+  .ant-table-wrapper .ant-table-tbody > tr > td.ant-table-selection-column {
+    padding-left: 6px !important;
+    padding-right: 6px !important;
+    text-align: center;
+  }
+
+  .ant-pagination .ant-pagination-item,
+  .ant-pagination .ant-pagination-prev,
+  .ant-pagination .ant-pagination-next {
+    min-width: 32px !important;
+    height: 32px !important;
+    line-height: 30px !important;
+  }
+
+  .dbharbor-row-splitter {
+    height: 18px;
+    touch-action: none;
+  }
+
+  .dbharbor-row-splitter::after {
+    top: 7px;
+    width: 48px;
+    height: 4px;
+    border-radius: 2px;
+  }
+}
+
+/* Suppress stuck synthetic hover tooltips on touch-only mobile screens */
+@media (hover: none) and (pointer: coarse) {
+  .ant-tooltip {
+    display: none !important;
+    pointer-events: none !important;
+  }
+}
+
 @media (max-width: 640px) {
   .ant-modal-wrap {
     padding: 6px;
@@ -488,6 +891,12 @@ html[data-theme='dark'] *::-webkit-scrollbar-thumb:hover {
     padding: 12px 14px !important;
   }
 
+  .ant-drawer-header,
+  .ant-drawer-body,
+  .ant-drawer-footer {
+    padding: 12px 14px !important;
+  }
+
   .ant-drawer-bottom > .ant-drawer-content-wrapper {
     max-width: 100vw !important;
     border-top-left-radius: 12px;
@@ -495,8 +904,48 @@ html[data-theme='dark'] *::-webkit-scrollbar-thumb:hover {
     overflow: hidden;
   }
 
-  .dbharbor-mobile-table .ant-table-cell {
-    padding: 5px 6px !important;
-    font-size: 12px;
+  .monaco-editor .suggest-widget {
+    max-width: calc(100vw - 24px) !important;
+  }
+
+  .dbharbor-mobile-table .ant-table-thead > tr > th.ant-table-cell:not(.ant-table-selection-column):not(.dbharbor-row-index-cell) {
+    padding: 8px 8px !important;
+    font-size: 12.5px;
+  }
+
+  .dbharbor-mobile-table .ant-table-thead > tr > th.dbharbor-resizable-th.ant-table-cell {
+    padding: 8px 18px 8px 8px !important;
+  }
+
+  .dbharbor-mobile-table .ant-table-tbody > tr > td.ant-table-cell:not(.ant-table-selection-column):not(.dbharbor-row-index-cell) {
+    padding: 7px 8px !important;
+    font-size: 12.5px;
+  }
+
+  .dbharbor-mobile-table .ant-table-thead > tr > th.dbharbor-row-index-cell.ant-table-cell,
+  .dbharbor-mobile-table .ant-table-tbody > tr > td.dbharbor-row-index-cell.ant-table-cell {
+    padding-left: 5px !important;
+    padding-right: 5px !important;
+    font-size: 12.5px;
+  }
+}
+
+.ant-table-wrapper .ant-table-thead > tr > th.ant-table-selection-column,
+.ant-table-wrapper .ant-table-tbody > tr > td.ant-table-selection-column {
+  padding-left: 6px !important;
+  padding-right: 6px !important;
+  text-align: center;
+}
+
+/* Prevent iOS Safari automatic viewport zoom when focusing inputs with < 16px font-size */
+@supports (-webkit-touch-callout: none) {
+  input,
+  textarea,
+  select,
+  .ant-input,
+  .ant-input-number-input,
+  .ant-select-selection-search-input,
+  .monaco-editor .inputarea {
+    font-size: 16px !important;
   }
 }

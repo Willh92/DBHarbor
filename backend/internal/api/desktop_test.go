@@ -94,16 +94,41 @@ func TestDesktopPureLocalModeE2E(t *testing.T) {
 		t.Fatalf("expected HttpOnly SameSite=Strict desktop session cookie, got %+v", sessionCookie)
 	}
 
-	// 4. Verify /api/version reports desktop edition & authEnabled=false
-	verResp, err := noRedirectClient.Get(ts.URL + "/api/version")
+	// 4. Verify unauthenticated /api/version returns 401, and authenticated /api/version reports desktop edition & authEnabled=false
+	unauthVerResp, err := noRedirectClient.Get(ts.URL + "/api/version")
+	if err != nil {
+		t.Fatalf("unauthenticated GET /api/version failed: %v", err)
+	}
+	_ = unauthVerResp.Body.Close()
+	if unauthVerResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unauthenticated /api/version, got %d", unauthVerResp.StatusCode)
+	}
+
+	robotsResp, err := noRedirectClient.Get(ts.URL + "/robots.txt")
+	if err != nil {
+		t.Fatalf("GET /robots.txt failed: %v", err)
+	}
+	var robotsBuf bytes.Buffer
+	_, _ = robotsBuf.ReadFrom(robotsResp.Body)
+	_ = robotsResp.Body.Close()
+	if robotsResp.StatusCode != http.StatusOK || robotsBuf.String() != "User-agent: *\nDisallow: /\n" {
+		t.Fatalf("unexpected /robots.txt: status=%d body=%q", robotsResp.StatusCode, robotsBuf.String())
+	}
+	if !strings.Contains(robotsResp.Header.Get("X-Robots-Tag"), "noindex") {
+		t.Fatalf("expected X-Robots-Tag header on /robots.txt, got %q", robotsResp.Header.Get("X-Robots-Tag"))
+	}
+
+	reqVer, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/version", nil)
+	reqVer.AddCookie(sessionCookie)
+	verResp, err := noRedirectClient.Do(reqVer)
 	if err != nil {
 		t.Fatalf("GET /api/version failed: %v", err)
 	}
 	var verPayload map[string]any
 	_ = json.NewDecoder(verResp.Body).Decode(&verPayload)
 	_ = verResp.Body.Close()
-	if verPayload["edition"] != "desktop" || verPayload["authEnabled"] != false {
-		t.Fatalf("expected edition=desktop and authEnabled=false, got %+v", verPayload)
+	if verResp.StatusCode != http.StatusOK || verPayload["edition"] != "desktop" || verPayload["authEnabled"] != false {
+		t.Fatalf("expected 200 with edition=desktop and authEnabled=false, got status=%d payload=%+v", verResp.StatusCode, verPayload)
 	}
 
 	// 5. List sample SQLite connection & execute desktop native file export without any login/JWT

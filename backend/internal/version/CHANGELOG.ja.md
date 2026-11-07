@@ -4,6 +4,30 @@
 
 DBHarbor の主な変更履歴は本ファイルに記録され、GitHub リポジトリ [Willh92/DBHarbor](https://github.com/Willh92/DBHarbor.git) と同期されます。
 
+## [v1.0.1] - 2026-11-07
+
+> **エディション適用範囲の注意**：**デスクトップ GUI 版 (`dbharbor-desktop-*` / `DBHarbor.app`)** は引き続き**ユーザーアカウント機能を持たないログイン不要の純粋なローカルモード**で動作します。永続サーバー設定（`<DataDir>/config.json`）、初期管理者セットアップウィザード、ログイン画面のブランディング、緊急管理者リカバリモード（`recovery` / `-recover-admin`）、およびローカルファイル・ネットワークのサンドボックス制限は **Web サーバー版 (`dbharbor-*`) 専用**です。
+
+### 永続サーバー設定 (`config.json`)・緊急管理者リカバリ・セキュリティ強化・モバイル操作性向上・オンライン更新
+- **永続サーバー設定ファイル (`<DataDir>/config.json`) & 緊急管理者リカバリモード *(Web サーバー版のみ)***：
+  - Web サーバー版の起動時に `<DataDir>/config.json`（権限 `0600`、`-config <path>` または `DBHARBOR_CONFIG_FILE` でパス変更可）を自動生成。優先順位 `CLI 引数 > DBHARBOR_* 環境変数 > config.json > デフォルト値` で `host`、`port`、`unixSocket`、`unixSocketPerm`、`unixSocketGroup`、`idleConnTTLMinutes`、`maxImportMB`、`trustedProxies`、`corsAllowedOrigins`、`security`（`allowPrivateNetworkForNonAdmin`、`duckdbCliPath`）、`recovery`（`enabled`、`adminUsername`、`newPassword`、`reset2FA`）を管理できます。
+  - 管理者パスワードまたは 2FA デバイス紛失時の 2 通りの緊急復旧フローを追加：
+    1. **`config.json` による復旧**：`<DataDir>/config.json` の `"recovery"` を `{ "enabled": true, "adminUsername": "admin", "newPassword": "YourNewStrongPassword", "reset2FA": true }`（8 文字以上、または `"auto"` で 16 文字のランダムパスワードを生成し起動ログに出力）に編集して再起動すると、`dbharbor.db` を `<DataDir>/.backups/` に自動バックアップした上でパスワード/2FA をリセット・既存セッションを失効させ、**即座に `config.json` を自動無害化（`enabled: false`、`newPassword: ""`）**します。
+    2. **ワンショット CLI 復旧**：`dbharbor -data-dir <dir> -recover-admin [-recover-user <username>] -recover-pass <newPass|auto> [-reset-2fa]` を実行して即座にリセットして終了できます。
+- **初期デフォルト認証情報の廃止・初回管理者セットアップ・ログイン画面カスタマイズ＆検索エンジン登録防止 *(Web サーバー版のみ)***：
+  - 組み込みの `admin` / `admin123` を廃止し、Web セットアップ・CLI（`-admin-pass`）・サービスインストーラ全体で初期管理者パスワードを **最低 8 文字** に統一。ユーザーが空の場合は初回アクセス時に一回限りの**初期管理者セットアップウィザード**（`POST /api/auth/setup`）を表示し、作成後に永久ロックします。
+  - 未認証時の情報露出ゼロ化（`admin` 事前入力なし、バージョン/エンジン/GitHub 非表示、最小化された `GET /api/health`、認証必須の `GET /api/version`）に加え、**セキュリティ / 2FA -> ログイン画面** から `<title>`・上部アイコン（`<= 128 KB` 画像アップロード＋Favicon 同期）・見出し・サブタイトルを自由に変更可能。`/robots.txt`、`X-Robots-Tag`、`<meta name="robots">` による三重のクローラ拒否を標準搭載。
+- **セキュリティ・ドライバ信頼性 & パフォーマンス強化**：
+  - **Web サーバー版のローカル DB & SSRF サンドボックス**：非管理者（`Read-Write`）のローカル SQLite / DuckDB ファイルを `<DataDir>/local_databases/` 内に厳格制限（シンボリックリンク脱出防止）、Web モードでの SQLite `ATTACH DATABASE` 無効化、サーバー管理の `security.duckdbCliPath` と DuckDB `enable_external_access = false` の強制、および非管理者によるプライベート/ループバック IP 接続をブロックする SSRF ガード（`security.allowPrivateNetworkForNonAdmin` で制御）を追加。
+  - **リプレイ防止 CAPTCHA & 信頼プロキシ対応レート制限**：秘密鍵派生の使い捨て CAPTCHA トークン、`trustedProxies` に登録されたプロキシからのみ `X-Forwarded-For` / `X-Real-IP` を信頼するクライアント IP 制限、2FA 試行回数上限を導入。
+  - **厳格な TLS 検証・プール並行安全性 & メモリ最適化**：各 DB ドライバの TLS 証明書検証オプション、SQL Server プール接続での `USE [db]` コンテキスト分離、`pool.Manager` の参照カウント方式リースによる実行中クエリの誤クローズ防止、DuckDB / MongoDB ストリーミングメモリ上限、起動時 SQLite メタデータ自動マイグレーション（`<DataDir>/.backups/` 自動退避）、SQLite オブジェクト一覧の即時取得を実装。
+- **モバイルタッチワークベンチ & テーブル操作性の向上**：
+  - モバイル・タッチ端末のデータグリッドを単一コンテナのネイティブ GPU CSS `position: sticky` ヘッダー（`.dbharbor-touch-sticky-grid`）へ刷新してちらつきを解消し、**タッチドラッグによる列幅変更**と**ダブルタップ自動幅調整**を追加。
+  - サイドバーやグリッドへのタッチ用 `[⋮]` メニュー＆長押しメニュー、モバイル SQL クイック記号バー、省略セルのタップ全文確認、`34px〜40px` タップ領域と危険操作の分離、サイドバー `keep-alive` メモリキャッシュ、ポップアップの画面端はみ出し防止クランプを実装。
+- **クロスプラットフォーム・サービスインストーラ & オンラインバイナリ更新 (`install-service.sh` / `install-service.ps1`)**：
+  - `upgrade`（別名 `update`）/ `-Action Upgrade`（別名 `-Action Update`）による GitHub Releases からのオンライン更新、**フェイルクローズ方式の `SHA256SUMS.txt` 検証**、上書き前の `-version` スモークテスト、`--mirror` / `-Mirror` ミラー指定、`--admin-user` / `--admin-pass`（8 文字以上）初期化に対応。
+  - 引用符付き `systemd` `ExecStart=` および macOS `launchd` `ProgramArguments` のカスタムパス引き継ぎ修正、Windows `irm | iex` 対応と `%TEMP%` 自動削除、終了待機ポーリング（`Stop-DBHarborServiceAndWait`）＋ `.old` アトミック置換による Windows `.exe` ロック競合解消を実施。
+
 ## [v1.0.0] - 2026-11-07
 
 ### 初回リリース

@@ -18,6 +18,7 @@ import {
 } from 'antd';
 import {
   AlignLeftOutlined,
+  ArrowLeftOutlined,
   BookOutlined,
   BulbOutlined,
   ClearOutlined,
@@ -149,6 +150,7 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
   const [rowSearch, setRowSearch] = useState('');
   const deferredRowSearch = useDeferredValue(rowSearch);
   const [inspectCell, setInspectCell] = useState<{ column: string; value: string } | null>(null);
+  const cellTapStartRef = useRef<{ x: number; y: number } | null>(null);
 
   const filteredRawRows = useMemo(() => {
     const q = deferredRowSearch.trim().toLowerCase();
@@ -189,6 +191,16 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
         render: (v: any) => (
           <span
             data-raw-copy={formatRawCellText(v)}
+            onPointerDown={(e) => {
+              cellTapStartRef.current = { x: e.clientX, y: e.clientY };
+            }}
+            onClick={(e) => {
+              if (!isMobile || v === null || v === undefined) return;
+              const start = cellTapStartRef.current;
+              if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) >= 8) return;
+              if (typeof window !== 'undefined' && window.getSelection?.()?.toString()) return;
+              setInspectCell({ column: c.name, value: prettyFormatCellValue(v) });
+            }}
             onDoubleClick={() => setInspectCell({ column: c.name, value: prettyFormatCellValue(v) })}
             style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer' }}
             title={v === null ? 'NULL' : String(v)}
@@ -197,7 +209,7 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
           </span>
         ),
       })),
-    [result.columns]
+    [result.columns, isMobile]
   );
 
   const copyAs = (mode: 'tsv' | 'csv' | 'json' | 'md' | 'sql') => {
@@ -246,7 +258,7 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
       const headH = thead && thead.offsetHeight > 0 ? thead.offsetHeight : 38;
       const pagH = pag && pag.offsetHeight > 0 ? pag.offsetHeight + 16 : 42;
       const nextH = Math.max(90, Math.floor(el.clientHeight - headH - pagH - 4));
-      setGridBodyHeight((prev) => (prev === nextH ? prev : nextH));
+      setGridBodyHeight((prev) => (Math.abs(prev - nextH) < 6 ? prev : nextH));
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -279,16 +291,18 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
         )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: isMobile ? 1 : undefined, minWidth: 0 }}>
           <Input
-            size="small"
+            size={isMobile ? 'middle' : 'small'}
             allowClear
             prefix={<SearchOutlined />}
             placeholder={t('Filter result rows...')}
             value={rowSearch}
             onChange={(e) => setRowSearch(e.target.value)}
-            style={isMobile ? { flex: 1, minWidth: 90 } : { width: 180, maxWidth: '48vw' }}
+            style={isMobile ? { flex: 1, minWidth: 90, height: 34 } : { width: 180, maxWidth: '48vw' }}
           />
           <Dropdown.Button
-            size="small"
+            trigger={['click']}
+            placement="bottomRight"
+            size={isMobile ? 'middle' : 'small'}
             icon={<CopyOutlined />}
             onClick={() => copyAs('tsv')}
             menu={{
@@ -304,6 +318,8 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
             {isMobile ? t('Copy') : t('Copy Result')}
           </Dropdown.Button>
           <Dropdown
+            trigger={['click']}
+            placement="bottomRight"
             menu={{
               items: [
                 { key: 'csv_bom', label: 'CSV (Excel UTF-8 BOM)', onClick: () => downloadAsFile('csv_bom') },
@@ -315,7 +331,12 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
               ],
             }}
           >
-            <Button size="small" icon={<DownloadOutlined />} title={t('Save File')}>
+            <Button
+              size={isMobile ? 'middle' : 'small'}
+              style={isMobile ? { width: 34, height: 34, padding: 0 } : undefined}
+              icon={<DownloadOutlined />}
+              title={t('Save File')}
+            >
               {isMobile ? '' : t('Save File')}
             </Button>
           </Dropdown>
@@ -345,7 +366,7 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
               type="primary"
               onClick={() => {
                 if (inspectCell) {
-                  navigator.clipboard.writeText(inspectCell.value);
+                  writeTextToClipboard(inspectCell.value);
                   message.success(t('Copied {name}', { name: inspectCell.column }));
                 }
               }}
@@ -393,12 +414,20 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
   const [historyList, setHistoryList] = useState<HistoryEntry[]>([]);
   const [snippets, setSnippets] = useState<SavedSnippet[]>([]);
   const [saveModalOpen, setSaveModalOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [mobileMenuView, setMobileMenuView] = useState<'root' | 'templates'>('root');
+  const keepMobileMenuOpenRef = useRef(false);
   const [snippetTitle, setSnippetTitle] = useState('');
   const [snippetShared, setSnippetShared] = useState(false);
   const [hasSelection, setHasSelection] = useState(false);
   const [editorHeight, setEditorHeight] = useState<number>(() => {
     const saved = Number(localStorage.getItem('dbharbor_sql_editor_height'));
-    return saved >= 110 && saved <= 620 ? saved : 210;
+    if (saved >= 92 && saved <= 620) return saved;
+    const mobileInit =
+      typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+        ? window.matchMedia('(max-width: 640px)').matches
+        : false;
+    return mobileInit ? 148 : 210;
   });
 
   const editorPaneRef = useRef<HTMLDivElement | null>(null);
@@ -606,8 +635,12 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
       editorRef.current?.layout();
     };
 
+    const maxDragH = isMobile
+      ? Math.max(220, Math.round((typeof window !== 'undefined' ? window.innerHeight : 720) * 0.55))
+      : 620;
+
     const onMove = (ev: PointerEvent) => {
-      latestH = Math.max(92, Math.min(620, Math.round(startH + (ev.clientY - startY))));
+      latestH = Math.max(92, Math.min(maxDragH, Math.round(startH + (ev.clientY - startY))));
       if (!rafId) {
         rafId = window.requestAnimationFrame(applyHeight);
       }
@@ -677,6 +710,23 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
     },
   ];
 
+  const insertQuickSymbol = (sym: string) => {
+    const ed = editorRef.current;
+    if (ed) {
+      const sel = ed.getSelection() || new monaco.Selection(1, 1, 1, 1);
+      ed.executeEdits('mobile-quick-symbol', [
+        {
+          range: sel,
+          text: sym,
+          forceMoveMarkers: true,
+        },
+      ]);
+      ed.focus();
+      return;
+    }
+    setSqlText((prev) => `${prev}${sym}`);
+  };
+
   return (
     <div
       style={{
@@ -693,56 +743,126 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
       {/* Top Toolbar */}
       {isMobile ? (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-          <Button size="small" type="primary" icon={<PlayCircleOutlined />} loading={running} onClick={() => executeSQL()}>
-            {t('Run')}
+          <Button
+            size="small"
+            style={{ height: 34, paddingInline: 12 }}
+            type="primary"
+            icon={<PlayCircleOutlined />}
+            loading={running}
+            onClick={() => executeSQL()}
+          >
+            {hasSelection ? t('Run Selection') : t('Run')}
           </Button>
           {running && (
-            <Button danger size="small" icon={<StopOutlined />} onClick={() => abortRef.current?.abort()} />
+            <Button
+              danger
+              size="small"
+              style={{ width: 34, height: 34, padding: 0 }}
+              icon={<StopOutlined />}
+              onClick={() => abortRef.current?.abort()}
+            />
           )}
           <Select
-            size="small"
-            style={{ flex: 1, minWidth: 90 }}
+            size="middle"
+            style={{ flex: 1, minWidth: 90, height: 34 }}
             value={currentDB || undefined}
             onChange={setCurrentDB}
             placeholder={t('Database')}
             options={databases.map((d) => ({ value: d.name, label: d.name }))}
           />
-          <Button size="small" icon={<HistoryOutlined />} onClick={openHistory} title={t('History')} />
+          <Button
+            size="small"
+            style={{ width: 34, height: 34, padding: 0 }}
+            icon={<HistoryOutlined />}
+            onClick={openHistory}
+            title={t('History')}
+          />
           <Dropdown
             trigger={['click']}
+            placement="bottomRight"
+            open={mobileMenuOpen}
+            onOpenChange={(nextOpen) => {
+              if (!nextOpen && keepMobileMenuOpenRef.current) {
+                keepMobileMenuOpenRef.current = false;
+                return;
+              }
+              setMobileMenuOpen(nextOpen);
+              if (!nextOpen) {
+                setMobileMenuView('root');
+              }
+            }}
             menu={{
-              items: [
-                { key: 'explain', icon: <BulbOutlined />, label: t('EXPLAIN Plan'), onClick: handleExplain },
-                { key: 'format', icon: <AlignLeftOutlined />, label: t('Format'), onClick: handleFormat },
-                { key: 'templates', icon: <FileTextOutlined />, label: t('Templates'), children: templateMenuItems },
-                { key: 'save', icon: <SaveOutlined />, label: t('Save Snippet'), onClick: () => setSaveModalOpen(true) },
-                { key: 'snippets', icon: <BookOutlined />, label: t('Snippets'), onClick: openSnippets },
-                {
-                  key: 'export',
-                  icon: <DownloadOutlined />,
-                  label: t('Export Result'),
-                  onClick: () => onOpenExportSQL(currentDB, editorRef.current ? editorRef.current.getValue() : sqlText),
-                },
-                {
-                  key: 'new',
-                  icon: <PlusOutlined />,
-                  label: t('New Console'),
-                  onClick: () =>
-                    openTab({
-                      key: `sql:${tab.connectionId}:${Date.now()}`,
-                      title: `SQL - ${currentDB || tab.connName}`,
-                      kind: 'sql_console',
-                      connectionId: tab.connectionId,
-                      connName: tab.connName,
-                      dbType: tab.dbType,
-                      database: currentDB,
-                      schema: tab.schema,
-                    }),
-                },
-              ],
+              items:
+                mobileMenuView === 'templates'
+                  ? [
+                      {
+                        key: 'tpl_back',
+                        icon: <ArrowLeftOutlined />,
+                        label: <Typography.Text strong>{t('Templates')}</Typography.Text>,
+                        onClick: () => {
+                          keepMobileMenuOpenRef.current = true;
+                          setMobileMenuView('root');
+                        },
+                      },
+                      { type: 'divider' as const },
+                      ...templateMenuItems.map((tpl) => ({
+                        key: tpl.key,
+                        icon: <FileTextOutlined />,
+                        label: <span style={{ fontFamily: 'monospace', fontSize: 12.5 }}>{tpl.label}</span>,
+                        onClick: () => {
+                          tpl.onClick();
+                          setMobileMenuOpen(false);
+                          setMobileMenuView('root');
+                        },
+                      })),
+                    ]
+                  : [
+                      { key: 'explain', icon: <BulbOutlined />, label: t('EXPLAIN Plan'), onClick: handleExplain },
+                      { key: 'format', icon: <AlignLeftOutlined />, label: t('Format'), onClick: handleFormat },
+                      {
+                        key: 'templates',
+                        icon: <FileTextOutlined />,
+                        label: (
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, width: '100%' }}>
+                            <span>{t('Templates')}</span>
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                              ›
+                            </Typography.Text>
+                          </div>
+                        ),
+                        onClick: () => {
+                          keepMobileMenuOpenRef.current = true;
+                          setMobileMenuView('templates');
+                        },
+                      },
+                      { key: 'save', icon: <SaveOutlined />, label: t('Save Snippet'), onClick: () => setSaveModalOpen(true) },
+                      { key: 'snippets', icon: <BookOutlined />, label: t('Snippets'), onClick: openSnippets },
+                      {
+                        key: 'export',
+                        icon: <DownloadOutlined />,
+                        label: t('Export Result'),
+                        onClick: () => onOpenExportSQL(currentDB, editorRef.current ? editorRef.current.getValue() : sqlText),
+                      },
+                      {
+                        key: 'new',
+                        icon: <PlusOutlined />,
+                        label: t('New Console'),
+                        onClick: () =>
+                          openTab({
+                            key: `sql:${tab.connectionId}:${Date.now()}`,
+                            title: `SQL - ${currentDB || tab.connName}`,
+                            kind: 'sql_console',
+                            connectionId: tab.connectionId,
+                            connName: tab.connName,
+                            dbType: tab.dbType,
+                            database: currentDB,
+                            schema: tab.schema,
+                          }),
+                      },
+                    ],
             }}
           >
-            <Button size="small" icon={<MoreOutlined />} />
+            <Button size="small" style={{ width: 34, height: 34, padding: 0 }} icon={<MoreOutlined />} />
           </Dropdown>
         </div>
       ) : (
@@ -770,7 +890,7 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
             <Button size="small" icon={<AlignLeftOutlined />} onClick={handleFormat}>
               {t('Format')}
             </Button>
-            <Dropdown menu={{ items: templateMenuItems }}>
+            <Dropdown trigger={['click']} menu={{ items: templateMenuItems }}>
               <Button size="small" icon={<FileTextOutlined />}>
                 {t('Templates')}
               </Button>
@@ -820,7 +940,9 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
       <div
         ref={editorPaneRef}
         style={{
-          height: isMobile ? Math.min(editorHeight, 155) : editorHeight,
+          height: isMobile
+            ? Math.min(editorHeight, Math.max(220, Math.round((typeof window !== 'undefined' ? window.innerHeight : 720) * 0.55)))
+            : editorHeight,
           minHeight: 92,
           maxHeight: '68%',
           flexShrink: 0,
@@ -860,17 +982,61 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
         />
       </div>
 
+      {/* Mobile SQL Quick-Symbol Bar */}
+      {isMobile && (
+        <div
+          className="dbharbor-no-scrollbar"
+          style={{
+            height: 30,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 5,
+            overflowX: 'auto',
+            flexShrink: 0,
+            padding: '0 2px',
+          }}
+        >
+          {['SELECT ', 'WHERE ', 'LIMIT ', '*', '=', "'", '`', '_', '(', ')', ';'].map((sym) => (
+            <button
+              key={sym}
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => insertQuickSymbol(sym)}
+              style={{
+                height: 26,
+                minWidth: 28,
+                padding: '0 8px',
+                borderRadius: 6,
+                border: `1px solid ${darkMode ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.14)'}`,
+                background: darkMode ? '#1a1d24' : '#f5f7fa',
+                color: darkMode ? '#e6edf3' : '#1f2328',
+                fontFamily: "'JetBrains Mono', Consolas, monospace",
+                fontSize: 12,
+                fontWeight: 500,
+                lineHeight: '24px',
+                cursor: 'pointer',
+                flexShrink: 0,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {sym.trim()}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Horizontal Drag Splitter */}
       <div
         ref={rowSplitterRef}
         className="dbharbor-row-splitter"
         onPointerDown={handleEditorSplitterPointerDown}
         onDoubleClick={() => {
-          setEditorHeight(210);
+          const resetH = isMobile ? 148 : 210;
+          setEditorHeight(resetH);
           if (editorPaneRef.current) {
-            editorPaneRef.current.style.height = '210px';
+            editorPaneRef.current.style.height = `${resetH}px`;
           }
-          localStorage.setItem('dbharbor_sql_editor_height', '210');
+          localStorage.setItem('dbharbor_sql_editor_height', String(resetH));
           window.requestAnimationFrame(() => {
             editorRef.current?.layout();
             window.dispatchEvent(new Event('dbharbor-layout-settled'));

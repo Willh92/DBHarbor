@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { api, getAuthToken, setAuthToken } from '../api/client';
 import { detectInitialLocale, ensureLocaleLoaded, persistLocale, translateWithLocale, type AppLocale } from '../i18n';
-import type { DriverMeta, SavedConnection, UserRole, WorkspaceTab } from '../types';
+import type { DriverMeta, LoginBrandingConfig, SavedConnection, UserRole, WorkspaceTab } from '../types';
 import { getRuntimeBootMeta, isDesktopRuntime } from '../utils/runtimeMode';
 
 interface WorkbenchState {
@@ -14,6 +14,7 @@ interface WorkbenchState {
   totpEnabled: boolean;
   passwordChanged: boolean;
   recoveryCodesRemaining: number;
+  loginBranding: LoginBrandingConfig | null;
   darkMode: boolean;
   locale: AppLocale;
   drivers: DriverMeta[];
@@ -34,6 +35,7 @@ interface WorkbenchState {
       recoveryCodesRemaining?: number;
     }
   ) => void;
+  setLoginBranding: (branding: LoginBrandingConfig) => void;
   setSecurityMeta: (sec: {
     displayName?: string;
     role?: UserRole;
@@ -133,13 +135,14 @@ const initialTabSession = loadPersistedSession();
 export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   isDesktop: isDesktopRuntime(),
   token: getAuthToken(),
-  username: localStorage.getItem('dbharbor_username') || 'admin',
+  username: localStorage.getItem('dbharbor_username') || '',
   displayName: '',
   role: 'admin',
   canCreateConn: true,
   totpEnabled: false,
   passwordChanged: true,
   recoveryCodesRemaining: 0,
+  loginBranding: null,
   darkMode: localStorage.getItem('dbharbor_theme')
     ? localStorage.getItem('dbharbor_theme') === 'dark'
     : Boolean(getRuntimeBootMeta().darkMode),
@@ -166,6 +169,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     });
   },
 
+  setLoginBranding: (branding) => set({ loginBranding: branding }),
+
   setSecurityMeta: (sec) =>
     set((s) => ({
       displayName: sec.displayName ?? s.displayName,
@@ -181,8 +186,9 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       api.logout().catch(() => {});
     }
     setAuthToken('');
+    localStorage.removeItem('dbharbor_username');
     persistTabSession([], '');
-    set({ token: '', displayName: '', role: 'admin', canCreateConn: true, tabs: [], activeTabKey: '' });
+    set({ token: '', username: '', displayName: '', role: 'admin', canCreateConn: true, tabs: [], activeTabKey: '' });
   },
 
   toggleDarkMode: () => {

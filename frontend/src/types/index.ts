@@ -507,9 +507,26 @@ export interface DbPrivilegeActionPayload {
   aclRules?: string;
 }
 
+export type LoginIconMode = 'shield' | 'database' | 'brand' | 'custom' | 'none';
+
+export interface LoginBrandingConfig {
+  pageTitle: string;
+  iconMode: LoginIconMode;
+  customIconDataUrl: string;
+  heading: string;
+  subtitle: string;
+}
+
+export interface AuthStatusResponse {
+  authEnabled: boolean;
+  initialized: boolean;
+  needsSetup: boolean;
+  branding: LoginBrandingConfig;
+}
+
 export interface LoginResponse {
   token?: string;
-  username: string;
+  username?: string;
   displayName?: string;
   userId?: string;
   role?: UserRole;
@@ -520,6 +537,7 @@ export interface LoginResponse {
   passwordChanged?: boolean;
   usedRecoveryCode?: boolean;
   recoveryCodesRemaining?: number;
+  branding?: LoginBrandingConfig;
 }
 
 export interface ImportResult {

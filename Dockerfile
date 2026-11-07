@@ -10,7 +10,7 @@ RUN npm run build && node -e "const fs=require('fs'),path=require('path'),zlib=r
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS backend-builder
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
-ARG VERSION=1.0.0
+ARG VERSION=1.0.1
 ARG CHANNEL=release
 ARG GIT_COMMIT=release
 WORKDIR /workspace/backend

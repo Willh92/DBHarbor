@@ -4,6 +4,30 @@
 
 DBHarbor 的所有重要變更皆記錄於本檔案，並與 GitHub 專案 [Willh92/DBHarbor](https://github.com/Willh92/DBHarbor.git) 同步。
 
+## [v1.0.1] - 2026-11-07
+
+> **版本形態邊界說明**：**原生桌面視窗版 (`dbharbor-desktop-*` / `DBHarbor.app`)** 維持**無使用者帳戶體系的純本機免登入模式**；以下持久化伺服端設定檔（`<DataDir>/config.json`）、首次管理員初始化精靈、登入頁品牌自訂、管理員緊急復原模式（`recovery` / `-recover-admin`）與本機檔案/內網沙箱隔離**僅適用於 Web 服務版 (`dbharbor-*`)**。
+
+### 持久化設定檔、管理員緊急復原、安全與並行強化、手機觸控體驗升級與線上平滑更新
+- **持久化伺服端設定檔 (`<DataDir>/config.json`) 與管理員密碼/2FA 緊急復原模式 *(僅 Web 服務版)***：
+  - Web 服務版啟動時自動建立 `<DataDir>/config.json`（`0600` 權限，支援 `-config <路徑>` 或 `DBHARBOR_CONFIG_FILE` 覆寫路徑），遵循 `CLI 參數 > DBHARBOR_* 環境變數 > config.json > 預設值` 四層優先順序，涵蓋 `host`、`port`、`unixSocket`、`unixSocketPerm`、`unixSocketGroup`、`idleConnTTLMinutes`、`maxImportMB`、`trustedProxies`、`corsAllowedOrigins`、`security`（`allowPrivateNetworkForNonAdmin`、`duckdbCliPath`）及 `recovery`（`enabled`、`adminUsername`、`newPassword`、`reset2FA`）。
+  - 提供雙重管理員緊急救援機制（遺忘管理員密碼或遺失 2FA 驗證裝置時使用）：
+    1. **設定檔復原**：編輯 `<DataDir>/config.json` 設定 `"recovery": { "enabled": true, "adminUsername": "admin", "newPassword": "YourNewStrongPassword", "reset2FA": true }`（密碼至少 8 碼，或填寫 `"auto"` 自動產生 16 碼強隨機密碼輸出至日誌）並重啟服務——啟動時自動備份 `dbharbor.db` 至 `<DataDir>/.backups/`、重設密碼/2FA、撤銷舊工作階段，並**立即自動清除 `config.json` 中的復原狀態（`enabled: false`、`newPassword: ""`）**，避免明文密碼殘留於磁碟。
+    2. **單次 CLI 指令復原**：執行 `dbharbor -data-dir <目錄> -recover-admin [-recover-user <帳號>] -recover-pass <新密碼|auto> [-reset-2fa]` 立即完成備份與重設並結束程式。
+- **移除預設弱密碼、首次啟動管理員初始化精靈、登入頁自訂與三重防搜尋引擎收錄 *(僅 Web 服務版)***：
+  - 徹底移除預設 `admin` / `admin123` 帳號，全面統一初始管理員密碼至少 **8 個字元**（含網頁初始化精靈、`-admin-pass` 與服務安裝腳本）；首次造訪自動開啟一次性**初始化管理員帳號精靈**（`POST /api/auth/setup`），建立後永久鎖定。
+  - 零指紋登入介面與品牌自訂：未登入時不預填 `admin`、不洩漏版本號/引擎清單/GitHub 連結，`GET /api/health` 精簡為 `{"status":"ok"}`，`GET /api/version` 需驗證後存取；支援於 **安全 / 2FA -> 登入頁自訂** 設定 `<title>`、頂部圖示（上傳 `<= 128 KB` 圖示並同步 Favicon）、主副標題，並內建 `/robots.txt`、`X-Robots-Tag` 與 `<meta name="robots">` 防搜尋引擎收錄保護。
+- **安全防護、驅動程式穩定性與效能強化**：
+  - **Web 服務版本機資料庫與內網 SSRF 沙箱**：非管理員（`Read-Write`）本機 SQLite / DuckDB 檔案嚴格限制於 `<DataDir>/local_databases/`（阻擋符號連結跳脫），Web 模式停用 SQLite `ATTACH DATABASE`，強制伺服端控管 `security.duckdbCliPath` 與 DuckDB `enable_external_access = false`，並新增非管理員連線私網/迴路位址的 SSRF 防護（可由 `security.allowPrivateNetworkForNonAdmin` 調整）。
+  - **防重送驗證碼與可信反向代理限流**：升級為金鑰衍生單次有效 CAPTCHA 驗證碼、僅信任 `trustedProxies` 代理清單的 `X-Forwarded-For` / `X-Real-IP` 用戶端 IP 限流，以及 2FA 驗證嘗試次數上限。
+  - **嚴格 TLS 憑證驗證、連線池並行安全與記憶體最佳化**：補齊資料庫驅動標準 TLS 憑證驗證模式、修正 SQL Server 連線池 `USE [db]` 資料庫上下文隔離、`pool.Manager` 引用計數並行租約保護（防止閒置回收關閉執行中查詢）、DuckDB / MongoDB 串流記憶體上限、啟動期 SQLite 元資料庫自動遷移（`<DataDir>/.backups/` 備份），以及 SQLite 物件清單極速載入。
+- **手機端觸控工作台與資料網格操作體驗升級**：
+  - 手機與觸控螢幕改採單一捲動容器原生 GPU CSS `position: sticky` 固定表頭（`.dbharbor-touch-sticky-grid`）徹底消除捲動閃爍，並支援**觸控拖曳調整欄寬**與**雙擊欄分隔線自動展開欄寬**。
+  - 左側導覽樹與資料表格新增觸控 `[⋮]` 操作按鈕與長按選單、手機 SQL 終端機快捷符號列、點選檢視截斷長文字儲存格、`34px–40px` 觸控按鈕與高風險刪除防誤觸隔離、左側選單 `keep-alive` 記憶體快取，以及全域彈出選單視窗邊界防溢出定位。
+- **跨平台服務安裝腳本與一鍵線上二進位檔更新 (`install-service.sh` / `install-service.ps1`)**：
+  - 支援 `upgrade`（相容 `update` 別名）/ `-Action Upgrade`（相容 `-Action Update`）從 GitHub Releases 線上更新、**強制驗證 `SHA256SUMS.txt`（失敗即中止）**、覆寫前 `-version` 執行檔自我檢測、`--mirror` / `-Mirror` 鏡像加速與 `--admin-user` / `--admin-pass`（`>= 8` 碼）無頭初始化。
+  - 修正含空白/引號的 `systemd` `ExecStart=` 與 macOS `launchd` `ProgramArguments` 自訂安裝路徑識別，強化 Windows `irm | iex` 路徑保護與 `%TEMP%` 清理，並透過優雅停機輪詢（`Stop-DBHarborServiceAndWait`）+ `.old` 原子替換徹底解決 Windows `.exe` 檔案鎖定問題。
+
 ## [v1.0.0] - 2026-11-07
 
 ### 首發版本特性

@@ -2,6 +2,7 @@ import type {
   AlterAction,
   AuditLogEntry,
   AuthSession,
+  AuthStatusResponse,
   BuildVersionInfo,
   CollectionSummary,
   ColumnDef,
@@ -23,6 +24,7 @@ import type {
   KVEntryDetail,
   KVKeySummary,
   LocalFSBrowseResponse,
+  LoginBrandingConfig,
   LoginResponse,
   ManagedUser,
   MonitorSnapshot,
@@ -163,7 +165,14 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   }
 
   if (!res.ok) {
-    if (res.status === 401 && !skipAuthRedirect && !isDesktopRuntime() && !path.startsWith('/auth/login')) {
+    if (
+      res.status === 401 &&
+      !skipAuthRedirect &&
+      !isDesktopRuntime() &&
+      !path.startsWith('/auth/login') &&
+      !path.startsWith('/auth/setup') &&
+      !path.startsWith('/auth/status')
+    ) {
       setAuthToken('');
       window.dispatchEvent(new Event('dbharbor:unauthorized'));
     }
@@ -175,7 +184,22 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 }
 
 export const api = {
-  // Authentication, Security & 2FA
+  // Authentication, Initial Setup, Branding, Security & 2FA
+  getAuthStatus: () => request<AuthStatusResponse>('/auth/status', { skipAuthRedirect: true }),
+
+  setupInitialAdmin: (payload: {
+    username: string;
+    displayName?: string;
+    password: string;
+    rememberMe?: boolean;
+    branding?: Partial<LoginBrandingConfig>;
+  }) =>
+    request<LoginResponse>('/auth/setup', {
+      method: 'POST',
+      body: payload,
+      skipAuthRedirect: true,
+    }),
+
   getCaptcha: () =>
     request<{ captchaToken: string; captchaImage: string }>('/auth/captcha', { skipAuthRedirect: true }),
 
@@ -308,6 +332,12 @@ export const api = {
   adminRevokeUserSessions: (uid: string) =>
     request<{ message: string; revoked: number }>(`/admin/users/${encodeURIComponent(uid)}/revoke-sessions`, {
       method: 'POST',
+    }),
+  adminGetLoginBranding: () => request<{ branding: LoginBrandingConfig }>('/admin/login-branding'),
+  adminSaveLoginBranding: (payload: LoginBrandingConfig) =>
+    request<{ message: string; branding: LoginBrandingConfig }>('/admin/login-branding', {
+      method: 'PUT',
+      body: payload,
     }),
 
   // System Runtime Stats, Version & GitHub Update Check

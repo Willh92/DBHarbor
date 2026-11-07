@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/rand"
 	"crypto/subtle"
 	"fmt"
 	"hash/fnv"
@@ -10,6 +11,7 @@ import (
 	"io/fs"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"path"
 	"path/filepath"
@@ -55,6 +57,16 @@ func (dc DesktopConfig) portScopedCookieName() string {
 	return desktopSessionCookieName
 }
 
+// RouterOptions configures security, limits, and runtime policies for Web Server mode.
+type RouterOptions struct {
+	ProtectorSecret            []byte
+	MaxImportMB                int
+	TrustedProxies             []string
+	CORSOrigins                []string
+	AllowPrivateNetForNonAdmin bool
+	DuckDBCliPath              string
+}
+
 type Server struct {
 	store       *store.Store
 	pool        *pool.Manager
@@ -62,23 +74,107 @@ type Server struct {
 	protector   *auth.LoginProtector
 	updater     *version.Checker
 	desktop     DesktopConfig
+	opts        RouterOptions
+	trustedNets []*net.IPNet
 	startedAt   time.Time
 	metaCacheMu sync.RWMutex
 	metaCache   map[string]cachedAutocomplete
 }
 
+func parseTrustedProxyNets(entries []string) []*net.IPNet {
+	var nets []*net.IPNet
+	for _, raw := range entries {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		if _, ipNet, err := net.ParseCIDR(s); err == nil && ipNet != nil {
+			nets = append(nets, ipNet)
+			continue
+		}
+		if ip := net.ParseIP(s); ip != nil {
+			bits := 128
+			if v4 := ip.To4(); v4 != nil {
+				ip = v4
+				bits = 32
+			}
+			nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+		}
+	}
+	return nets
+}
+
 func NewRouter(st *store.Store, pm *pool.Manager, tm *auth.TokenManager) http.Handler {
+	return NewRouterWithOptions(st, pm, tm, RouterOptions{})
+}
+
+func NewRouterWithOptions(st *store.Store, pm *pool.Manager, tm *auth.TokenManager, opts RouterOptions) http.Handler {
 	tm.SetSessionValidator(st.IsSessionActive)
+	sec := opts.ProtectorSecret
+	if len(sec) == 0 {
+		sec = make([]byte, 32)
+		if _, err := rand.Read(sec); err != nil {
+			sec = []byte("dbharbor-login-protector-fallback")
+		}
+	}
+	if opts.MaxImportMB <= 0 {
+		opts.MaxImportMB = 256
+	}
 	srv := &Server{
-		store:     st,
-		pool:      pm,
-		tokens:    tm,
-		protector: auth.NewLoginProtector([]byte("dbharbor-login-protector-v1")),
-		updater:   version.NewChecker(),
-		startedAt: time.Now(),
-		metaCache: make(map[string]cachedAutocomplete),
+		store:       st,
+		pool:        pm,
+		tokens:      tm,
+		protector:   auth.NewLoginProtector(sec),
+		updater:     version.NewChecker(),
+		opts:        opts,
+		trustedNets: parseTrustedProxyNets(opts.TrustedProxies),
+		startedAt:   time.Now(),
+		metaCache:   make(map[string]cachedAutocomplete),
+	}
+	if pm != nil {
+		pm.SetConnectionPreparer(srv.prepareWebConnectionConfig)
 	}
 	return srv.buildHandler()
+}
+
+func (s *Server) prepareWebConnectionConfig(cfg driver.ConnectionConfig) driver.ConnectionConfig {
+	if s.desktop.Enabled {
+		return cfg
+	}
+	clonedOpts := make(map[string]string, len(cfg.Options)+2)
+	for k, v := range cfg.Options {
+		if k == "cliPath" {
+			continue
+		}
+		clonedOpts[k] = v
+	}
+	clonedOpts["__web_mode"] = "1"
+	clonedOpts["__server_duckdb_cli"] = s.opts.DuckDBCliPath
+	cfg.Options = clonedOpts
+
+	fp := strings.TrimSpace(cfg.FilePath)
+	if fp != "" && fp != ":memory:" && !strings.HasPrefix(strings.ToLower(fp), "file::memory:") && !strings.HasPrefix(strings.ToLower(fp), "file:") {
+		if !filepath.IsAbs(fp) {
+			cfg.FilePath = filepath.Join(s.resolveBaseDataDir(), fp)
+		}
+	}
+	return cfg
+}
+
+func (s *Server) maxImportBytes() int64 {
+	if s.opts.MaxImportMB > 0 {
+		return int64(s.opts.MaxImportMB) << 20
+	}
+	return 256 << 20
+}
+
+func (s *Server) acquireConnDriver(c *Context, connID string) (driver.Driver, driver.ConnectionConfig, error) {
+	drv, cfg, release, err := s.pool.Acquire(connID)
+	if err != nil {
+		return nil, cfg, err
+	}
+	c.Defer(release)
+	return drv, cfg, nil
 }
 
 // NewDesktopRouter creates a pure local router without user accounts, passwords, or 2FA,
@@ -90,6 +186,7 @@ func NewDesktopRouter(st *store.Store, pm *pool.Manager, dcfg DesktopConfig) htt
 		pool:      pm,
 		updater:   version.NewChecker(),
 		desktop:   dcfg,
+		opts:      RouterOptions{MaxImportMB: 512},
 		startedAt: time.Now(),
 		metaCache: make(map[string]cachedAutocomplete),
 	}
@@ -101,7 +198,9 @@ func (srv *Server) buildHandler() http.Handler {
 
 	pub := func(pattern string, fn HandlerFunc) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			fn(&Context{Writer: w, Request: r})
+			ctx := &Context{Writer: w, Request: r, TrustedProxies: srv.trustedNets}
+			defer ctx.RunCleanups()
+			fn(ctx)
 		})
 	}
 
@@ -111,15 +210,23 @@ func (srv *Server) buildHandler() http.Handler {
 			if !ok {
 				return
 			}
-			fn(&Context{Writer: w, Request: r, Claims: claims, Principal: principal})
+			ctx := &Context{Writer: w, Request: r, Claims: claims, Principal: principal, TrustedProxies: srv.trustedNets}
+			defer ctx.RunCleanups()
+			fn(ctx)
 		})
 	}
 
-	// Public endpoints
-	pub("GET /api/health", func(c *Context) {
-		c.JSON(http.StatusOK, H{"status": "ok", "service": "DBHarbor", "version": version.DisplayTag(version.Version)})
+	// Anti-crawler robots policy & minimal liveness probe (zero service/version fingerprinting)
+	pub("GET /robots.txt", func(c *Context) {
+		c.Header("Cache-Control", "public, max-age=86400")
+		c.Header("Content-Type", "text/plain; charset=utf-8")
+		c.Status(http.StatusOK)
+		_, _ = c.Writer.Write([]byte("User-agent: *\nDisallow: /\n"))
 	})
-	pub("GET /api/version", srv.handleGetVersion)
+	pub("GET /api/health", func(c *Context) {
+		c.JSON(http.StatusOK, H{"status": "ok"})
+	})
+	authed("GET /api/version", srv.handleGetVersion)
 
 	if srv.desktop.Enabled {
 		pub("GET /__desktop_boot", srv.handleDesktopBoot)
@@ -140,6 +247,8 @@ func (srv *Server) buildHandler() http.Handler {
 		authed("POST /api/desktop/window-theme", srv.handleDesktopSetWindowTheme)
 		authed("POST /api/desktop/pick-file", srv.handleDesktopPickFile)
 	} else {
+		pub("GET /api/auth/status", srv.handleGetAuthStatus)
+		pub("POST /api/auth/setup", srv.handleSetupInitialAdmin)
 		pub("GET /api/auth/captcha", srv.handleGetCaptcha)
 		pub("POST /api/auth/login", srv.handleLogin)
 		pub("POST /api/auth/login/2fa", srv.handleLogin2FA)
@@ -160,7 +269,9 @@ func (srv *Server) buildHandler() http.Handler {
 		authed("POST /api/auth/sessions/revoke-others", srv.handleRevokeOtherSessions)
 		authed("GET /api/auth/audit-logs", srv.handleListAuditLogs)
 
-		// Administrator Team & RBAC Management endpoints
+		// Administrator Team, RBAC & Login Branding Management endpoints
+		authed("GET /api/admin/login-branding", srv.handleAdminGetLoginBranding)
+		authed("PUT /api/admin/login-branding", srv.handleAdminSaveLoginBranding)
 		authed("GET /api/admin/users", srv.handleAdminListUsers)
 		authed("POST /api/admin/users", srv.handleAdminCreateUser)
 		authed("PUT /api/admin/users/{uid}", srv.handleAdminUpdateUser)
@@ -283,7 +394,7 @@ func (srv *Server) buildHandler() http.Handler {
 		serveSPA(w, r, distFS, assetETags, desktopIndexHTML, desktopIndexETag)
 	})
 
-	return wrapGlobalMiddleware(mux, srv.desktop.Enabled)
+	return wrapGlobalMiddleware(mux, srv.desktop.Enabled, srv.opts.CORSOrigins)
 }
 
 func (s *Server) authorizeConn(c *Context, connID string, requireWrite bool) bool {
@@ -313,7 +424,7 @@ func (s *Server) resolveWebPrincipal(ctx *Context, claims *auth.Claims) (store.U
 }
 
 func (s *Server) authenticateRequest(w http.ResponseWriter, r *http.Request) (*auth.Claims, store.UserPrincipal, bool) {
-	ctx := &Context{Writer: w, Request: r}
+	ctx := &Context{Writer: w, Request: r, TrustedProxies: s.trustedNets}
 
 	if s.desktop.Enabled {
 		localP := store.LocalDesktopPrincipal()
@@ -356,22 +467,10 @@ func (s *Server) authenticateRequest(w http.ResponseWriter, r *http.Request) (*a
 		return claims, p, true
 	}
 
-	// Allow single-use export tickets (preferred) or legacy query token on streaming GET /export
+	// Only single-use short-lived export tickets (?ticket=...) are accepted on streaming GET /export
 	if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/export") {
 		if ticket := strings.TrimSpace(r.URL.Query().Get("ticket")); ticket != "" {
 			claims, err := s.tokens.ParseTokenWithPurpose(ticket, auth.PurposeExportTicket)
-			if err != nil {
-				ctx.JSON(http.StatusUnauthorized, H{"error": err.Error()})
-				return nil, store.UserPrincipal{}, false
-			}
-			p, ok := s.resolveWebPrincipal(ctx, claims)
-			if !ok {
-				return nil, store.UserPrincipal{}, false
-			}
-			return claims, p, true
-		}
-		if tok := strings.TrimSpace(r.URL.Query().Get("token")); tok != "" {
-			claims, err := s.tokens.ParseTokenWithPurpose(tok, auth.PurposeSession)
 			if err != nil {
 				ctx.JSON(http.StatusUnauthorized, H{"error": err.Error()})
 				return nil, store.UserPrincipal{}, false
@@ -388,21 +487,43 @@ func (s *Server) authenticateRequest(w http.ResponseWriter, r *http.Request) (*a
 	return nil, store.UserPrincipal{}, false
 }
 
-func wrapGlobalMiddleware(next http.Handler, isDesktop bool) http.Handler {
+func matchAllowedCORSOrigin(origin string, allowed []string) (string, bool) {
+	if origin == "" || len(allowed) == 0 {
+		return "", false
+	}
+	for _, item := range allowed {
+		a := strings.TrimSpace(item)
+		if a == "*" {
+			return "*", true
+		}
+		if strings.EqualFold(a, origin) {
+			return origin, true
+		}
+	}
+	return "", false
+}
+
+func wrapGlobalMiddleware(next http.Handler, isDesktop bool, corsOrigins []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Hardened HTTP Security Headers
+		// Hardened HTTP Security & Anti-Indexing Headers
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "SAMEORIGIN")
-		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		h.Set("Content-Security-Policy", "frame-ancestors 'self'; object-src 'none'; base-uri 'self'")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet, noimageindex, notranslate")
 		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 
 		if !isDesktop {
-			// CORS headers for web server mode
-			h.Set("Access-Control-Allow-Origin", "*")
-			h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			h.Set("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization, Accept-Language")
 			h.Set("Access-Control-Expose-Headers", "Content-Disposition")
+			if allowVal, ok := matchAllowedCORSOrigin(strings.TrimSpace(r.Header.Get("Origin")), corsOrigins); ok {
+				h.Set("Access-Control-Allow-Origin", allowVal)
+				if allowVal != "*" {
+					h.Set("Vary", "Origin")
+				}
+				h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				h.Set("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization, Accept-Language")
+			}
 		}
 
 		if r.Method == http.MethodOptions {
@@ -651,6 +772,8 @@ func contentTypeForExt(ext string) string {
 	switch strings.ToLower(ext) {
 	case ".html", ".htm":
 		return "text/html; charset=utf-8"
+	case ".txt":
+		return "text/plain; charset=utf-8"
 	case ".js", ".mjs":
 		return "application/javascript; charset=utf-8"
 	case ".css":

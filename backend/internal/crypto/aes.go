@@ -36,13 +36,16 @@ func NewVaultFromDataDir(dataDir, explicitSecret string) (*Vault, error) {
 		return NewVault(key)
 	}
 
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
 	keyPath := filepath.Join(dataDir, ".master.key")
 
 	raw, err := os.ReadFile(keyPath)
 	if err == nil {
+		if runtime.GOOS != "windows" {
+			_ = os.Chmod(keyPath, 0o600)
+		}
 		decoded, decErr := hex.DecodeString(strings.TrimSpace(string(raw)))
 		if decErr == nil && len(decoded) == 32 {
 			return NewVault(decoded)

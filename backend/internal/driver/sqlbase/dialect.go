@@ -105,13 +105,89 @@ func FormatLiteralForDialect(d Dialect, val any) string {
 		}
 		return "FALSE"
 	}
-	if s, ok := val.(string); ok && d == DialectMySQL {
-		// MySQL treats backslash as escape by default unless NO_BACKSLASH_ESCAPES is set
+	if s, ok := val.(string); ok && (d == DialectMySQL || d == DialectClickHouse) {
+		// MySQL and ClickHouse treat backslash as escape inside single-quoted string literals
 		escaped := strings.ReplaceAll(s, `\`, `\\`)
 		escaped = strings.ReplaceAll(escaped, "'", "''")
+		escaped = strings.ReplaceAll(escaped, "\x00", `\0`)
+		escaped = strings.ReplaceAll(escaped, "\r", `\r`)
+		escaped = strings.ReplaceAll(escaped, "\n", `\n`)
 		return "'" + escaped + "'"
 	}
 	return FormatLiteral(val)
+}
+
+func containsUnquotedSQLMeta(expr string) bool {
+	inSingle := false
+	inDouble := false
+	inBacktick := false
+	for i := 0; i < len(expr); i++ {
+		ch := expr[i]
+		if inSingle {
+			if ch == '\\' && i+1 < len(expr) {
+				i++
+				continue
+			}
+			if ch == '\'' {
+				if i+1 < len(expr) && expr[i+1] == '\'' {
+					i++
+				} else {
+					inSingle = false
+				}
+			}
+			continue
+		}
+		if inDouble {
+			if ch == '"' {
+				if i+1 < len(expr) && expr[i+1] == '"' {
+					i++
+				} else {
+					inDouble = false
+				}
+			}
+			continue
+		}
+		if inBacktick {
+			if ch == '`' {
+				if i+1 < len(expr) && expr[i+1] == '`' {
+					i++
+				} else {
+					inBacktick = false
+				}
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '`':
+			inBacktick = true
+		case ';':
+			return true
+		case '-':
+			if i+1 < len(expr) && expr[i+1] == '-' {
+				return true
+			}
+		case '/':
+			if i+1 < len(expr) && expr[i+1] == '*' {
+				return true
+			}
+		}
+	}
+	return inSingle || inDouble || inBacktick
+}
+
+func validateDDLFragment(label, val string) error {
+	trimmed := strings.TrimSpace(val)
+	if trimmed == "" {
+		return nil
+	}
+	if containsUnquotedSQLMeta(trimmed) {
+		return fmt.Errorf("invalid %s: semicolons, unclosed quotes, or SQL comments are not allowed", label)
+	}
+	return nil
 }
 
 func BuildBrowseQuery(d Dialect, req driver.BrowseDataRequest) (dataSQL string, countSQL string, err error) {
@@ -134,10 +210,10 @@ func BuildBrowseQuery(d Dialect, req driver.BrowseDataRequest) (dataSQL string, 
 	tbl := QualifyTable(d, req.Database, req.Schema, req.Table)
 	wherePart := ""
 	if f := strings.TrimSpace(req.Filter); f != "" {
-		if len(SplitStatements("SELECT 1 WHERE "+f)) > 1 {
-			return "", "", errors.New("multi-statement semicolons are not allowed in WHERE filter")
+		if containsUnquotedSQLMeta(f) || len(SplitStatements("SELECT 1 WHERE "+f)) > 1 {
+			return "", "", errors.New("semicolons, SQL comments, or unclosed quotes are not allowed in WHERE filter")
 		}
-		wherePart = " WHERE " + f
+		wherePart = " WHERE (" + f + ")"
 	}
 
 	orderParts := make([]string, 0, len(req.Sorts))
@@ -299,6 +375,12 @@ func BuildCreateTableDDL(d Dialect, req driver.CreateTableRequest) (string, erro
 		if strings.TrimSpace(col.Name) == "" || strings.TrimSpace(col.Type) == "" {
 			continue
 		}
+		if err := validateDDLFragment("column type", col.Type); err != nil {
+			return "", err
+		}
+		if err := validateDDLFragment("column default value", col.DefaultValue); err != nil {
+			return "", err
+		}
 		var sb strings.Builder
 		sb.WriteString("  ")
 		sb.WriteString(QuoteIdent(d, col.Name))
@@ -311,7 +393,7 @@ func BuildCreateTableDDL(d Dialect, req driver.CreateTableRequest) (string, erro
 				sb.WriteString(" DEFAULT " + col.DefaultValue)
 			}
 			if col.Comment != "" {
-				sb.WriteString(" COMMENT " + FormatLiteral(col.Comment))
+				sb.WriteString(" COMMENT " + FormatLiteralForDialect(d, col.Comment))
 			}
 		} else if d == DialectSQLite && col.IsPrimaryKey && col.IsAutoIncrement && pkCount == 1 {
 			sb.WriteString("INTEGER PRIMARY KEY AUTOINCREMENT")
@@ -338,7 +420,7 @@ func BuildCreateTableDDL(d Dialect, req driver.CreateTableRequest) (string, erro
 				sb.WriteString(" AUTO_INCREMENT")
 			}
 			if d == DialectMySQL && col.Comment != "" {
-				sb.WriteString(" COMMENT " + FormatLiteral(col.Comment))
+				sb.WriteString(" COMMENT " + FormatLiteralForDialect(d, col.Comment))
 			}
 		}
 
@@ -379,6 +461,19 @@ func BuildCreateTableDDL(d Dialect, req driver.CreateTableRequest) (string, erro
 		}
 	}
 
+	if err := validateDDLFragment("table engine", req.Engine); err != nil {
+		return "", err
+	}
+	if err := validateDDLFragment("table charset", req.Charset); err != nil {
+		return "", err
+	}
+	if err := validateDDLFragment("ORDER BY expression", req.OrderBy); err != nil {
+		return "", err
+	}
+	if err := validateDDLFragment("PARTITION BY expression", req.PartitionBy); err != nil {
+		return "", err
+	}
+
 	var ddl strings.Builder
 	ddl.WriteString(fmt.Sprintf("CREATE TABLE %s (\n%s\n)", tbl, strings.Join(lines, ",\n")))
 
@@ -404,7 +499,7 @@ func BuildCreateTableDDL(d Dialect, req driver.CreateTableRequest) (string, erro
 			ddl.WriteString(" PARTITION BY " + strings.TrimSpace(req.PartitionBy))
 		}
 		if req.Comment != "" {
-			ddl.WriteString(" COMMENT " + FormatLiteral(req.Comment))
+			ddl.WriteString(" COMMENT " + FormatLiteralForDialect(d, req.Comment))
 		}
 	case DialectMySQL:
 		engine := req.Engine
@@ -417,7 +512,7 @@ func BuildCreateTableDDL(d Dialect, req driver.CreateTableRequest) (string, erro
 		}
 		ddl.WriteString(fmt.Sprintf(" ENGINE=%s DEFAULT CHARSET=%s", engine, charset))
 		if req.Comment != "" {
-			ddl.WriteString(" COMMENT=" + FormatLiteral(req.Comment))
+			ddl.WriteString(" COMMENT=" + FormatLiteralForDialect(d, req.Comment))
 		}
 	}
 
@@ -492,6 +587,12 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 			if strings.TrimSpace(col.Name) == "" || strings.TrimSpace(col.Type) == "" {
 				return nil, errors.New("column name and type cannot be empty when adding a column")
 			}
+			if err := validateDDLFragment("column type", col.Type); err != nil {
+				return nil, err
+			}
+			if err := validateDDLFragment("column default value", col.DefaultValue); err != nil {
+				return nil, err
+			}
 			nullStr := ""
 			if !col.Nullable && d != DialectClickHouse {
 				nullStr = " NOT NULL"
@@ -509,7 +610,7 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 			}
 			cmtStr := ""
 			if col.Comment != "" && (d == DialectMySQL || d == DialectClickHouse) {
-				cmtStr = " COMMENT " + FormatLiteral(col.Comment)
+				cmtStr = " COMMENT " + FormatLiteralForDialect(d, col.Comment)
 			}
 			afterStr := ""
 			if act.AfterColumn != "" && (d == DialectMySQL || d == DialectClickHouse) {
@@ -522,7 +623,7 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s%s%s%s%s", tbl, QuoteIdent(d, col.Name), colType, nullStr, defStr, cmtStr, afterStr))
 			}
 			if col.Comment != "" && (d == DialectPostgres || d == DialectOracle || d == DialectDameng) {
-				stmts = append(stmts, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s", tbl, QuoteIdent(d, col.Name), FormatLiteral(col.Comment)))
+				stmts = append(stmts, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s", tbl, QuoteIdent(d, col.Name), FormatLiteralForDialect(d, col.Comment)))
 			}
 
 		case "DROP_COLUMN":
@@ -552,7 +653,7 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 				if req.Schema != "" {
 					target = req.Schema + "." + target
 				}
-				stmts = append(stmts, fmt.Sprintf("EXEC sp_rename %s, %s, 'COLUMN'", FormatLiteral(target), FormatLiteral(newName)))
+				stmts = append(stmts, fmt.Sprintf("EXEC sp_rename %s, %s, 'COLUMN'", FormatLiteralForDialect(d, target), FormatLiteralForDialect(d, newName)))
 			} else {
 				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s", tbl, QuoteIdent(d, oldName), QuoteIdent(d, newName)))
 			}
@@ -561,6 +662,12 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 			col := act.Column
 			if strings.TrimSpace(col.Name) == "" || strings.TrimSpace(col.Type) == "" {
 				return nil, errors.New("column name and type cannot be empty when modifying a column")
+			}
+			if err := validateDDLFragment("column type", col.Type); err != nil {
+				return nil, err
+			}
+			if err := validateDDLFragment("column default value", col.DefaultValue); err != nil {
+				return nil, err
 			}
 			oldName := strings.TrimSpace(act.OldName)
 			if oldName == "" {
@@ -583,7 +690,7 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 				}
 				cmtStr := ""
 				if col.Comment != "" {
-					cmtStr = " COMMENT " + FormatLiteral(col.Comment)
+					cmtStr = " COMMENT " + FormatLiteralForDialect(d, col.Comment)
 				}
 				afterStr := ""
 				if act.AfterColumn != "" {
@@ -613,7 +720,7 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 					stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP DEFAULT", tbl, QuoteIdent(d, col.Name)))
 				}
 				if col.Comment != "" {
-					stmts = append(stmts, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s", tbl, QuoteIdent(d, col.Name), FormatLiteral(col.Comment)))
+					stmts = append(stmts, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s", tbl, QuoteIdent(d, col.Name), FormatLiteralForDialect(d, col.Comment)))
 				}
 
 			case DialectClickHouse:
@@ -627,7 +734,7 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 				}
 				cmtStr := ""
 				if col.Comment != "" {
-					cmtStr = " COMMENT " + FormatLiteral(col.Comment)
+					cmtStr = " COMMENT " + FormatLiteralForDialect(d, col.Comment)
 				}
 				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s%s%s", tbl, QuoteIdent(d, col.Name), colType, defStr, cmtStr))
 
@@ -637,7 +744,7 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 					if req.Schema != "" {
 						target = req.Schema + "." + target
 					}
-					stmts = append(stmts, fmt.Sprintf("EXEC sp_rename %s, %s, 'COLUMN'", FormatLiteral(target), FormatLiteral(col.Name)))
+					stmts = append(stmts, fmt.Sprintf("EXEC sp_rename %s, %s, 'COLUMN'", FormatLiteralForDialect(d, target), FormatLiteralForDialect(d, col.Name)))
 				}
 				nullStr := "NULL"
 				if !col.Nullable || col.IsPrimaryKey {
@@ -655,7 +762,7 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 				}
 				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s MODIFY (%s %s%s)", tbl, QuoteIdent(d, col.Name), col.Type, defStr))
 				if col.Comment != "" && (d == DialectOracle || d == DialectDameng) {
-					stmts = append(stmts, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s", tbl, QuoteIdent(d, col.Name), FormatLiteral(col.Comment)))
+					stmts = append(stmts, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s", tbl, QuoteIdent(d, col.Name), FormatLiteralForDialect(d, col.Comment)))
 				}
 			}
 
@@ -729,7 +836,7 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 				if req.Schema != "" {
 					target = req.Schema + "." + target
 				}
-				stmts = append(stmts, fmt.Sprintf("EXEC sp_rename %s, %s", FormatLiteral(target), FormatLiteral(newTbl)))
+				stmts = append(stmts, fmt.Sprintf("EXEC sp_rename %s, %s", FormatLiteralForDialect(d, target), FormatLiteralForDialect(d, newTbl)))
 			default:
 				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", tbl, QuoteIdent(d, newTbl)))
 			}
@@ -737,11 +844,11 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 		case "COMMENT_TABLE":
 			switch d {
 			case DialectMySQL:
-				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s COMMENT = %s", tbl, FormatLiteral(act.Comment)))
+				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s COMMENT = %s", tbl, FormatLiteralForDialect(d, act.Comment)))
 			case DialectClickHouse:
-				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s MODIFY COMMENT %s", tbl, FormatLiteral(act.Comment)))
+				stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s MODIFY COMMENT %s", tbl, FormatLiteralForDialect(d, act.Comment)))
 			case DialectPostgres, DialectOracle, DialectDameng:
-				stmts = append(stmts, fmt.Sprintf("COMMENT ON TABLE %s IS %s", tbl, FormatLiteral(act.Comment)))
+				stmts = append(stmts, fmt.Sprintf("COMMENT ON TABLE %s IS %s", tbl, FormatLiteralForDialect(d, act.Comment)))
 			default:
 				return nil, fmt.Errorf("table comments are not supported by the current database engine")
 			}

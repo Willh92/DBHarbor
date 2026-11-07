@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"runtime"
@@ -69,7 +70,82 @@ func (s *Server) handleGetCaptcha(c *Context) {
 	})
 }
 
+func (s *Server) handleGetAuthStatus(c *Context) {
+	needsSetup := !s.desktop.Enabled && s.store.NeedsSetup()
+	c.JSON(http.StatusOK, H{
+		"authEnabled": !s.desktop.Enabled,
+		"initialized": !needsSetup,
+		"needsSetup":  needsSetup,
+		"branding":    s.store.GetLoginBranding(),
+	})
+}
+
+func (s *Server) handleSetupInitialAdmin(c *Context) {
+	if !s.store.NeedsSetup() {
+		c.JSON(http.StatusForbidden, H{"error": "Initial administrator has already been configured"})
+		return
+	}
+	var req struct {
+		Username    string                     `json:"username"`
+		DisplayName string                     `json:"displayName"`
+		Password    string                     `json:"password"`
+		RememberMe  bool                       `json:"rememberMe"`
+		Branding    *store.LoginBrandingConfig `json:"branding"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, H{"error": "Invalid setup parameters"})
+		return
+	}
+
+	user, err := s.store.SetupInitialAdmin(req.Username, req.DisplayName, req.Password, req.Branding)
+	if err != nil {
+		if errors.Is(err, store.ErrAlreadyInitialized) {
+			c.JSON(http.StatusForbidden, H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		return
+	}
+
+	ip := c.ClientIP()
+	ua := c.Request.UserAgent()
+	ttl := 24 * time.Hour
+	if req.RememberMe {
+		ttl = 7 * 24 * time.Hour
+	}
+	sess, err := s.store.CreateSession(user.ID, ip, ua, ttl)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, H{"error": "Failed to create authenticated session"})
+		return
+	}
+	token, err := s.tokens.IssueSessionToken(user.ID, user.Username, sess.ID, ttl)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, H{"error": "Failed to issue session token"})
+		return
+	}
+	s.store.AddAuditLog("ADMIN_INITIALIZED", user.Username, ip, ua, "Initialized primary administrator account via first-run setup")
+	c.JSON(http.StatusOK, H{
+		"token":           token,
+		"username":        user.Username,
+		"displayName":     user.DisplayName,
+		"userId":          user.ID,
+		"role":            user.Role,
+		"canCreateConn":   user.CanCreateConn,
+		"authEnabled":     true,
+		"totpEnabled":     false,
+		"passwordChanged": true,
+		"branding":        s.store.GetLoginBranding(),
+	})
+}
+
 func (s *Server) handleLogin(c *Context) {
+	if s.store.NeedsSetup() {
+		c.JSON(http.StatusForbidden, H{
+			"error":      "Initial administrator setup required",
+			"needsSetup": true,
+		})
+		return
+	}
 	var req struct {
 		Username      string `json:"username"`
 		Password      string `json:"password"`
@@ -90,7 +166,7 @@ func (s *Server) handleLogin(c *Context) {
 		s.store.AddAuditLog("LOGIN_LOCKED", req.Username, ip, ua, "Blocked during temporary brute-force lockout window")
 		c.Header("Retry-After", strconv.Itoa(chk.RetryAfterSec))
 		c.JSON(http.StatusTooManyRequests, H{
-			"error":         fmt.Sprintf("Too many login attempts; account or IP is temporarily locked. Please retry in %d seconds", chk.RetryAfterSec),
+			"error":         fmt.Sprintf("Too many attempts; please retry in %d seconds", chk.RetryAfterSec),
 			"locked":        true,
 			"retryAfterSec": chk.RetryAfterSec,
 		})
@@ -104,7 +180,7 @@ func (s *Server) handleLogin(c *Context) {
 				s.store.AddAuditLog("LOGIN_LOCKED", req.Username, ip, ua, "Repeated CAPTCHA or login failures triggered security lockout")
 				c.Header("Retry-After", strconv.Itoa(nextChk.RetryAfterSec))
 				c.JSON(http.StatusTooManyRequests, H{
-					"error":         fmt.Sprintf("Too many failed verification attempts; security lockout active (%d seconds)", nextChk.RetryAfterSec),
+					"error":         fmt.Sprintf("Too many failed attempts; please retry in %d seconds", nextChk.RetryAfterSec),
 					"locked":        true,
 					"retryAfterSec": nextChk.RetryAfterSec,
 				})
@@ -112,11 +188,10 @@ func (s *Server) handleLogin(c *Context) {
 			}
 			cTok, cImg, _ := s.protector.GenerateCaptcha()
 			c.JSON(http.StatusUnauthorized, H{
-				"error":             "Please enter the valid security CAPTCHA code",
-				"requiresCaptcha":   true,
-				"remainingAttempts": nextChk.RemainingAttempts,
-				"captchaToken":      cTok,
-				"captchaImage":      cImg,
+				"error":           "Please enter the valid verification code",
+				"requiresCaptcha": true,
+				"captchaToken":    cTok,
+				"captchaImage":    cImg,
 			})
 			return
 		}
@@ -129,16 +204,15 @@ func (s *Server) handleLogin(c *Context) {
 		if nextChk.Locked {
 			c.Header("Retry-After", strconv.Itoa(nextChk.RetryAfterSec))
 			c.JSON(http.StatusTooManyRequests, H{
-				"error":         fmt.Sprintf("Too many failed verification attempts; security lockout active (%d seconds)", nextChk.RetryAfterSec),
+				"error":         fmt.Sprintf("Too many failed attempts; please retry in %d seconds", nextChk.RetryAfterSec),
 				"locked":        true,
 				"retryAfterSec": nextChk.RetryAfterSec,
 			})
 			return
 		}
 		resp := H{
-			"error":             err.Error(),
-			"remainingAttempts": nextChk.RemainingAttempts,
-			"requiresCaptcha":   nextChk.RequiresCaptcha,
+			"error":           err.Error(),
+			"requiresCaptcha": nextChk.RequiresCaptcha,
 		}
 		if nextChk.RequiresCaptcha {
 			cTok, cImg, _ := s.protector.GenerateCaptcha()
@@ -159,7 +233,6 @@ func (s *Server) handleLogin(c *Context) {
 		c.JSON(http.StatusOK, H{
 			"requires2FA":    true,
 			"challengeToken": challengeToken,
-			"username":       user.Username,
 		})
 		return
 	}
@@ -209,6 +282,10 @@ func (s *Server) handleLogin2FA(c *Context) {
 		c.JSON(http.StatusUnauthorized, H{"error": "2FA verification session expired; please sign in again"})
 		return
 	}
+	if s.tokens.Is2FAChallengeConsumed(req.ChallengeToken) {
+		c.JSON(http.StatusUnauthorized, H{"error": "2FA verification challenge has expired or exceeded maximum attempts; please sign in again"})
+		return
+	}
 	if p, exists := s.store.GetPrincipal(claims.UserID); !exists || p.Disabled {
 		c.JSON(http.StatusUnauthorized, H{"error": "Account has been disabled"})
 		return
@@ -229,6 +306,7 @@ func (s *Server) handleLogin2FA(c *Context) {
 
 	usedRecovery, err := s.store.Verify2FA(claims.UserID, req.Code)
 	if err != nil {
+		exhausted := s.tokens.Record2FAChallengeAttempt(req.ChallengeToken, false)
 		nextChk := s.protector.RecordFailure(ip, claims.Username)
 		s.store.AddAuditLog("LOGIN_2FA_FAILED", claims.Username, ip, ua, err.Error())
 		if nextChk.Locked {
@@ -240,12 +318,19 @@ func (s *Server) handleLogin2FA(c *Context) {
 			})
 			return
 		}
+		if exhausted {
+			c.JSON(http.StatusUnauthorized, H{
+				"error": "Too many invalid 2FA attempts for this challenge; please sign in again",
+			})
+			return
+		}
 		c.JSON(http.StatusUnauthorized, H{
-			"error":             err.Error(),
-			"remainingAttempts": nextChk.RemainingAttempts,
+			"error": err.Error(),
 		})
 		return
 	}
+
+	s.tokens.Record2FAChallengeAttempt(req.ChallengeToken, true)
 
 	s.protector.RecordSuccess(ip, claims.Username)
 	ttl := 24 * time.Hour
@@ -345,14 +430,17 @@ func (s *Server) handleChangePassword(c *Context) {
 		NewPassword         string `json:"newPassword"`
 		RevokeOtherSessions bool   `json:"revokeOtherSessions"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || len(req.NewPassword) < 6 {
-		c.JSON(http.StatusBadRequest, H{"error": "New password must be at least 6 characters"})
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.NewPassword) < 8 {
+		c.JSON(http.StatusBadRequest, H{"error": "New password must be at least 8 characters"})
 		return
 	}
 	if err := s.store.UpdatePassword(c.UserID(), req.OldPassword, req.NewPassword); err != nil {
 		s.store.AddAuditLog("PASSWORD_CHANGE_FAILED", c.Username(), c.ClientIP(), c.Request.UserAgent(), err.Error())
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
+	}
+	if s.protector != nil {
+		s.protector.ResetUser(c.Username())
 	}
 	revokedCnt := 0
 	if req.RevokeOtherSessions {
@@ -519,7 +607,26 @@ func (s *Server) handleReleaseIdlePools(c *Context) {
 }
 
 func (s *Server) handleListDrivers(c *Context) {
-	c.JSON(http.StatusOK, H{"drivers": driver.ListMetas()})
+	metas := driver.ListMetas()
+	if s.desktop.Enabled {
+		c.JSON(http.StatusOK, H{"drivers": metas})
+		return
+	}
+	filtered := make([]driver.DriverMeta, len(metas))
+	copy(filtered, metas)
+	for i := range filtered {
+		if filtered[i].Type == "duckdb" && len(filtered[i].Fields) > 0 {
+			fields := make([]driver.ConnFieldSchema, 0, len(filtered[i].Fields))
+			for _, f := range filtered[i].Fields {
+				if f.Key == "cliPath" {
+					continue
+				}
+				fields = append(fields, f)
+			}
+			filtered[i].Fields = fields
+		}
+	}
+	c.JSON(http.StatusOK, H{"drivers": filtered})
 }
 
 func (s *Server) handleListConnections(c *Context) {
@@ -559,9 +666,17 @@ func (s *Server) handleTestConnection(c *Context) {
 		c.JSON(http.StatusForbidden, H{"error": "Permission denied: your account is not authorized to create new connections"})
 		return
 	}
+	cfg.FilePath = s.normalizeConnectionFilePathForWebUser(c, cfg.FilePath)
 	if status, errMsg := s.validateConnectionFilePath(c, cfg.Type, cfg.FilePath); status != http.StatusOK {
 		c.JSON(status, H{"error": errMsg})
 		return
+	}
+	if status, errMsg := s.validateRemoteEndpointForWebUser(c, cfg); status != http.StatusOK {
+		c.JSON(status, H{"error": errMsg})
+		return
+	}
+	if !s.desktop.Enabled {
+		cfg = s.prepareWebConnectionConfig(cfg)
 	}
 
 	drv, err := driver.Create(cfg)
@@ -586,7 +701,7 @@ func (s *Server) handlePingSavedConnection(c *Context) {
 	if !s.authorizeConn(c, id, false) {
 		return
 	}
-	drv, _, err := s.pool.Get(id)
+	drv, _, err := s.acquireConnDriver(c, id)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
@@ -615,9 +730,17 @@ func (s *Server) handleCreateConnection(c *Context) {
 		c.JSON(http.StatusBadRequest, H{"error": "Invalid connection payload"})
 		return
 	}
+	req.FilePath = s.normalizeConnectionFilePathForWebUser(c, req.FilePath)
 	if status, errMsg := s.validateConnectionFilePath(c, req.Type, req.FilePath); status != http.StatusOK {
 		c.JSON(status, H{"error": errMsg})
 		return
+	}
+	if status, errMsg := s.validateRemoteEndpointForWebUser(c, req.ConnectionConfig); status != http.StatusOK {
+		c.JSON(status, H{"error": errMsg})
+		return
+	}
+	if !s.desktop.Enabled && req.Options != nil {
+		delete(req.Options, "cliPath")
 	}
 	req.ConnectionConfig.ID = ""
 	ownerID := c.UserID()
@@ -655,9 +778,17 @@ func (s *Server) handleUpdateConnection(c *Context) {
 		c.JSON(http.StatusBadRequest, H{"error": "Invalid connection payload"})
 		return
 	}
+	req.FilePath = s.normalizeConnectionFilePathForWebUser(c, req.FilePath)
 	if status, errMsg := s.validateConnectionFilePath(c, req.Type, req.FilePath); status != http.StatusOK {
 		c.JSON(status, H{"error": errMsg})
 		return
+	}
+	if status, errMsg := s.validateRemoteEndpointForWebUser(c, req.ConnectionConfig); status != http.StatusOK {
+		c.JSON(status, H{"error": errMsg})
+		return
+	}
+	if !s.desktop.Enabled && req.Options != nil {
+		delete(req.Options, "cliPath")
 	}
 	req.ConnectionConfig.ID = id
 	vis := ""
@@ -741,10 +872,22 @@ func (s *Server) handleImportConnections(c *Context) {
 		c.JSON(http.StatusBadRequest, H{"error": "Unrecognized connection profile format"})
 		return
 	}
-	for _, prof := range profiles {
-		if status, errMsg := s.validateConnectionFilePath(c, prof.Type, prof.FilePath); status != http.StatusOK {
+	for i := range profiles {
+		profiles[i].FilePath = s.normalizeConnectionFilePathForWebUser(c, profiles[i].FilePath)
+		if status, errMsg := s.validateConnectionFilePath(c, profiles[i].Type, profiles[i].FilePath); status != http.StatusOK {
 			c.JSON(status, H{"error": errMsg})
 			return
+		}
+		if status, errMsg := s.validateRemoteEndpointForWebUser(c, driver.ConnectionConfig{
+			Type: profiles[i].Type,
+			Host: profiles[i].Host,
+			Port: profiles[i].Port,
+		}); status != http.StatusOK {
+			c.JSON(status, H{"error": errMsg})
+			return
+		}
+		if !s.desktop.Enabled && profiles[i].Options != nil {
+			delete(profiles[i].Options, "cliPath")
 		}
 	}
 	imported, err := s.store.ImportConnections(profiles, c.Principal)

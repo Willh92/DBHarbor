@@ -333,6 +333,34 @@ func matchDollarTagBytes(ahead []byte) string {
 	return ""
 }
 
+// StripLeadingSQLComments removes leading whitespace, line comments (-- and #), and block comments (/* ... */)
+// from a SQL statement so security guards can inspect the true leading SQL keyword.
+func StripLeadingSQLComments(s string) string {
+	for len(s) > 0 {
+		i := 0
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n') {
+			i++
+		}
+		s = s[i:]
+		if strings.HasPrefix(s, "--") || strings.HasPrefix(s, "#") {
+			if nl := strings.IndexByte(s, '\n'); nl >= 0 {
+				s = s[nl+1:]
+				continue
+			}
+			return ""
+		}
+		if strings.HasPrefix(s, "/*") {
+			if end := strings.Index(s[2:], "*/"); end >= 0 {
+				s = s[2+end+2:]
+				continue
+			}
+			return ""
+		}
+		break
+	}
+	return s
+}
+
 func hasExecutableContent(s string) bool {
 	if s == "" {
 		return false

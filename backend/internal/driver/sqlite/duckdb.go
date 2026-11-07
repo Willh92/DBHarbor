@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"dbharbor/backend/internal/driver"
@@ -42,7 +43,12 @@ type DuckDBDriver struct {
 	cfg      driver.ConnectionConfig
 	filePath string
 	cliBin   string
+	webMode  bool
 }
+
+const maxDuckDBJSONBytes = 32 << 20 // 32 MiB stdout safety ceiling for interactive JSON queries
+
+var verifiedDuckDBBinaries sync.Map // map[string]bool
 
 func resolveDuckDBBinary(explicit string) (string, error) {
 	if strings.TrimSpace(explicit) != "" {
@@ -62,10 +68,36 @@ func resolveDuckDBBinary(explicit string) (string, error) {
 	return binName, nil
 }
 
+func verifyDuckDBExecutable(binPath string) error {
+	if _, ok := verifiedDuckDBBinaries.Load(binPath); ok {
+		return nil
+	}
+	resolved := binPath
+	if p, err := exec.LookPath(binPath); err == nil {
+		resolved = p
+	} else if _, statErr := os.Stat(binPath); statErr != nil {
+		return fmt.Errorf("duckdb executable (%s) not found; please install DuckDB CLI into system PATH or configure security.duckdbCliPath in config.json", binPath)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, resolved, "--version").CombinedOutput()
+	if err != nil || !strings.Contains(strings.ToLower(string(out)), "duckdb") {
+		return fmt.Errorf("configured binary %q failed DuckDB CLI verification (--version)", binPath)
+	}
+	verifiedDuckDBBinaries.Store(binPath, true)
+	return nil
+}
+
 func NewDuckDB(cfg driver.ConnectionConfig) (driver.Driver, error) {
 	fp := strings.TrimSpace(cfg.FilePath)
 	if fp == "" {
 		return nil, errors.New("DuckDB database file path cannot be empty")
+	}
+	webMode := cfg.Option("__web_mode", "") == "1"
+	if webMode && strings.Contains(fp, ":") {
+		if !(runtime.GOOS == "windows" && len(fp) >= 3 && ((fp[0] >= 'a' && fp[0] <= 'z') || (fp[0] >= 'A' && fp[0] <= 'Z')) && fp[1] == ':' && (fp[2] == '\\' || fp[2] == '/') && !strings.Contains(fp[2:], ":")) && fp != ":memory:" {
+			return nil, errors.New("invalid DuckDB file path syntax")
+		}
 	}
 	if fp != ":memory:" {
 		fp = filepath.Clean(fp)
@@ -73,28 +105,65 @@ func NewDuckDB(cfg driver.ConnectionConfig) (driver.Driver, error) {
 			_ = os.MkdirAll(dir, 0o755)
 		}
 	}
-	bin, _ := resolveDuckDBBinary(cfg.Option("cliPath", ""))
-	return &DuckDBDriver{cfg: cfg, filePath: fp, cliBin: bin}, nil
+	cliOption := cfg.Option("cliPath", "")
+	if webMode {
+		// In Web Server Edition, never execute client-supplied cliPath; use server-configured duckdbCliPath or system PATH only
+		cliOption = cfg.Option("__server_duckdb_cli", "")
+	}
+	bin, _ := resolveDuckDBBinary(cliOption)
+	return &DuckDBDriver{cfg: cfg, filePath: fp, cliBin: bin, webMode: webMode}, nil
+}
+
+func (d *DuckDBDriver) buildDuckDBArgs(sqlStmt string) []string {
+	if d.webMode {
+		return []string{
+			"-cmd", "SET enable_external_access=false; SET autoinstall_known_extensions=false; SET autoload_known_extensions=false;",
+			"-json",
+			d.filePath,
+			sqlStmt,
+		}
+	}
+	return []string{"-json", d.filePath, sqlStmt}
 }
 
 func (d *DuckDBDriver) runJSON(ctx context.Context, sqlStmt string) ([]map[string]any, error) {
-	if _, err := exec.LookPath(d.cliBin); err != nil {
-		if _, statErr := os.Stat(d.cliBin); statErr != nil {
-			return nil, fmt.Errorf("duckdb executable (%s) not found; please install DuckDB CLI into system PATH or specify cliPath in connection options", d.cliBin)
+	if d.webMode {
+		if err := verifyDuckDBExecutable(d.cliBin); err != nil {
+			return nil, err
+		}
+	} else {
+		if _, err := exec.LookPath(d.cliBin); err != nil {
+			if _, statErr := os.Stat(d.cliBin); statErr != nil {
+				return nil, fmt.Errorf("duckdb executable (%s) not found; please install DuckDB CLI into system PATH or specify cliPath in connection options", d.cliBin)
+			}
 		}
 	}
-	cmd := exec.CommandContext(ctx, d.cliBin, "-json", d.filePath, sqlStmt)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	cmd := exec.CommandContext(ctx, d.cliBin, d.buildDuckDBArgs(sqlStmt)...)
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	raw, readErr := io.ReadAll(io.LimitReader(stdoutPipe, maxDuckDBJSONBytes+1))
+	waitErr := cmd.Wait()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if len(raw) > maxDuckDBJSONBytes {
+		return nil, fmt.Errorf("DuckDB query output exceeded %d MB memory safety limit; please add a LIMIT clause or use streaming export", maxDuckDBJSONBytes>>20)
+	}
+	if waitErr != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
-			msg = err.Error()
+			msg = waitErr.Error()
 		}
 		return nil, errors.New(msg)
 	}
-	raw := bytes.TrimSpace(stdout.Bytes())
+	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 {
 		return []map[string]any{}, nil
 	}

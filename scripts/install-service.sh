@@ -82,7 +82,7 @@ Usage:
 
 Commands:
   install      Install binary (local or auto-downloaded from GitHub Releases), register service, and start (default)
-  upgrade      Download latest/specified release binary from GitHub, verify SHA-256, and restart service
+  upgrade      Download latest/specified release binary from GitHub, verify SHA-256, and restart service (upgrade or update)
   uninstall    Stop and remove the auto-start service registration (preserves data directory)
   start        Start the DBHarbor service
   stop         Stop the DBHarbor service
@@ -110,7 +110,7 @@ Options:
   --group <groupname>             Primary permission group for service & data dir (Linux default: same as --user)
   --supplementary-groups <g1,g2>  Comma-separated supplementary groups for systemd service (e.g. www-data,docker)
   --admin-user <username>         Initial admin username when bootstrapping a fresh data directory (default: admin)
-  --admin-pass <password>         Initial admin password when bootstrapping a fresh data directory (min 6 chars)
+  --admin-pass <password>         Initial admin password when bootstrapping a fresh data directory (min 8 chars)
   --user-mode                     Install as current non-root user service (systemd --user / LaunchAgents)
   -h, --help                      Show this help message
 EOF
@@ -118,8 +118,9 @@ EOF
 
 if [ "$#" -gt 0 ]; then
   case "$1" in
-    install|upgrade|uninstall|start|stop|restart|status|logs)
+    install|upgrade|update|uninstall|start|stop|restart|status|logs)
       ACTION="$1"
+      [ "$ACTION" = "update" ] && ACTION="upgrade"
       shift
       ;;
     -h|--help|help)
@@ -503,28 +504,41 @@ download_release_binary() {
   fi
 
   if [ "$SKIP_VERIFY" != "1" ]; then
-    if fetch_url "$SUM_URL" "$DL_SUM" "1" && [ -s "$DL_SUM" ]; then
-      EXPECTED_SHA="$(awk -v f="$ASSET_NAME" '$2 == f || $2 == ("*" f) { print tolower($1); exit }' "$DL_SUM")"
-      if [ -n "$EXPECTED_SHA" ]; then
-        ACTUAL_SHA="$(compute_sha256 "$DL_BIN")"
-        if [ -n "$ACTUAL_SHA" ]; then
-          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-            log_err "SHA-256 mismatch for ${ASSET_NAME}! Expected ${EXPECTED_SHA}, got ${ACTUAL_SHA}"
-            exit 1
-          fi
-          log_ok "Verified SHA-256 checksum (${ACTUAL_SHA})"
-        else
-          log_warn "No SHA-256 utility (sha256sum/shasum/openssl) found; skipping checksum verification."
-        fi
-      else
-        log_warn "Entry for ${ASSET_NAME} not found in SHA256SUMS.txt; skipping checksum verification."
-      fi
-    else
-      log_warn "Could not fetch SHA256SUMS.txt; skipping checksum verification."
+    if ! fetch_url "$SUM_URL" "$DL_SUM" "1" || [ ! -s "$DL_SUM" ]; then
+      log_err "Failed to fetch SHA256SUMS.txt from ${SUM_URL} (refusing to install unverified binary; pass --no-verify only when using a custom mirror without checksums)."
+      exit 1
     fi
+    EXPECTED_SHA="$(awk -v f="$ASSET_NAME" '$2 == f || $2 == ("*" f) { print tolower($1); exit }' "$DL_SUM")"
+    if [ -z "$EXPECTED_SHA" ]; then
+      log_err "Entry for ${ASSET_NAME} not found in SHA256SUMS.txt from ${SUM_URL} (refusing to install unverified binary; pass --no-verify only when using a custom mirror without checksums)."
+      exit 1
+    fi
+    ACTUAL_SHA="$(compute_sha256 "$DL_BIN")"
+    if [ -z "$ACTUAL_SHA" ]; then
+      log_err "No SHA-256 utility (sha256sum, shasum, or openssl) found on host; install one or pass --no-verify."
+      exit 1
+    fi
+    if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+      log_err "SHA-256 mismatch for ${ASSET_NAME}! Expected ${EXPECTED_SHA}, got ${ACTUAL_SHA}"
+      exit 1
+    fi
+    log_ok "Verified SHA-256 checksum (${ACTUAL_SHA})"
+  else
+    log_warn "Skipping SHA-256 checksum verification (--no-verify specified)."
   fi
 
   chmod 0755 "$DL_BIN"
+  if [ "$TARGET_OS" = "darwin" ]; then
+    xattr -d com.apple.quarantine "$DL_BIN" >/dev/null 2>&1 || true
+  fi
+  case "$ASSET_NAME" in
+    "dbharbor-${TARGET_OS}-${TARGET_ARCH}")
+      if ! "$DL_BIN" -version >/dev/null 2>&1; then
+        log_err "Downloaded binary failed smoke check ('${DL_BIN} -version'); refusing to overwrite existing service binary."
+        exit 1
+      fi
+      ;;
+  esac
   RESOLVED_BIN_PATH="$DL_BIN"
 }
 
@@ -565,14 +579,92 @@ resolve_source_binary() {
 extract_systemd_exec_bin() {
   U_FILE="$1"
   if [ -f "$U_FILE" ]; then
-    sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' "$U_FILE" | head -n 1
+    awk '
+      /^ExecStart=/ {
+        line = substr($0, 11)
+        sub(/^[ \t@+-]+/, "", line)
+        if (substr(line, 1, 1) == "\"") {
+          out = ""
+          i = 2
+          len = length(line)
+          while (i <= len) {
+            ch = substr(line, i, 1)
+            if (ch == "\\" && i < len) {
+              out = out substr(line, i + 1, 1)
+              i += 2
+              continue
+            }
+            if (ch == "\"") {
+              break
+            }
+            out = out ch
+            i++
+          }
+          print out
+          exit
+        } else if (substr(line, 1, 1) == "\047") {
+          line = substr(line, 2)
+          sub(/\047.*$/, "", line)
+          print line
+          exit
+        } else {
+          sub(/[ \t].*$/, "", line)
+          print line
+          exit
+        }
+      }
+    ' "$U_FILE"
   fi
+}
+
+extract_macos_plist_bin() {
+  P_FILE="$1"
+  if [ ! -f "$P_FILE" ]; then
+    return 0
+  fi
+  PLIST_XML=""
+  if command -v plutil >/dev/null 2>&1; then
+    PLIST_XML="$(plutil -convert xml1 -o - "$P_FILE" 2>/dev/null || true)"
+  fi
+  if [ -z "$PLIST_XML" ]; then
+    PLIST_XML="$(cat "$P_FILE" 2>/dev/null || true)"
+  fi
+  printf "%s\n" "$PLIST_XML" | awk '
+    {
+      line = $0
+      if (!in_prog && match(line, /<key>[ \t]*ProgramArguments[ \t]*<\/key>/)) {
+        in_prog = 1
+        line = substr(line, RSTART + RLENGTH)
+      }
+      if (in_prog && !in_arr && match(line, /<array>/)) {
+        in_arr = 1
+        line = substr(line, RSTART + RLENGTH)
+      }
+      if (in_arr && match(line, /<string>[^<]+<\/string>/)) {
+        val = substr(line, RSTART + 8, RLENGTH - 17)
+        gsub(/&lt;/, "<", val)
+        gsub(/&gt;/, ">", val)
+        gsub(/&quot;/, "\"", val)
+        gsub(/&apos;/, "\047", val)
+        gsub(/&amp;/, "\\&", val)
+        print val
+        exit
+      }
+      if (in_arr && /<\/array>/) {
+        exit
+      }
+    }
+  '
 }
 
 validate_admin_bootstrap() {
   NL='
 '
   CR="$(printf '\r')"
+  if [ -n "$ADMIN_USER" ] && [ -z "$ADMIN_PASS" ]; then
+    log_err "Invalid parameters: --admin-pass (at least 8 characters) is required when --admin-user is specified."
+    exit 1
+  fi
   if [ -n "$ADMIN_USER" ]; then
     case "$ADMIN_USER" in
       *"$NL"*|*"$CR"*)
@@ -592,8 +684,8 @@ validate_admin_bootstrap() {
         exit 1
         ;;
     esac
-    if [ "${#ADMIN_PASS}" -lt 6 ]; then
-      log_err "Invalid --admin-pass: initial admin password must be at least 6 characters."
+    if [ "${#ADMIN_PASS}" -lt 8 ]; then
+      log_err "Invalid --admin-pass: initial admin password must be at least 8 characters."
       exit 1
     fi
   fi
@@ -601,6 +693,13 @@ validate_admin_bootstrap() {
 
 systemd_escape_dq() {
   printf "%s" "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+format_systemd_arg() {
+  case "$1" in
+    *[[:space:]]*) printf '"%s"' "$(systemd_escape_dq "$1")" ;;
+    *) printf '%s' "$1" ;;
+  esac
 }
 
 sh_escape_sq() {
@@ -685,12 +784,16 @@ bootstrap_direct_admin_store() {
   if [ -z "$ADMIN_USER" ] && [ -z "$ADMIN_PASS" ]; then
     return 0
   fi
+  if [ -z "$ADMIN_PASS" ]; then
+    log_err "Invalid parameters: --admin-pass (at least 8 characters) is required when initializing an administrator account."
+    exit 1
+  fi
   if [ -s "${TARGET_DATA}/dbharbor.db" ]; then
     log_warn "Existing database detected at ${TARGET_DATA}/dbharbor.db; --admin-user / --admin-pass only applies when initializing a fresh data directory."
     return 0
   fi
   EFF_USER="${ADMIN_USER:-admin}"
-  EFF_PASS="${ADMIN_PASS:-admin123}"
+  EFF_PASS="$ADMIN_PASS"
   if "$BIN_EXE" -h 2>&1 | grep -q "init-only"; then
     DBHARBOR_ADMIN_USER="$EFF_USER" DBHARBOR_ADMIN_PASS="$EFF_PASS" "$BIN_EXE" -data-dir "$TARGET_DATA" -init-only >/dev/null
   else
@@ -805,7 +908,7 @@ After=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=-${INIT_ENV_FILE}
-ExecStart=${INSTALL_BIN} ${LISTEN_ARGS} -data-dir ${DATA_DIR}
+ExecStart=$(format_systemd_arg "$INSTALL_BIN") ${LISTEN_ARGS} -data-dir $(format_systemd_arg "$DATA_DIR")
 WorkingDirectory=${DATA_DIR}
 Restart=on-failure
 RestartSec=5
@@ -921,7 +1024,7 @@ RuntimeDirectory=${SERVICE_NAME}
 RuntimeDirectoryMode=0755
 WorkingDirectory=${DATA_DIR}
 EnvironmentFile=-${INIT_ENV_FILE}
-ExecStart=${INSTALL_BIN} ${LISTEN_ARGS} -data-dir ${DATA_DIR}
+ExecStart=$(format_systemd_arg "$INSTALL_BIN") ${LISTEN_ARGS} -data-dir $(format_systemd_arg "$DATA_DIR")
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65535
@@ -1027,9 +1130,9 @@ EOF
         copy_binary_safe "$RESOLVED_BIN_PATH" "$INSTALL_BIN"
         if [ -f "$INIT_SCRIPT" ]; then
           rc-service "$SERVICE_NAME" restart || rc-service "$SERVICE_NAME" start
-          log_ok "Upgraded & restarted OpenRC service (${INSTALL_BIN})"
+          log_ok "Upgraded & restarted OpenRC service (${INSTALL_BIN}): $("$INSTALL_BIN" -version 2>/dev/null || printf "OK")"
         else
-          log_ok "Upgraded binary at ${INSTALL_BIN}"
+          log_ok "Upgraded binary at ${INSTALL_BIN}: $("$INSTALL_BIN" -version 2>/dev/null || printf "OK")"
         fi
         ;;
       uninstall)
@@ -1194,14 +1297,18 @@ EOF
       log_info "Listen   : ${MAC_LISTEN_DISPLAY}"
       ;;
     upgrade)
+      if [ -z "$INSTALL_DIR" ] && [ -f "$PLIST_FILE" ]; then
+        EXISTING_BIN="$(extract_macos_plist_bin "$PLIST_FILE")"
+        [ -n "$EXISTING_BIN" ] && INSTALL_BIN="$EXISTING_BIN"
+      fi
       resolve_source_binary
       copy_binary_safe "$RESOLVED_BIN_PATH" "$INSTALL_BIN"
       xattr -d com.apple.quarantine "$INSTALL_BIN" >/dev/null 2>&1 || true
       if [ -f "$PLIST_FILE" ]; then
         launchctl kickstart -k "${DOMAIN_TARGET}/${MACOS_LABEL}" >/dev/null 2>&1 || true
-        log_ok "Upgraded & restarted ${MACOS_LABEL} (${INSTALL_BIN})"
+        log_ok "Upgraded & restarted ${MACOS_LABEL} (${INSTALL_BIN}): $("$INSTALL_BIN" -version 2>/dev/null || printf "OK")"
       else
-        log_ok "Upgraded binary at ${INSTALL_BIN}"
+        log_ok "Upgraded binary at ${INSTALL_BIN}: $("$INSTALL_BIN" -version 2>/dev/null || printf "OK")"
       fi
       ;;
     uninstall)

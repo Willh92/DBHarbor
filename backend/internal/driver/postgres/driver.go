@@ -100,6 +100,20 @@ func (d *Driver) poolForDB(dbName string) (*sql.DB, error) {
 		return existing, nil
 	}
 
+	if len(d.pools) >= 8 {
+		defaultDB := d.cfg.Database
+		if defaultDB == "" {
+			defaultDB = "postgres"
+		}
+		for k, oldPool := range d.pools {
+			if k != defaultDB {
+				_ = oldPool.Close()
+				delete(d.pools, k)
+				break
+			}
+		}
+	}
+
 	port := d.cfg.Port
 	if port == 0 {
 		port = d.defaultPort
@@ -126,6 +140,7 @@ func (d *Driver) poolForDB(dbName string) (*sql.DB, error) {
 	db.SetMaxOpenConns(8)
 	db.SetMaxIdleConns(3)
 	db.SetConnMaxLifetime(15 * time.Minute)
+	db.SetConnMaxIdleTime(3 * time.Minute)
 	d.pools[dbName] = db
 	return db, nil
 }

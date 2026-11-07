@@ -5,6 +5,7 @@ import {
   Form,
   Input,
   Modal,
+  Popconfirm,
   Radio,
   Select,
   Space,
@@ -15,6 +16,7 @@ import {
 import {
   CodeOutlined,
   CopyOutlined,
+  DeleteOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import { api } from '../../api/client';
@@ -184,6 +186,7 @@ export const RoutineTriggerModal: React.FC<RoutineTriggerModalProps> = ({
 
   const [loadingDDL, setLoadingDDL] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [dropping, setDropping] = useState(false);
 
   // Routine builder fields
   const [routineKind, setRoutineKind] = useState<'PROCEDURE' | 'FUNCTION'>('PROCEDURE');
@@ -331,6 +334,27 @@ export const RoutineTriggerModal: React.FC<RoutineTriggerModalProps> = ({
     }
   };
 
+  const handleDrop = async () => {
+    if (!editObject || !canWrite) return;
+    setDropping(true);
+    try {
+      await api.objectAction(connectionId, {
+        database,
+        schema,
+        objectName: editObject.name,
+        objectType: editObject.objectType,
+        action: 'DROP',
+      });
+      message.success(t('Executed {action} on {name}', { action: 'DROP', name: editObject.name }));
+      onSaved?.();
+      onClose();
+    } catch (err: any) {
+      message.error(err.message);
+    } finally {
+      setDropping(false);
+    }
+  };
+
   const modalTitle = editObject
     ? `${editObject.objectType}: ${editObject.name}`
     : mode === 'trigger'
@@ -374,6 +398,17 @@ export const RoutineTriggerModal: React.FC<RoutineTriggerModalProps> = ({
           >
             {t('Open in SQL Console')}
           </Button>
+          {editObject && canWrite && (
+            <Popconfirm
+              title={t('Danger: Permanently drop {name}?', { name: editObject.name })}
+              okButtonProps={{ danger: true }}
+              onConfirm={handleDrop}
+            >
+              <Button danger icon={<DeleteOutlined />} loading={dropping}>
+                {t('Drop')}
+              </Button>
+            </Popconfirm>
+          )}
           {canWrite && (
             <Button type="primary" loading={saving} onClick={handleSave}>
               {editObject ? t('Save & Replace') : t('Execute & Create')}

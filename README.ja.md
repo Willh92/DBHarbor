@@ -3,7 +3,7 @@
 **言語切替**: [English](./README.md) | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | **日本語**
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.0-1677ff.svg)](./CHANGELOG.ja.md)
+[![Version](https://img.shields.io/badge/Version-v1.0.1-1677ff.svg)](./CHANGELOG.ja.md)
 [![CGO_ENABLED=0](https://img.shields.io/badge/Go-CGO__ENABLED%3D0-00ADD8.svg)](https://github.com/Willh92/DBHarbor.git)
 
 **phpMyAdmin の直感的なビジュアル操作性**と**モダンなマルチエンジン IDE 機能**を融合した、外部依存ゼロ・単一バイナリの Web データベース管理プラットフォームです。
@@ -21,14 +21,15 @@
   - **リレーショナル RDBMS**: MySQL、MariaDB、TiDB、OceanBase、PostgreSQL、KingbaseES、SQLite 3、SQL Server、Oracle（Instant Client 不要）、Dameng (DM8)
   - **Key-Value & ドキュメント NoSQL**: Redis（DB0–15 ブラウザ、6 データ構造エディタ、内蔵 CLI）、MongoDB（JSON / テーブル表示、BSON CRUD、インデックス & `RunCommand` コンソール）
 - **ビジュアルスキーマ変更・DB権限管理 & SQL コンソール**:
-  - **テーブル構造・関数/トリガー作成 & DB ユーザー権限管理**: カラムの追加・変更・リネーム・削除、型・デフォルト値・`NULL` 制約変更、インデックス/外部キー管理、関数・ストアドプロシージャ・トリガーのビジュアル新規作成＆編集、データベースユーザー＆権限管理（`GRANT` / `REVOKE`、Redis ACL、MongoDB ロール）、テーブル複製・リネーム、ビュー作成、SQLite トランザクション無損失再構築、DDL プレビュー。
-  - **Navicat 風フルハイトグリッド・空白行直接追加 & スマート SQL コンソール**: フルハイト表示と空白行クリック直接挿入、一括カラム編集、メモ帳・Excel 互換の TSV コピー＆ペースト（`Ctrl+C` / `Ctrl+V`）、ローカル DB ファイル参照・アップロード（`SQLite 3` / `DuckDB`）、軽量 Monaco Editor、`Ctrl/Cmd + Enter` 実行、`EXPLAIN` 実行計画、DB 全体/複数テーブル SQL ダンプ、MongoDB / Redis JSON インポート＆エクスポート、SQL スクリプト直接実行。
-- **Web マルチユーザー RBAC・認証保護 & TOTP 二要素認証 (2FA)**:
-  - Web サーバー版は 3 階層マルチユーザー RBAC（`Admin` / `Read-Write` / `Read-Only`）と共有/プライベート接続分離、ブルートフォース防止レート制限 (`HTTP 429`)、オフライン HMAC SVG 画像認証、オフライン QR コードによる RFC 6238 TOTP 2FA + 8 個のリカバリコード、セッション強制終了、監査ログ、AES-256-GCM 接続情報暗号化に対応。
-- **ネイティブダークタイトルバー同期・モバイル最適化 & 多言語対応 (i18n)**:
-  - デスクトップ版の OS ネイティブダークタイトルバー同期（`Win32 DWM`、`macOS DarkAqua`、`Linux GTK3`）およびモバイル (`<= 640px`) 専用レスポンシブ UI に対応。
+  - **テーブル構造・関数/トリガー作成 & DB ユーザー権限管理**: カラムの追加・変更・リネーム・削除、型・デフォルト値・`NULL` 制約変更、インデックス/外部キー管理、関数・ストアドプロシージャ・トリガーのビジュアル新規作成＆編集、データベースユーザー＆権限管理（`GRANT` / `REVOKE`、Redis ACL、MongoDB ロール）、テーブル複製・リネーム、ビュー作成、SQLite トランザクション無損失再構築、SQLite オブジェクト一覧の即時取得、DDL プレビュー。
+  - **Navicat 風フルハイトグリッド・空白行直接追加 & スマート SQL コンソール**: フルハイト表示と空白行クリック直接挿入、一括カラム編集、メモ帳・Excel 互換の TSV コピー＆ペースト（`Ctrl+C` / `Ctrl+V`）、ローカル DB ファイル参照・アップロード（`SQLite 3` / `DuckDB`）、軽量 Monaco Editor、`Ctrl/Cmd + Enter` 実行、`EXPLAIN` 実行計画、DB 全体/複数テーブル SQL ダンプ、DuckDB / MongoDB のストリーミングメモリ上限保護、SQL スクリプト直接実行。
+- **Web マルチユーザー RBAC・ログイン画面ブランディング・セキュリティ保護 & 緊急リカバリ *(Web サーバー版のみ)***:
+  - **初期デフォルト認証情報ゼロ・ブランディング設定 & インデックス登録防止**: 初回起動時の**初期管理者セットアップウィザード**（パスワード最低 `8` 文字、`admin123` 廃止）、未認証時の情報漏洩ゼロ化、ブラウザ `<title>`・上部アイコン（`<= 128 KB` カスタム画像＋Favicon 同期）・見出し・サブタイトルの自由変更、および `/robots.txt`・`X-Robots-Tag`・`<meta name="robots">` による三重の検索エンジンクローラ拒否を搭載。
+  - **3 階層 RBAC・TOTP 2FA & 多層サンドボックス**: 3 階層 RBAC（`Admin` / `Read-Write` / `Read-Only`）、秘密鍵派生の使い捨て CAPTCHA、`trustedProxies` 対応レート制限 (`HTTP 429`)、オフライン QR コードによる RFC 6238 TOTP 2FA + 8 個のリカバリコード + 2FA 試行回数制限、厳格な TLS 証明書検証、非管理者向け `<DataDir>/local_databases/` サンドボックス（Web モードでの SQLite `ATTACH` 無効化およびサーバー管理の `duckdbCliPath` と DuckDB `enable_external_access = false`）、非管理者 SSRF プライベート網ガード、参照カウント式コネクションプール、SQL Server `USE [db]` 接続固定、永続設定 `<DataDir>/config.json` と**自動無害化機能付き緊急管理者リカバリ**に対応。
+- **ネイティブダークタイトルバー同期・モバイルタッチ最適化 & 多言語対応 (i18n)**:
+  - デスクトップ版の OS ネイティブダークタイトルバー同期（`Win32 DWM`、`macOS DarkAqua`、`Linux GTK3`）に加え、モバイル・タッチ端末向けにちらつきゼロのネイティブ GPU CSS `position: sticky` ヘッダー、タッチドラッグ列幅調整＋ダブルタップ自動幅拡張、サイドバー/テーブルの `[⋮]` ＆長押しメニュー、モバイル SQL クイック記号バー、省略セルのタップ確認、サイドバー `keep-alive` メモリキャッシュ、ポップアップの画面端クランプを搭載。
   - **TCP ポート**および **Unix ドメインソケット (`AF_UNIX`)** 待受に両対応（`-unix-socket`、`-unix-socket-perm`、`-unix-socket-group`）。
-  - **English (`en-US`)・简体中文 (`zh-CN`)・繁體中文 (`zh-TW`)・日本語 (`ja-JP`)** のリアルタイム切替と、`Willh92/DBHarbor` からのオンライン更新通知・自動通知スイッチに対応。
+  - **English (`en-US`)・简体中文 (`zh-CN`)・繁體中文 (`zh-TW`)・日本語 (`ja-JP`)** のリアルタイム切替、およびオンライン更新通知・ワンコマンドサービス更新に対応。
 
 ---
 
@@ -48,12 +49,16 @@ npm run build:all
 npm test
 ```
 
-- **デスクトップ GUI 版 (`dbharbor-desktop-<os>-<arch>` / `DBHarbor-darwin-<arch>.app`)**：ダブルクリックでネイティブウィンドウを直接起動（コンソール非表示・**アカウント/ログイン不要の純粋なローカルアプリ**）。
-- **Web サーバー版 (`dbharbor-<os>-<arch>`)**：起動後、`http://localhost:8787` にアクセスします（初期アカウント: `admin` / `admin123` — 初回ログイン後にパスワード変更と 2FA 有効化を推奨します）。
+### 2 つのエディション (`dist/`)
+
+1. **デスクトップ GUI 版 (`dbharbor-desktop-<os>-<arch>` / `DBHarbor-darwin-<arch>.app`) — ログイン不要の純粋なローカルクライアント**：
+   - ダブルクリックでネイティブウィンドウを直接起動（コンソール非表示・**ユーザーアカウント機能を持たない純粋なローカルモード**。OS ネイティブのファイル選択・名前を付けて保存ダイアログ、ホスト全ディレクトリへのアクセス、AES-256-GCM 暗号化接続ボールトを搭載）。`<DataDir>/config.json`、初期管理者セットアップ、ログイン画面設定、緊急リカバリモード、Web 用ファイル/ネットワーク制限は**デスクトップ GUI 版には適用されません**。
+2. **Web サーバー版 (`dbharbor-<os>-<arch>`) — セルフホスト / チーム共有サービス**：
+   - 起動後、`http://localhost:8787` にアクセスします（固定の初期パスワードはありません — 初回アクセス時に**初期管理者セットアップウィザード**（最低 `8` 文字）が表示され、ログイン画面のタイトル・アイコン設定も可能です。CLI の `-admin-user` / `-admin-pass` でも初期設定可能）。
 
 ---
 
-## OS 標準データディレクトリ
+## OS 標準データディレクトリ・CLI オプション & 永続 `config.json`
 
 DBHarbor はカレントディレクトリを汚染せず、各 OS の標準アプリケーションデータ領域にメタデータ (`dbharbor.db`) と暗号鍵 (`.secret.key`) を自動保存します（`-data-dir` で変更可能）：
 
@@ -63,7 +68,68 @@ DBHarbor はカレントディレクトリを汚染せず、各 OS の標準ア�
 | **macOS** | `~/Library/Application Support/DBHarbor/data` | `/Library/Application Support/DBHarbor/data` |
 | **Linux** | `$XDG_DATA_HOME/dbharbor` (`~/.local/share/dbharbor`) | `/var/lib/dbharbor` |
 
-> **ローカル DB ファイルのセキュリティ境界**：DBHarbor の内部メタデータ DB（`dbharbor.db`）および暗号鍵（`.secret.key`）は全モードで自動的に非表示・保護され、接続対象として指定できません。Web サーバー版では非管理者（`Read-Write`）による SQLite / DuckDB ファイルの参照・作成は `<DataDir>` サンドボックス内（既定 `<DataDir>/local_databases`）に厳格に制限され、`Admin` 管理者およびデスクトップ GUI 版のみがホスト全体のディレクトリにアクセスできます。
+### CLI オプション & 環境変数 *(Web サーバー版)*
+
+設定の優先順位：**`CLI フラグ > DBHARBOR_* 環境変数 > <DataDir>/config.json > デフォルト値`**。
+
+| CLI フラグ | 環境変数 | デフォルト | 説明 |
+| :--- | :--- | :--- | :--- |
+| `-config` | `DBHARBOR_CONFIG_FILE` | `<DataDir>/config.json` | Web サーバー版の永続 JSON 設定ファイルパス（権限 `0600`） |
+| `-host` | `DBHARBOR_HOST` | `0.0.0.0` | TCP 待受アドレス（`unix:/path/to/dbharbor.sock` 短縮表記も可） |
+| `-port` | `DBHARBOR_PORT` | `8787` | HTTP TCP ポート番号 |
+| `-unix-socket` | `DBHARBOR_UNIX_SOCKET` | *(空)* | Unix ドメインソケット待受パス（例: `/run/dbharbor/dbharbor.sock`） |
+| `-unix-socket-perm` | `DBHARBOR_UNIX_SOCKET_PERM` | `0660` | Unix ソケットの 8 進数パーミッション |
+| `-unix-socket-group` | `DBHARBOR_UNIX_SOCKET_GROUP` | *(空)* | Unix ソケットの所有グループ名または GID（`www-data`、`nginx` など） |
+| `-data-dir` | `DBHARBOR_DATA_DIR` | *(OS 標準)* | メタデータ DB・`config.json`・`.secret.key` の保存先ディレクトリ |
+| `-admin-user` | `DBHARBOR_ADMIN_USER` | *(空 — Web 設定)* | 初回ヘッドレス初期化用の管理者ユーザー名（ユーザー未登録時のみ有効） |
+| `-admin-pass` | `DBHARBOR_ADMIN_PASS` | *(空 — Web 設定)* | 初回ヘッドレス初期化用の管理者パスワード（**最低 8 文字**） |
+| `-idle-ttl` | `DBHARBOR_IDLE_TTL` | `30` | アイドル DB 接続プールの自動解放タイムアウト（分） |
+| — | `DBHARBOR_MAX_IMPORT_MB` | `256` | インポートファイルの最大アップロードサイズ（MB） |
+| — | `DBHARBOR_TRUSTED_PROXIES` | *(ループバック)* | `X-Forwarded-For` / `X-Real-IP` を信頼するプロキシ IP/CIDR（カンマ区切り） |
+| — | `DBHARBOR_CORS_ORIGINS` | *(同一オリジン)* | 許可する CORS オリジン一覧 |
+| — | `DBHARBOR_DUCKDB_PATH` | *(自動検出)* | サーバー管理の DuckDB CLI パス (`security.duckdbCliPath`) |
+| — | `DBHARBOR_ALLOW_PRIVATE_NET_NON_ADMIN` | `false` | 非管理者によるプライベート/ループバック網への接続許可 |
+| `-init-only` | — | `false` | 暗号鍵・`config.json`・初期管理者を初期化して即座に終了 |
+| `-recover-admin` | — | `false` | 緊急管理者パスワード / 2FA リカバリを実行して即座に終了 |
+| `-recover-user` | — | *(主管理者)* | `-recover-admin` の対象管理者ユーザー名 |
+| `-recover-pass` | — | *(空)* | 新しいパスワード（`>= 8` 文字）または `auto`（16 文字ランダム生成） |
+| `-reset-2fa` | — | `false` | `-recover-admin` 実行時に TOTP 2FA とリカバリコードもリセット |
+| `-open` | — | `false` | TCP 起動時に標準ブラウザを自動で開く |
+| `-version` | — | `false` | バージョン・コミット・プラットフォーム情報を出力 |
+
+### 永続サーバー設定 (`<DataDir>/config.json`) & 緊急管理者リカバリ *(Web サーバー版のみ)*
+
+**Web サーバー版**は起動時に `<DataDir>/config.json`（パーミッション `0600`）を自動生成します：
+
+```json
+{
+  "host": "0.0.0.0",
+  "port": 8787,
+  "unixSocket": "",
+  "unixSocketPerm": "0660",
+  "unixSocketGroup": "",
+  "idleConnTTLMinutes": 30,
+  "maxImportMB": 256,
+  "trustedProxies": ["127.0.0.1/32", "::1/128"],
+  "corsAllowedOrigins": [],
+  "security": {
+    "allowPrivateNetworkForNonAdmin": false,
+    "duckdbCliPath": ""
+  },
+  "recovery": {
+    "enabled": false,
+    "adminUsername": "admin",
+    "newPassword": "",
+    "reset2FA": false
+  }
+}
+```
+
+管理者パスワードや 2FA デバイスを紛失した場合は、以下の 2 通りの方法で安全に復旧できます：
+1. **`<DataDir>/config.json` を編集して再起動**：`"recovery"` を `{ "enabled": true, "adminUsername": "admin", "newPassword": "YourNewStrongPassword", "reset2FA": true }`（8 文字以上、または `"newPassword": "auto"` で 16 文字のランダムパスワードを生成して起動ログに出力）に設定し、DBHarbor を再起動します。起動時に `dbharbor.db` を `<DataDir>/.backups/` へ自動退避し、パスワード/2FA のリセットと既存セッション失効を行った後、**即座に `config.json` を自動無害化（`"enabled": false, "newPassword": ""`）**して平文パスワードをディスクから消去します。
+2. **ワンショット CLI 復旧**：`dbharbor -data-dir /var/lib/dbharbor -recover-admin -recover-pass auto -reset-2fa`
+
+> **Web サーバー版のローカルファイル & ネットワーク境界**：DBHarbor の内部メタデータ DB（`dbharbor.db`）・`config.json`・暗号鍵（`.secret.key`）は全モードで自動的に非表示・保護されます。**Web サーバー版**では、非管理者（`Read-Write`）による SQLite / DuckDB ファイル操作は `<DataDir>/local_databases/` サンドボックス内に制限され、SQLite `ATTACH` 無効化、サーバー管理の `security.duckdbCliPath` と DuckDB `enable_external_access = false`、および非管理者向けプライベート網 SSRF ガードが適用されます。**デスクトップ GUI 版**はログイン不要のローカルモードでホスト全体のファイルにアクセス可能です。
 
 ---
 
@@ -85,14 +151,14 @@ DBHarbor はカレントディレクトリを汚染せず、各 OS の標準ア�
 
 ## 自動起動サービス登録・オンライン更新・初期管理者設定
 
-`scripts/` および `dist/` 同梱のサービス管理スクリプトは、ローカルバイナリが無い場合の **GitHub Releases からの自動ダウンロード＆`SHA256SUMS.txt` 検証**、インストール先指定（`--install-dir` / `-InstallDir`）、**初回デプロイ時の管理者アカウント初期化**（`--admin-user` / `--admin-pass` — 初期化後に一時認証情報を自動消去）、および **ワンコマンドオンライン更新**（`upgrade`）に対応しています。
+`scripts/` および `dist/` 同梱の **Web サーバー版**サービス管理スクリプトは、**GitHub Releases からの自動ダウンロード・フェイルクローズ方式の `SHA256SUMS.txt` 検証・置換前の `-version` スモークチェック**、ミラー指定（`--mirror` / `-Mirror`）、インストール先指定（`--install-dir` / `-InstallDir`）、**初回デプロイ時の管理者初期化**（`--admin-user` / `--admin-pass` 最低 `8` 文字 — 初期化後に一時認証情報を自動消去）、および既存のサービス引数と `DataDir` を維持した **ロック安全なワンコマンドオンライン更新**（`upgrade` / `update` および `-Action Upgrade` / `-Action Update`）に対応しています。
 
 ### 1. Linux (`systemd` / `OpenRC`)
 
 ```bash
 chmod +x ./dist/install-service.sh
 
-# Unix ドメインソケット待受 + 実行ロール・Nginx グループ権限 (www-data / nginx)・初期管理者アカウント設定
+# Unix ドメインソケット待受 + 実行ロール・Nginx グループ権限 (www-data / nginx)・初期管理者アカウント設定（8 文字以上）
 sudo ./dist/install-service.sh install \
   --user dbharbor \
   --group dbharbor \
@@ -107,7 +173,7 @@ sudo ./dist/install-service.sh install \
 # ローカル TCP 待受
 sudo ./dist/install-service.sh install --user dbharbor --group dbharbor --host 127.0.0.1 --port 8787
 
-# GitHub Releases から最新版へオンライン更新＆再起動
+# GitHub Releases から最新版へオンライン更新＆再起動（別名 update、--mirror <url>、--version <tag> に対応）
 sudo ./dist/install-service.sh upgrade
 ```
 
@@ -121,6 +187,9 @@ sudo ./dist/install-service.sh install \
   --admin-user ops_admin --admin-pass 'StrongPass!2026'
 # または非 root ユーザーサービス:
 ./dist/install-service.sh install --user-mode --port 8787
+
+# オンライン更新（plist 内のカスタムパスを自動維持）＆再起動
+sudo ./dist/install-service.sh upgrade
 ```
 
 ### 3. Windows (`ScheduledTask` + `icacls` アクセス権保護)
@@ -134,7 +203,7 @@ powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 `
   -AdminPass "StrongPass!2026" `
   -HostAddr "127.0.0.1" -Port 8787
 
-# オンライン更新＆サービス再起動
+# オンライン更新＆ロック安全再起動（別名 -Action Update、-Mirror <url> に対応）
 powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 -Action Upgrade
 ```
 
@@ -142,7 +211,7 @@ powershell -ExecutionPolicy Bypass -File .\dist\install-service.ps1 -Action Upgr
 
 ## リバースプロキシ設定ガイド (Nginx / Caddy / Apache)
 
-設定テンプレート一式は [`deploy/`](./deploy) ディレクトリに同梱されています。
+設定テンプレート一式は [`deploy/`](./deploy) ディレクトリに同梱されています（リバースプロキシが別ホストにある場合は `<DataDir>/config.json` の `trustedProxies` にプロキシの IP/CIDR を追加してください）。
 
 ```nginx
 upstream dbharbor_uds {

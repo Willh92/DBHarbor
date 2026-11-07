@@ -154,7 +154,7 @@ export const ContextNavBar: React.FC<Props> = ({ tab, activeSection, onOpenTrans
 
     return (
       <div
-        className="dbharbor-context-navbar"
+        className="dbharbor-context-navbar dbharbor-no-scrollbar"
         style={{
           display: 'flex',
           justifyContent: 'space-between',
@@ -164,7 +164,7 @@ export const ContextNavBar: React.FC<Props> = ({ tab, activeSection, onOpenTrans
           maxWidth: '100%',
           padding: '4px 6px',
           marginBottom: 6,
-          borderRadius: 6,
+          borderRadius: 8,
           background: 'rgba(22, 119, 255, 0.05)',
           border: '1px solid rgba(22, 119, 255, 0.14)',
           flexShrink: 0,
@@ -172,7 +172,8 @@ export const ContextNavBar: React.FC<Props> = ({ tab, activeSection, onOpenTrans
         }}
       >
         <Segmented
-          size="small"
+          size="middle"
+          style={{ flexShrink: 0 }}
           value={activeSection}
           onChange={(val) => {
             if (val === 'overview') goOverview();
@@ -190,12 +191,22 @@ export const ContextNavBar: React.FC<Props> = ({ tab, activeSection, onOpenTrans
           ]}
         />
         <Space size={4} style={{ flexShrink: 0 }}>
-          <Button size="small" icon={<CodeOutlined />} onClick={goSQLConsole}>
+          <Button
+            size="small"
+            icon={<CodeOutlined />}
+            onClick={goSQLConsole}
+            style={{ height: 34, paddingInline: 8 }}
+          >
             SQL
           </Button>
           {mobileMenuItems.length > 0 && (
             <Dropdown trigger={['click']} menu={{ items: mobileMenuItems }} placement="bottomRight">
-              <Button size="small" icon={<MoreOutlined />} aria-label={t('More Actions')} />
+              <Button
+                size="small"
+                icon={<MoreOutlined />}
+                aria-label={t('More Actions')}
+                style={{ width: 34, height: 34, padding: 0 }}
+              />
             </Dropdown>
           )}
         </Space>

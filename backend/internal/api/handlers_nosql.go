@@ -19,7 +19,7 @@ func (s *Server) getKVDriverAccess(c *Context, requireWrite bool) (driver.KeyVal
 	if !s.authorizeConn(c, connID, requireWrite) {
 		return nil, driver.ConnectionConfig{}, false
 	}
-	drv, cfg, err := s.pool.Get(connID)
+	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return nil, cfg, false
@@ -37,7 +37,7 @@ func (s *Server) getDocDriverAccess(c *Context, requireWrite bool) (driver.Docum
 	if !s.authorizeConn(c, connID, requireWrite) {
 		return nil, driver.ConnectionConfig{}, false
 	}
-	drv, cfg, err := s.pool.Get(connID)
+	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return nil, cfg, false
@@ -596,7 +596,7 @@ func (s *Server) handleDocImport(c *Context) {
 	)
 
 	if strings.Contains(ct, "multipart/form-data") {
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 128<<20)
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, s.maxImportBytes())
 		fh, err := c.FormFile("file")
 		if err != nil {
 			c.JSON(http.StatusBadRequest, H{"error": "Please select a .json or .jsonl file to import"})
@@ -790,7 +790,7 @@ func (s *Server) handleGetMonitor(c *Context) {
 	if !s.authorizeConn(c, connID, false) {
 		return
 	}
-	drv, _, err := s.pool.Get(connID)
+	drv, _, err := s.acquireConnDriver(c, connID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
@@ -816,7 +816,7 @@ func (s *Server) handleKillSession(c *Context) {
 	if !s.authorizeConn(c, connID, true) {
 		return
 	}
-	drv, _, err := s.pool.Get(connID)
+	drv, _, err := s.acquireConnDriver(c, connID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return

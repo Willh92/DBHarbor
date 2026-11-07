@@ -68,6 +68,9 @@ func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(3)
+	db.SetConnMaxLifetime(15 * time.Minute)
+	db.SetConnMaxIdleTime(3 * time.Minute)
 	return &Driver{cfg: cfg, db: db}, nil
 }
 

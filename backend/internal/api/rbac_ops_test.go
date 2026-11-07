@@ -168,8 +168,8 @@ func TestRBACMultiUserIsolationAndOperations(t *testing.T) {
 	if w := doJSON(http.MethodDelete, "/api/connections/"+connAID, devTok, nil); w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 when dev_alice attempts to delete admin shared ConnA, got %d", w.Code)
 	}
-	// dev_alice creates a private connection (even if requesting shared, non-admin gets private)
-	privConnID := createConn(devTok, "Alice Scratch DB", "alice_priv.db", "shared")
+	// dev_alice creates a private connection inside local_databases (even if requesting shared, non-admin gets private)
+	privConnID := createConn(devTok, "Alice Scratch DB", filepath.Join("local_databases", "alice_priv.db"), "shared")
 	// auditor_bob cannot create connections and cannot see Alice's private connection
 	if w := doJSON(http.MethodPost, "/api/connections", auditTok, map[string]any{
 		"name": "Illegal Conn", "type": "sqlite", "filePath": filepath.Join(tmpDir, "illegal.db"),
@@ -337,13 +337,16 @@ func TestRBACMultiUserIsolationAndOperations(t *testing.T) {
 		t.Fatalf("expected 403 when non-admin opens SQLite file outside DataDir, got %d", w.Code)
 	}
 
-	// Non-admin browsing default DataDir succeeds and never exposes dbharbor.db
-	wDevBrowse := doJSON(http.MethodGet, "/api/fs/browse?path="+url.QueryEscape(tmpDir)+"&all=1", devTok, nil)
-	if wDevBrowse.Code != http.StatusOK {
-		t.Fatalf("expected 200 when dev_alice browses DataDir, got %d: %s", wDevBrowse.Code, wDevBrowse.Body.String())
+	// Non-admin browsing DataDir root is strictly blocked in v1.0.1+; browsing local_databases succeeds and never exposes internal files
+	if wRoot := doJSON(http.MethodGet, "/api/fs/browse?path="+url.QueryEscape(tmpDir)+"&all=1", devTok, nil); wRoot.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when non-admin browses DataDir root outside local_databases, got %d: %s", wRoot.Code, wRoot.Body.String())
 	}
-	if bytes.Contains(wDevBrowse.Body.Bytes(), []byte("dbharbor.db")) {
-		t.Fatalf("expected dbharbor.db to be hidden in /api/fs/browse response: %s", wDevBrowse.Body.String())
+	wDevBrowse := doJSON(http.MethodGet, "/api/fs/browse?path="+url.QueryEscape(filepath.Join(tmpDir, "local_databases"))+"&all=1", devTok, nil)
+	if wDevBrowse.Code != http.StatusOK {
+		t.Fatalf("expected 200 when dev_alice browses local_databases, got %d: %s", wDevBrowse.Code, wDevBrowse.Body.String())
+	}
+	if bytes.Contains(wDevBrowse.Body.Bytes(), []byte("dbharbor.db")) || bytes.Contains(wDevBrowse.Body.Bytes(), []byte("config.json")) {
+		t.Fatalf("expected internal files to be hidden in /api/fs/browse response: %s", wDevBrowse.Body.String())
 	}
 
 	// 8. Immediate Disabled-User Rejection without waiting for JWT expiry

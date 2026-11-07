@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -143,6 +144,24 @@ type SavedSnippet struct {
 	CreatedAt    string `json:"createdAt"`
 }
 
+type LoginBrandingConfig struct {
+	PageTitle         string `json:"pageTitle"`
+	IconMode          string `json:"iconMode"`          // "shield" | "database" | "brand" | "custom" | "none"
+	CustomIconDataURL string `json:"customIconDataUrl"` // validated data:image/(png|jpeg|webp|gif|svg+xml);base64,...
+	Heading           string `json:"heading"`
+	Subtitle          string `json:"subtitle"`
+}
+
+func DefaultLoginBranding() LoginBrandingConfig {
+	return LoginBrandingConfig{
+		PageTitle:         "",
+		IconMode:          "shield",
+		CustomIconDataURL: "",
+		Heading:           "",
+		Subtitle:          "",
+	}
+}
+
 type Store struct {
 	dataDir     string
 	db          *sql.DB
@@ -150,6 +169,12 @@ type Store struct {
 	dummyHash   []byte
 	histCounter atomic.Uint64
 	auditCnt    atomic.Uint64
+
+	setupMu     sync.Mutex
+	initialized atomic.Bool
+
+	brandingMu sync.RWMutex
+	branding   LoginBrandingConfig
 
 	sessMu         sync.RWMutex
 	activeSessions map[string]int64 // sessionID -> expiresAt unix
@@ -166,7 +191,7 @@ func (s *Store) DataDir() string {
 }
 
 func Open(dataDir string, vault *crypto.Vault, adminUser, adminPass string) (*Store, error) {
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, err
 	}
 	dbPath := filepath.Join(dataDir, "dbharbor.db")
@@ -184,6 +209,7 @@ func Open(dataDir string, vault *crypto.Vault, adminUser, adminPass string) (*St
 		db:             db,
 		vault:          vault,
 		dummyHash:      dummy,
+		branding:       DefaultLoginBranding(),
 		activeSessions: make(map[string]int64),
 		principals:     make(map[string]UserPrincipal),
 		stopCh:         make(chan struct{}),
@@ -192,10 +218,14 @@ func Open(dataDir string, vault *crypto.Vault, adminUser, adminPass string) (*St
 		_ = db.Close()
 		return nil, err
 	}
+	_ = os.Chmod(dbPath, 0o600)
+	_ = os.Chmod(dbPath+"-wal", 0o600)
+	_ = os.Chmod(dbPath+"-shm", 0o600)
 	if err := s.ensureAdmin(adminUser, adminPass); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
+	s.hydrateLoginBranding()
 	s.hydrateUserPrincipals()
 	s.hydrateActiveSessions()
 	_ = s.ensureSampleConnection(dataDir)
@@ -220,6 +250,7 @@ func OpenLocal(dataDir string, vault *crypto.Vault) (*Store, error) {
 		dataDir:        dataDir,
 		db:             db,
 		vault:          vault,
+		branding:       DefaultLoginBranding(),
 		activeSessions: make(map[string]int64),
 		principals:     make(map[string]UserPrincipal),
 		stopCh:         make(chan struct{}),
@@ -228,6 +259,8 @@ func OpenLocal(dataDir string, vault *crypto.Vault) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	s.initialized.Store(true)
+	s.hydrateLoginBranding()
 	_ = s.ensureSampleConnection(dataDir)
 	go s.maintenanceLoop()
 	return s, nil
@@ -242,126 +275,120 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-func (s *Store) migrate() error {
-	ddl := `
-CREATE TABLE IF NOT EXISTS users (
-	id TEXT PRIMARY KEY,
-	username TEXT NOT NULL UNIQUE,
-	display_name TEXT NOT NULL DEFAULT '',
-	password_hash TEXT NOT NULL,
-	role TEXT NOT NULL DEFAULT 'admin',
-	disabled INTEGER NOT NULL DEFAULT 0,
-	can_create_conn INTEGER NOT NULL DEFAULT 1,
-	conn_scope TEXT NOT NULL DEFAULT 'all',
-	totp_enabled INTEGER NOT NULL DEFAULT 0,
-	totp_secret_enc TEXT NOT NULL DEFAULT '',
-	totp_pending_enc TEXT NOT NULL DEFAULT '',
-	recovery_hashes_json TEXT NOT NULL DEFAULT '[]',
-	last_totp_step INTEGER NOT NULL DEFAULT 0,
-	password_changed INTEGER NOT NULL DEFAULT 0,
-	created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS auth_sessions (
-	id TEXT PRIMARY KEY,
-	user_id TEXT NOT NULL,
-	ip TEXT NOT NULL DEFAULT '',
-	user_agent TEXT NOT NULL DEFAULT '',
-	created_at TEXT NOT NULL,
-	last_seen_at TEXT NOT NULL,
-	expires_at INTEGER NOT NULL,
-	revoked INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_sessions_user ON auth_sessions(user_id, revoked);
-
-CREATE TABLE IF NOT EXISTS security_audit_logs (
-	id TEXT PRIMARY KEY,
-	event TEXT NOT NULL,
-	username TEXT NOT NULL DEFAULT '',
-	ip TEXT NOT NULL DEFAULT '',
-	user_agent TEXT NOT NULL DEFAULT '',
-	detail TEXT NOT NULL DEFAULT '',
-	created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_audit_created ON security_audit_logs(created_at DESC);
-
-CREATE TABLE IF NOT EXISTS connections (
-	id TEXT PRIMARY KEY,
-	name TEXT NOT NULL,
-	type TEXT NOT NULL,
-	color TEXT NOT NULL DEFAULT '#1677ff',
-	host TEXT NOT NULL DEFAULT '',
-	port INTEGER NOT NULL DEFAULT 0,
-	username TEXT NOT NULL DEFAULT '',
-	password_enc TEXT NOT NULL DEFAULT '',
-	database_name TEXT NOT NULL DEFAULT '',
-	file_path TEXT NOT NULL DEFAULT '',
-	uri_enc TEXT NOT NULL DEFAULT '',
-	options_json TEXT NOT NULL DEFAULT '{}',
-	owner_id TEXT NOT NULL DEFAULT '',
-	visibility TEXT NOT NULL DEFAULT 'shared',
-	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS query_history (
-	id TEXT PRIMARY KEY,
-	user_id TEXT NOT NULL DEFAULT '',
-	connection_id TEXT NOT NULL,
-	conn_name TEXT NOT NULL DEFAULT '',
-	db_type TEXT NOT NULL DEFAULT '',
-	database_name TEXT NOT NULL DEFAULT '',
-	query_text TEXT NOT NULL,
-	elapsed_ms INTEGER NOT NULL DEFAULT 0,
-	status TEXT NOT NULL DEFAULT 'ok',
-	error_msg TEXT NOT NULL DEFAULT '',
-	created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_history_conn_created ON query_history(connection_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_history_created ON query_history(created_at DESC);
-
-CREATE TABLE IF NOT EXISTS saved_snippets (
-	id TEXT PRIMARY KEY,
-	title TEXT NOT NULL,
-	db_type TEXT NOT NULL DEFAULT '',
-	connection_id TEXT NOT NULL DEFAULT '',
-	database_name TEXT NOT NULL DEFAULT '',
-	sql_text TEXT NOT NULL,
-	owner_id TEXT NOT NULL DEFAULT '',
-	owner_name TEXT NOT NULL DEFAULT '',
-	is_shared INTEGER NOT NULL DEFAULT 1,
-	created_at TEXT NOT NULL
-);
-`
-	if _, err := s.db.Exec(ddl); err != nil {
-		return err
+func NormalizeAndValidateLoginBranding(in LoginBrandingConfig) (LoginBrandingConfig, error) {
+	out := LoginBrandingConfig{
+		PageTitle:         strings.TrimSpace(in.PageTitle),
+		IconMode:          strings.ToLower(strings.TrimSpace(in.IconMode)),
+		CustomIconDataURL: strings.TrimSpace(in.CustomIconDataURL),
+		Heading:           strings.TrimSpace(in.Heading),
+		Subtitle:          strings.TrimSpace(in.Subtitle),
+	}
+	if utf8.RuneCountInString(out.PageTitle) > 80 {
+		return LoginBrandingConfig{}, errors.New("browser page title must be at most 80 characters")
+	}
+	if utf8.RuneCountInString(out.Heading) > 80 {
+		return LoginBrandingConfig{}, errors.New("login heading must be at most 80 characters")
+	}
+	if utf8.RuneCountInString(out.Subtitle) > 160 {
+		return LoginBrandingConfig{}, errors.New("login subtitle must be at most 160 characters")
+	}
+	switch out.IconMode {
+	case "", "shield":
+		out.IconMode = "shield"
+	case "database", "brand", "custom", "none":
+	default:
+		return LoginBrandingConfig{}, errors.New("invalid login icon mode")
 	}
 
-	// Safe forward migrations for existing databases created prior to 2FA & RBAC upgrades
-	alterCols := []string{
-		`ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE users ADD COLUMN totp_secret_enc TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE users ADD COLUMN totp_pending_enc TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE users ADD COLUMN recovery_hashes_json TEXT NOT NULL DEFAULT '[]'`,
-		`ALTER TABLE users ADD COLUMN last_totp_step INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE users ADD COLUMN password_changed INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'`,
-		`ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE users ADD COLUMN can_create_conn INTEGER NOT NULL DEFAULT 1`,
-		`ALTER TABLE users ADD COLUMN conn_scope TEXT NOT NULL DEFAULT 'all'`,
-		`ALTER TABLE connections ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE connections ADD COLUMN visibility TEXT NOT NULL DEFAULT 'shared'`,
-		`ALTER TABLE query_history ADD COLUMN user_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE saved_snippets ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE saved_snippets ADD COLUMN owner_name TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE saved_snippets ADD COLUMN is_shared INTEGER NOT NULL DEFAULT 1`,
-		`CREATE INDEX IF NOT EXISTS idx_history_user_created ON query_history(user_id, created_at DESC)`,
+	if out.CustomIconDataURL != "" {
+		if len(out.CustomIconDataURL) > 200_000 {
+			return LoginBrandingConfig{}, errors.New("custom icon image exceeds maximum size (128 KB)")
+		}
+		lower := strings.ToLower(out.CustomIconDataURL)
+		allowedPrefixes := []string{
+			"data:image/png;base64,",
+			"data:image/jpeg;base64,",
+			"data:image/jpg;base64,",
+			"data:image/webp;base64,",
+			"data:image/gif;base64,",
+			"data:image/svg+xml;base64,",
+			"data:image/x-icon;base64,",
+		}
+		matchedPrefix := ""
+		for _, pfx := range allowedPrefixes {
+			if strings.HasPrefix(lower, pfx) {
+				matchedPrefix = pfx
+				break
+			}
+		}
+		if matchedPrefix == "" {
+			return LoginBrandingConfig{}, errors.New("custom icon must be a valid PNG, JPEG, WebP, GIF, ICO, or SVG image")
+		}
+		rawB64 := out.CustomIconDataURL[len(matchedPrefix):]
+		decoded, err := base64.StdEncoding.DecodeString(rawB64)
+		if err != nil || len(decoded) == 0 {
+			return LoginBrandingConfig{}, errors.New("invalid base64 image payload for custom icon")
+		}
+		if strings.Contains(matchedPrefix, "svg+xml") {
+			svgLower := strings.ToLower(string(decoded))
+			if strings.Contains(svgLower, "<script") ||
+				strings.Contains(svgLower, "javascript:") ||
+				strings.Contains(svgLower, "onload=") ||
+				strings.Contains(svgLower, "onerror=") ||
+				strings.Contains(svgLower, "<foreignobject") {
+				return LoginBrandingConfig{}, errors.New("SVG custom icon contains disallowed active script elements")
+			}
+		}
+	} else if out.IconMode == "custom" {
+		return LoginBrandingConfig{}, errors.New("please upload a custom icon image or select another icon style")
 	}
-	for _, stmt := range alterCols {
-		_, _ = s.db.Exec(stmt)
+
+	return out, nil
+}
+
+func (s *Store) hydrateLoginBranding() {
+	var raw string
+	err := s.db.QueryRow(`SELECT value FROM system_settings WHERE key = 'login_branding'`).Scan(&raw)
+	if err != nil || strings.TrimSpace(raw) == "" {
+		return
 	}
-	return nil
+	var parsed LoginBrandingConfig
+	if json.Unmarshal([]byte(raw), &parsed) == nil {
+		if valid, vErr := NormalizeAndValidateLoginBranding(parsed); vErr == nil {
+			s.brandingMu.Lock()
+			s.branding = valid
+			s.brandingMu.Unlock()
+		}
+	}
+}
+
+func (s *Store) GetLoginBranding() LoginBrandingConfig {
+	s.brandingMu.RLock()
+	defer s.brandingMu.RUnlock()
+	return s.branding
+}
+
+func (s *Store) SaveLoginBranding(in LoginBrandingConfig) (LoginBrandingConfig, error) {
+	clean, err := NormalizeAndValidateLoginBranding(in)
+	if err != nil {
+		return LoginBrandingConfig{}, err
+	}
+	encoded, err := json.Marshal(clean)
+	if err != nil {
+		return LoginBrandingConfig{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := s.db.Exec(
+		`INSERT INTO system_settings (key, value, updated_at) VALUES ('login_branding', ?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		string(encoded), now,
+	); err != nil {
+		return LoginBrandingConfig{}, err
+	}
+	s.brandingMu.Lock()
+	s.branding = clean
+	s.brandingMu.Unlock()
+	return clean, nil
 }
 
 func (s *Store) hydrateActiveSessions() {
@@ -389,43 +416,67 @@ func (s *Store) ensureAdmin(username, password string) error {
 		return err
 	}
 	if count > 0 {
+		s.initialized.Store(true)
 		return nil
 	}
 	username = strings.TrimSpace(username)
+	password = strings.TrimSpace(password)
+
+	// No CLI/env bootstrap credentials supplied: defer administrator creation to Web Initial Setup
+	if username == "" && password == "" {
+		s.initialized.Store(false)
+		return nil
+	}
+	if password == "" {
+		return errors.New("initial admin password (-admin-pass or DBHARBOR_ADMIN_PASS) is required when admin username is specified")
+	}
 	if username == "" {
 		username = "admin"
 	}
 	if !validUsernameRe.MatchString(username) {
 		return errors.New("admin username must be 2-64 characters using letters, numbers, '.', '_', '-', or '@'")
 	}
-	if password != "" && password != "admin123" && len(password) < 6 {
-		return errors.New("initial admin password must be at least 6 characters")
-	}
-	isCustomPass := password != "" && password != "admin123"
-	if password == "" {
-		password = "admin123"
+	if len(password) < 8 {
+		return errors.New("initial admin password must be at least 8 characters")
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return err
 	}
-	pwdChangedInt := 0
-	if isCustomPass {
-		pwdChangedInt = 1
+	pwdChangedInt := 1
+	if password == "admin123" {
+		pwdChangedInt = 0
 	}
 	_, err = s.db.Exec(
 		`INSERT INTO users (id, username, display_name, password_hash, role, disabled, can_create_conn, conn_scope, password_changed, created_at) VALUES (?, ?, ?, ?, ?, 0, 1, 'all', ?, ?)`,
-		crypto.NewUUID(), username, "Administrator", string(hash), RoleAdmin, pwdChangedInt, time.Now().UTC().Format(time.RFC3339),
+		crypto.NewUUID(), username, "", string(hash), RoleAdmin, pwdChangedInt, time.Now().UTC().Format(time.RFC3339),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	s.initialized.Store(true)
+	return nil
 }
 
 func (s *Store) ensureSampleConnection(dataDir string) error {
+	localDBDir := filepath.Join(dataDir, "local_databases")
+	_ = os.MkdirAll(localDBDir, 0o755)
+	samplePath := filepath.Join(localDBDir, "sample_playground.sqlite")
+	legacySamplePath := filepath.Join(dataDir, "sample_playground.sqlite")
+
+	// Migrate legacy sample_playground.sqlite out of dataDir root into local_databases/
+	if _, err := os.Stat(legacySamplePath); err == nil {
+		if _, destErr := os.Stat(samplePath); os.IsNotExist(destErr) {
+			if renErr := os.Rename(legacySamplePath, samplePath); renErr == nil {
+				_, _ = s.db.Exec(`UPDATE connections SET file_path = ? WHERE file_path = ?`, samplePath, legacySamplePath)
+			}
+		}
+	}
+
 	var count int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM connections`).Scan(&count); err != nil || count > 0 {
 		return err
 	}
-	samplePath := filepath.Join(dataDir, "sample_playground.sqlite")
 	sampleDSN := filepath.ToSlash(samplePath)
 	sdb, err := sql.Open("sqlite", sampleDSN)
 	if err != nil {
@@ -837,8 +888,10 @@ func (s *Store) AddAuditLog(event, username, ip, userAgent, detail string) {
 
 	if s.auditCnt.Add(1)%64 == 0 {
 		_, _ = s.db.Exec(`
-			DELETE FROM security_audit_logs WHERE id NOT IN (
-				SELECT id FROM security_audit_logs ORDER BY created_at DESC LIMIT 5000
+			DELETE FROM security_audit_logs
+			WHERE created_at < COALESCE(
+				(SELECT created_at FROM security_audit_logs ORDER BY created_at DESC LIMIT 1 OFFSET 5000),
+				''
 			)
 		`)
 	}
@@ -1092,14 +1145,18 @@ func (s *Store) AddHistory(h HistoryEntry) {
 	if s.histCounter.Add(1)%64 == 0 {
 		if h.UserID != "" {
 			_, _ = s.db.Exec(`
-				DELETE FROM query_history WHERE user_id = ? AND id NOT IN (
-					SELECT id FROM query_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 2000
+				DELETE FROM query_history
+				WHERE user_id = ? AND created_at < COALESCE(
+					(SELECT created_at FROM query_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 1 OFFSET 2000),
+					''
 				)
 			`, h.UserID, h.UserID)
 		}
 		_, _ = s.db.Exec(`
-			DELETE FROM query_history WHERE id NOT IN (
-				SELECT id FROM query_history ORDER BY created_at DESC LIMIT 10000
+			DELETE FROM query_history
+			WHERE created_at < COALESCE(
+				(SELECT created_at FROM query_history ORDER BY created_at DESC LIMIT 1 OFFSET 10000),
+				''
 			)
 		`)
 	}

@@ -16,6 +16,8 @@ export const LanguageSwitcher: React.FC<Props> = ({ size = 'small', shape = 'def
 
   return (
     <Dropdown
+      trigger={['click']}
+      placement="bottomRight"
       menu={{
         selectedKeys: [locale],
         items: LOCALE_OPTIONS.map((opt) => ({
