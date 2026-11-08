@@ -1201,7 +1201,7 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
           }
         }}
       >
-        <Form form={itemForm} layout="vertical">
+        <Form form={itemForm} layout="vertical" autoComplete="off">
           {detail?.type === 'hash' && (
             <Form.Item name="field" label={t('Field')} rules={[{ required: true }]}>
               <Input disabled={Boolean(editingItem)} />

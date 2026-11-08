@@ -490,6 +490,7 @@ export const LoginPage: React.FC = () => {
                   <Input
                     size="large"
                     maxLength={64}
+                    autoComplete="off"
                     placeholder={t('Optional display name')}
                     style={inputHeightStyle}
                   />
@@ -625,6 +626,7 @@ export const LoginPage: React.FC = () => {
 
                           <Input
                             maxLength={80}
+                            autoComplete="off"
                             placeholder={t('Browser Tab Title (default: Sign In)')}
                             value={setupBranding.pageTitle}
                             onChange={(e) =>
@@ -633,6 +635,7 @@ export const LoginPage: React.FC = () => {
                           />
                           <Input
                             maxLength={80}
+                            autoComplete="off"
                             placeholder={t('Heading Below Icon (default: Sign In)')}
                             value={setupBranding.heading}
                             onChange={(e) =>
@@ -641,6 +644,7 @@ export const LoginPage: React.FC = () => {
                           />
                           <Input
                             maxLength={160}
+                            autoComplete="off"
                             placeholder={t('Optional subtitle below heading')}
                             value={setupBranding.subtitle}
                             onChange={(e) =>
@@ -726,6 +730,7 @@ export const LoginPage: React.FC = () => {
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                       <Input
                         size="large"
+                        autoComplete="off"
                         prefix={<SafetyCertificateOutlined style={{ opacity: 0.65 }} />}
                         placeholder={t('Enter code')}
                         maxLength={8}

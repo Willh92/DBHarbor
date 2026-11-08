@@ -1941,7 +1941,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
           </Space>
         }
       >
-        <Form form={colForm} layout="vertical">
+        <Form form={colForm} layout="vertical" autoComplete="off">
           <Row gutter={12}>
             <Col xs={24} sm={12}>
               <Form.Item name="name" label={t('Column Name')} rules={[{ required: true, message: t('Required') }]}>
@@ -2061,7 +2061,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
         }}
         onOk={() => void handleAddIndex()}
       >
-        <Form form={idxForm} layout="vertical">
+        <Form form={idxForm} layout="vertical" autoComplete="off">
           <Form.Item name="name" label={t('Index Name (leave blank to auto-generate)')}>
             <Input placeholder={t('e.g. idx_orders_created_at')} />
           </Form.Item>
@@ -2099,7 +2099,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
           </Space>
         }
       >
-        <Form form={skipIdxForm} layout="vertical">
+        <Form form={skipIdxForm} layout="vertical" autoComplete="off">
           <Row gutter={12}>
             <Col xs={24} sm={12}>
               <Form.Item name="name" label={t('Index Name')} rules={[{ required: true, message: t('Required') }]}>
@@ -2163,7 +2163,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
           </Space>
         }
       >
-        <Form form={checkForm} layout="vertical">
+        <Form form={checkForm} layout="vertical" autoComplete="off">
           <Form.Item name="name" label={t('Constraint Name (leave blank to auto-generate)')}>
             <Input placeholder={`chk_${tab.table}_amount`} />
           </Form.Item>
@@ -2209,7 +2209,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
           </Space>
         }
       >
-        <Form form={projForm} layout="vertical">
+        <Form form={projForm} layout="vertical" autoComplete="off">
           <Form.Item name="name" label={t('Projection Name')} rules={[{ required: true, message: t('Required') }]}>
             <Input placeholder="proj_by_user" />
           </Form.Item>
@@ -2252,7 +2252,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
           </Space>
         }
       >
-        <Form form={partForm} layout="vertical">
+        <Form form={partForm} layout="vertical" autoComplete="off">
           <Form.Item name="partitionId" label={t('Partition Name')} rules={[{ required: true, message: t('Required') }]}>
             <Input placeholder="p2027" />
           </Form.Item>
@@ -2285,7 +2285,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
         onCancel={() => setFkModalOpen(false)}
         onOk={() => void handleAddForeignKey()}
       >
-        <Form form={fkForm} layout="vertical">
+        <Form form={fkForm} layout="vertical" autoComplete="off">
           <Form.Item name="name" label={t('Constraint Name (leave blank to auto-generate)')}>
             <Input placeholder={`e.g. fk_${tab.table}_user_id`} />
           </Form.Item>

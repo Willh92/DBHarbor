@@ -2779,7 +2779,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
         onOk={handleApplyBatchEdit}
         okText={t('Apply to Selected Rows')}
       >
-        <Form layout="vertical">
+        <Form layout="vertical" autoComplete="off">
           <Form.Item label={t('Target Column')} style={{ marginBottom: 12 }}>
             <Select
               showSearch
@@ -2861,7 +2861,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
         okText={t('Insert Row')}
         confirmLoading={saving}
       >
-        <Form form={insertForm} layout="vertical">
+        <Form form={insertForm} layout="vertical" autoComplete="off">
           {visibleColumns.map((col) => (
             <Form.Item
               key={col.name}

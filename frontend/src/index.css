@@ -17,11 +17,115 @@ body,
 html[data-theme='dark'] {
   color-scheme: dark;
   background: #0d1017;
+  --dbharbor-autofill-bg: #141414;
+  --dbharbor-autofill-fg: rgba(255, 255, 255, 0.85);
+  --dbharbor-autofill-disabled-bg: #262626;
+  --dbharbor-autofill-disabled-fg: rgba(255, 255, 255, 0.25);
+  --dbharbor-autofill-focus-ring: rgba(22, 119, 255, 0.2);
+  --dbharbor-autofill-error-ring: rgba(255, 38, 5, 0.12);
 }
 
+:root,
 html[data-theme='light'] {
   color-scheme: light;
   background: #ffffff;
+  --dbharbor-autofill-bg: #ffffff;
+  --dbharbor-autofill-fg: rgba(0, 0, 0, 0.88);
+  --dbharbor-autofill-disabled-bg: #f5f5f5;
+  --dbharbor-autofill-disabled-fg: rgba(0, 0, 0, 0.25);
+  --dbharbor-autofill-focus-ring: rgba(5, 145, 255, 0.1);
+  --dbharbor-autofill-error-ring: rgba(255, 38, 5, 0.06);
+}
+
+/* Eliminate browser autofill pale-blue/yellow rectangle & text-color residue across Light & Dark themes */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active,
+textarea:-webkit-autofill,
+textarea:-webkit-autofill:hover,
+textarea:-webkit-autofill:focus,
+textarea:-webkit-autofill:active,
+select:-webkit-autofill,
+select:-webkit-autofill:hover,
+select:-webkit-autofill:focus,
+select:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 1000px var(--dbharbor-autofill-bg) inset !important;
+  box-shadow: 0 0 0 1000px var(--dbharbor-autofill-bg) inset !important;
+  -webkit-text-fill-color: var(--dbharbor-autofill-fg) !important;
+  color: var(--dbharbor-autofill-fg) !important;
+  caret-color: var(--dbharbor-autofill-fg) !important;
+  background-clip: padding-box !important;
+  font-family: inherit !important;
+  font-size: inherit !important;
+  transition: background-color 600000s ease-in-out 0s, color 600000s ease-in-out 0s !important;
+}
+
+.ant-input-affix-wrapper input.ant-input:-webkit-autofill,
+.ant-input-affix-wrapper input.ant-input:-webkit-autofill:hover,
+.ant-input-affix-wrapper input.ant-input:-webkit-autofill:focus,
+.ant-input-affix-wrapper input.ant-input:-webkit-autofill:active {
+  border-radius: 4px;
+  -webkit-box-shadow: 0 0 0 1000px var(--dbharbor-autofill-bg) inset !important;
+  box-shadow: 0 0 0 1000px var(--dbharbor-autofill-bg) inset !important;
+}
+
+input.ant-input-outlined:not(.ant-input-status-error):-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 2px var(--dbharbor-autofill-focus-ring), 0 0 0 1000px var(--dbharbor-autofill-bg) inset !important;
+  box-shadow: 0 0 0 2px var(--dbharbor-autofill-focus-ring), 0 0 0 1000px var(--dbharbor-autofill-bg) inset !important;
+}
+
+input.ant-input-outlined.ant-input-status-error:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 2px var(--dbharbor-autofill-error-ring), 0 0 0 1000px var(--dbharbor-autofill-bg) inset !important;
+  box-shadow: 0 0 0 2px var(--dbharbor-autofill-error-ring), 0 0 0 1000px var(--dbharbor-autofill-bg) inset !important;
+}
+
+input:disabled:-webkit-autofill,
+.ant-input-disabled:-webkit-autofill,
+.ant-input-affix-wrapper-disabled input:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 1000px var(--dbharbor-autofill-disabled-bg) inset !important;
+  box-shadow: 0 0 0 1000px var(--dbharbor-autofill-disabled-bg) inset !important;
+  -webkit-text-fill-color: var(--dbharbor-autofill-disabled-fg) !important;
+  color: var(--dbharbor-autofill-disabled-fg) !important;
+}
+
+input:-internal-autofill-previewed,
+input:-internal-autofill-selected {
+  -webkit-box-shadow: 0 0 0 1000px var(--dbharbor-autofill-bg) inset !important;
+  box-shadow: 0 0 0 1000px var(--dbharbor-autofill-bg) inset !important;
+  -webkit-text-fill-color: var(--dbharbor-autofill-fg) !important;
+  color: var(--dbharbor-autofill-fg) !important;
+  font-family: inherit !important;
+  font-size: inherit !important;
+}
+
+input:autofill,
+input:autofill:hover,
+input:autofill:focus,
+input:autofill:active,
+textarea:autofill,
+select:autofill {
+  box-shadow: 0 0 0 1000px var(--dbharbor-autofill-bg) inset !important;
+  -webkit-text-fill-color: var(--dbharbor-autofill-fg) !important;
+  color: var(--dbharbor-autofill-fg) !important;
+  caret-color: var(--dbharbor-autofill-fg) !important;
+  filter: none !important;
+}
+
+/* Hide duplicate native password-reveal eye & clear buttons on Windows Edge / WebView2 and search inputs */
+input::-ms-reveal,
+input::-ms-clear {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+
+input[type='search']::-webkit-search-decoration,
+input[type='search']::-webkit-search-cancel-button,
+input[type='search']::-webkit-search-results-button,
+input[type='search']::-webkit-search-results-decoration {
+  -webkit-appearance: none;
+  display: none;
 }
 
 .sidebar-item-row:hover {

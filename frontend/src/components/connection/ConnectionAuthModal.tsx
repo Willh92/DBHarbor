@@ -207,6 +207,7 @@ export const ConnectionAuthModal: React.FC = () => {
       <Form
         form={form}
         layout="vertical"
+        autoComplete="off"
         onFinish={handleUnlock}
         onValuesChange={(changed) => {
           if ('rememberPassword' in changed) {
@@ -232,7 +233,7 @@ export const ConnectionAuthModal: React.FC = () => {
 
         {conn?.type === 'mongodb' && conn.hasUri && canEdit && (
           <Form.Item name="uri" label={t('Connection URI (Optional Override)')} style={{ marginBottom: 12 }}>
-            <Input.Password placeholder="mongodb://user:pass@host:27017/admin" autoComplete="off" />
+            <Input.Password placeholder="mongodb://user:pass@host:27017/admin" autoComplete="new-password" />
           </Form.Item>
         )}
 

@@ -1202,7 +1202,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
         confirmLoading={cloneSaving}
         okText={t('Execute Now')}
       >
-        <Form form={cloneForm} layout="vertical">
+        <Form form={cloneForm} layout="vertical" autoComplete="off">
           <Form.Item name="mode" label={t('Operation')} rules={[{ required: true }]}>
             <Radio.Group
               className="dbharbor-pill-radios"

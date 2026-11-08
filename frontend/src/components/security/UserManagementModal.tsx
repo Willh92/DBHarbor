@@ -249,6 +249,7 @@ export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
         >
           <Input
             allowClear
+            autoComplete="off"
             prefix={<SearchOutlined />}
             placeholder={t('Filter users by username, display name, or role...')}
             value={keyword}
@@ -465,7 +466,7 @@ export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
         okText={editingUser ? t('Save Changes') : t('Create User')}
         destroyOnClose
       >
-        <Form form={userForm} layout="vertical">
+        <Form form={userForm} layout="vertical" autoComplete="off">
           {!editingUser && (
             <Form.Item
               name="username"
@@ -483,7 +484,7 @@ export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
           )}
 
           <Form.Item name="displayName" label={t('Display Name')}>
-            <Input placeholder={t('Optional friendly name, e.g. Alice Chen')} maxLength={64} />
+            <Input placeholder={t('Optional friendly name, e.g. Alice Chen')} maxLength={64} autoComplete="off" />
           </Form.Item>
 
           {!editingUser && (
@@ -585,7 +586,7 @@ export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
         okText={t('Reset Password')}
         destroyOnClose
       >
-        <Form form={resetForm} layout="vertical" initialValues={{ forcePasswordChange: true }}>
+        <Form form={resetForm} layout="vertical" autoComplete="off" initialValues={{ forcePasswordChange: true }}>
           <Form.Item
             name="newPassword"
             label={t('New Temporary Password')}

@@ -366,7 +366,7 @@ export const CreateTableModal: React.FC<Props> = ({
         </div>
       )}
 
-      <Form layout="vertical">
+      <Form layout="vertical" autoComplete="off">
         <Row gutter={12}>
           <Col xs={24} sm={8}>
             <Form.Item label={t('Table Name')} required>

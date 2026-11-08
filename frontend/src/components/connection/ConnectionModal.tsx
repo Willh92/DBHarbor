@@ -478,11 +478,11 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
         />
       )}
 
-      <Form form={form} layout="vertical">
+      <Form form={form} layout="vertical" autoComplete="off">
         <Row gutter={12}>
           <Col xs={24} sm={!isDesktop && role === 'admin' ? 9 : 14}>
             <Form.Item name="name" label={t('Connection Name')} rules={[{ required: true }]}>
-              <Input placeholder="Production ClickHouse / Orders MySQL" />
+              <Input placeholder="Production ClickHouse / Orders MySQL" autoComplete="off" />
             </Form.Item>
           </Col>
           {!isDesktop && role === 'admin' && (
@@ -585,7 +585,7 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
                         noStyle
                         rules={field.required ? [{ required: true }] : undefined}
                       >
-                        <Input placeholder={field.placeholder} />
+                        <Input placeholder={field.placeholder} autoComplete="off" />
                       </Form.Item>
                       <Button
                         icon={<FolderOpenOutlined />}
@@ -611,6 +611,7 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
                     <InputNumber style={{ width: '100%' }} placeholder={field.placeholder} />
                   ) : field.type === 'password' ? (
                     <Input.Password
+                      autoComplete="new-password"
                       placeholder={
                         hasReusableSecret &&
                         editing &&
@@ -629,7 +630,7 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
                   ) : field.type === 'select' ? (
                     <Select options={field.selectOptions?.map((o) => ({ ...o, label: t(o.label) }))} />
                   ) : (
-                    <Input placeholder={field.placeholder} />
+                    <Input placeholder={field.placeholder} autoComplete="off" />
                   )}
                 </Form.Item>
               </Col>
@@ -713,6 +714,7 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
                 title={t('Parent Folder')}
               />
               <Input
+                autoComplete="off"
                 value={fsDirInput}
                 onChange={(e) => setFsDirInput(e.target.value)}
                 onPressEnter={() => loadFSDir(fsDirInput, fsShowAll)}
@@ -810,6 +812,7 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
                 <Input
                   size="small"
+                  autoComplete="off"
                   style={{ width: '100%' }}
                   value={newDbFileName}
                   onChange={(e) => setNewDbFileName(e.target.value)}
@@ -834,6 +837,7 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
               <Space.Compact style={{ flex: 1, minWidth: 220 }}>
                 <Input
                   size="small"
+                  autoComplete="off"
                   value={newDbFileName}
                   onChange={(e) => setNewDbFileName(e.target.value)}
                   placeholder={selectedType === 'duckdb' ? 'analytics.duckdb' : 'app.sqlite'}

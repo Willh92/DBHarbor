@@ -722,7 +722,7 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
         confirmLoading={creating}
         okText={t('Create Now')}
       >
-        <Form form={createForm} layout="vertical" onValuesChange={updateCreatePreview}>
+        <Form form={createForm} layout="vertical" autoComplete="off" onValuesChange={updateCreatePreview}>
           <div style={{ display: 'grid', gridTemplateColumns: !isMobile && caps?.supportsHost ? '2fr 1fr' : '1fr', gap: 12 }}>
             <Form.Item
               name="username"
@@ -733,7 +733,7 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
             </Form.Item>
             {caps?.supportsHost && (
               <Form.Item name="host" label={t('Allowed Host')}>
-                <Input placeholder="% or 10.0.%" />
+                <Input placeholder="% or 10.0.%" autoComplete="off" />
               </Form.Item>
             )}
           </div>

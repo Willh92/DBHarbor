@@ -245,7 +245,7 @@ export const ImportExportModal: React.FC<Props> = ({
             key: 'export',
             label: t('Stream Export / Dump'),
             children: (
-              <Form layout="vertical">
+              <Form layout="vertical" autoComplete="off">
                 <Alert
                   type="info"
                   showIcon
@@ -331,7 +331,7 @@ export const ImportExportModal: React.FC<Props> = ({
             key: 'import',
             label: t('Import File'),
             children: (
-              <Form layout="vertical">
+              <Form layout="vertical" autoComplete="off">
                 <Form.Item label={t('Import File Format')} style={{ marginBottom: 12 }}>
                   <Radio.Group
                     className="dbharbor-pill-radios"
@@ -406,7 +406,7 @@ export const ImportExportModal: React.FC<Props> = ({
             key: 'sql_exec',
             label: t('Execute SQL Script'),
             children: (
-              <Form layout="vertical">
+              <Form layout="vertical" autoComplete="off">
                 <Alert
                   type="info"
                   showIcon

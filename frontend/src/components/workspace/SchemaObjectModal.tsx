@@ -1201,7 +1201,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
 
   const renderFormFields = () => {
     return (
-      <Form layout="vertical" size="small">
+      <Form layout="vertical" size="small" autoComplete="off">
         {mode === 'create' && creatableTypes.length > 1 && (
           <Form.Item label={t('Object Category')} style={{ marginBottom: 10 }}>
             <Select
@@ -1599,6 +1599,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
             <Col xs={24} sm={12}>
               <Form.Item label={t('Remote Host / Connect String')} required style={{ marginBottom: 10 }}>
                 <Input
+                  autoComplete="off"
                   value={dbLinkHost}
                   onChange={(e) => setDbLinkHost(e.target.value)}
                   placeholder="10.0.0.10:1521/ORCL"
@@ -1607,12 +1608,21 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
             </Col>
             <Col xs={12} sm={6}>
               <Form.Item label={t('Remote Username')} style={{ marginBottom: 10 }}>
-                <Input value={dbLinkUser} onChange={(e) => setDbLinkUser(e.target.value)} placeholder="scott" />
+                <Input
+                  autoComplete="off"
+                  value={dbLinkUser}
+                  onChange={(e) => setDbLinkUser(e.target.value)}
+                  placeholder="scott"
+                />
               </Form.Item>
             </Col>
             <Col xs={12} sm={6}>
               <Form.Item label={t('Remote Password')} style={{ marginBottom: 10 }}>
-                <Input.Password value={dbLinkPass} onChange={(e) => setDbLinkPass(e.target.value)} />
+                <Input.Password
+                  autoComplete="new-password"
+                  value={dbLinkPass}
+                  onChange={(e) => setDbLinkPass(e.target.value)}
+                />
               </Form.Item>
             </Col>
             <Col xs={12} sm={6}>

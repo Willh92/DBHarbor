@@ -1761,6 +1761,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
               <Input
                 size="small"
                 allowClear
+                autoComplete="off"
                 prefix={<SearchOutlined />}
                 placeholder={t('Filter connections...')}
                 value={connSearch}
@@ -2089,6 +2090,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
               <Input
                 size={isMobile ? 'middle' : 'small'}
                 allowClear
+                autoComplete="off"
                 prefix={<SearchOutlined />}
                 placeholder={t('Filter tables / views / collections...')}
                 value={search}
@@ -2545,6 +2547,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
         okText={t('Create Now')}
       >
         <Input
+          autoComplete="off"
           placeholder={t('Enter new database name, e.g. analytics_db')}
           value={newDBName}
           onChange={(e) => setNewDBName(e.target.value)}
@@ -2573,6 +2576,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
           {t('Type {name} below to confirm:', { name: selectedDB })}
         </Typography.Text>
         <Input
+          autoComplete="off"
           value={dropDBConfirmInput}
           onChange={(e) => setDropDBConfirmInput(e.target.value)}
           placeholder={selectedDB}
@@ -2589,6 +2593,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
         okText={t('Create Now')}
       >
         <Input
+          autoComplete="off"
           placeholder={t('Enter new schema name, e.g. reporting')}
           value={newSchemaName}
           onChange={(e) => setNewSchemaName(e.target.value)}
@@ -2623,7 +2628,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
         confirmLoading={mongoCreateSaving}
         okText={t('Create Now')}
       >
-        <Form layout="vertical" size="small">
+        <Form layout="vertical" size="small" autoComplete="off">
           <Form.Item label={t('Collection Mode')} style={{ marginBottom: 10 }}>
             {isMobile ? (
               <Select
@@ -2657,6 +2662,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
             style={{ marginBottom: 10 }}
           >
             <Input
+              autoComplete="off"
               value={mongoCreateName}
               onChange={(e) => setMongoCreateName(e.target.value)}
               placeholder={mongoCreateKind === 'view' ? 'v_recent_events' : 'events'}
@@ -2688,6 +2694,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
               <Col xs={24} sm={12}>
                 <Form.Item label={t('Time Field')} required style={{ marginBottom: 10 }}>
                   <Input
+                    autoComplete="off"
                     value={mongoTimeField}
                     onChange={(e) => setMongoTimeField(e.target.value)}
                     placeholder="timestamp"
@@ -2697,6 +2704,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
               <Col xs={24} sm={12}>
                 <Form.Item label={t('Meta Field (Optional)')} style={{ marginBottom: 10 }}>
                   <Input
+                    autoComplete="off"
                     value={mongoMetaField}
                     onChange={(e) => setMongoMetaField(e.target.value)}
                     placeholder="metadata"

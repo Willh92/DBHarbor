@@ -429,6 +429,7 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
 
           <Space.Compact style={{ width: 300, maxWidth: '100%' }}>
             <Input
+              autoComplete="off"
               prefix={<EditOutlined style={{ opacity: 0.55 }} />}
               placeholder={t('Display Name')}
               maxLength={64}
@@ -625,6 +626,7 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                         </Typography.Text>
                         <Space.Compact style={{ width: '100%' }}>
                           <Input
+                            autoComplete="one-time-code"
                             style={{ minWidth: 0 }}
                             placeholder={t('Enter 6-digit code, e.g. 123456')}
                             maxLength={8}
@@ -658,12 +660,14 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                   >
                     <Space direction="vertical" style={{ width: '100%' }} size={10}>
                       <Input.Password
+                        autoComplete="new-password"
                         prefix={<LockOutlined />}
                         placeholder={t('Enter current login password')}
                         value={actionPwd}
                         onChange={(e) => setActionPwd(e.target.value)}
                       />
                       <Input
+                        autoComplete="one-time-code"
                         prefix={<KeyOutlined />}
                         placeholder={t('Enter current 6-digit TOTP or recovery code')}
                         value={actionCode}
@@ -717,6 +721,7 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                     <Form
                       form={pwdForm}
                       layout="vertical"
+                      autoComplete="off"
                       initialValues={{ revokeOtherSessions: true }}
                     >
                       <Form.Item
@@ -725,7 +730,7 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                         rules={[{ required: true, message: t('Required') }]}
                         style={{ marginBottom: 14 }}
                       >
-                        <Input.Password prefix={<LockOutlined />} />
+                        <Input.Password prefix={<LockOutlined />} autoComplete="new-password" />
                       </Form.Item>
                       <Form.Item
                         name="newPassword"
@@ -735,6 +740,7 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                       >
                         <Input.Password
                           prefix={<LockOutlined />}
+                          autoComplete="new-password"
                           onChange={(e) => setNewPwdWatch(e.target.value)}
                         />
                       </Form.Item>
@@ -744,7 +750,7 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                         rules={[{ required: true, message: t('Required') }]}
                         style={{ marginBottom: 12 }}
                       >
-                        <Input.Password prefix={<LockOutlined />} />
+                        <Input.Password prefix={<LockOutlined />} autoComplete="new-password" />
                       </Form.Item>
                       <Form.Item name="revokeOtherSessions" valuePropName="checked" style={{ marginBottom: 14 }}>
                         <Checkbox>{t('Revoke all other active device sessions after changing password')}</Checkbox>
@@ -937,6 +943,7 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                     <Input
                       size="small"
                       allowClear
+                      autoComplete="off"
                       prefix={<SearchOutlined />}
                       placeholder={t('Filter account, IP, or detail...')}
                       value={auditKeyword}
@@ -1097,6 +1104,7 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                             <Input
                               maxLength={80}
                               allowClear
+                              autoComplete="off"
                               placeholder={t('Default: Sign In')}
                               value={brandingForm.pageTitle}
                               onChange={(e) =>
@@ -1112,6 +1120,7 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                             <Input
                               maxLength={80}
                               allowClear
+                              autoComplete="off"
                               placeholder={t('Default: Sign In')}
                               value={brandingForm.heading}
                               onChange={(e) =>
@@ -1127,6 +1136,7 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                             <Input
                               maxLength={160}
                               allowClear
+                              autoComplete="off"
                               placeholder={t('Optional subtitle below heading')}
                               value={brandingForm.subtitle}
                               onChange={(e) =>

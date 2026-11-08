@@ -2192,6 +2192,7 @@ export const WorkbenchLayout: React.FC = () => {
       >
         <Input
           autoFocus={!isMobile}
+          autoComplete="off"
           value={renameTitle}
           maxLength={80}
           placeholder={t('Enter custom tab title')}
