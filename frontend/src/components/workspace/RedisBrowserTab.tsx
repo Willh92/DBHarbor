@@ -38,7 +38,7 @@ import {
   ToolOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
-import { api } from '../../api/client';
+import { api, isAuthPromptCancelledError } from '../../api/client';
 import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
@@ -75,16 +75,20 @@ function formatMemBytes(bytes?: number): string {
 export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
   const { t } = useI18n();
   const { isMobile } = useResponsive();
+  const darkMode = useWorkbenchStore((s) => s.darkMode);
   const isDesktop = useWorkbenchStore((s) => s.isDesktop);
   const role = useWorkbenchStore((s) => s.role);
   const openTab = useWorkbenchStore((s) => s.openTab);
   const updateTab = useWorkbenchStore((s) => s.updateTab);
+  const connUnlocked = useWorkbenchStore((s) => s.connections.find((c) => c.id === tab.connectionId)?.unlocked);
+  const treeRefreshTick = useWorkbenchStore((s) => s.treeRefreshTick);
   const canWrite = isDesktop || role !== 'readonly';
 
-  const initialDB = Number((tab.database || 'db0').replace('db', '')) || 0;
+  const initialDB = Number((tab.database || 'db0').replace(/^db/i, '')) || 0;
   const [dbIndex, setDbIndex] = useState<number>(initialDB);
   const scanSeqRef = useRef(0);
   const detailSeqRef = useRef(0);
+  const needsUnlockReloadRef = useRef(false);
   const [mobilePane, setMobilePane] = useState<'keys' | 'value' | 'cli'>('keys');
   const [pattern, setPattern] = useState<string>('*');
   const [keys, setKeys] = useState<KVKeySummary[]>([]);
@@ -158,13 +162,18 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
     try {
       const res = await api.kvScan(tab.connectionId, targetDB, pat || '*', 0);
       if (seq !== scanSeqRef.current) return;
+      needsUnlockReloadRef.current = false;
       setKeys(res.keys || []);
       setNextCursor(res.cursor || 0);
       setDbCounts(res.dbKeys || {});
       setCheckedKeys([]);
     } catch (err: any) {
       if (seq === scanSeqRef.current) {
-        message.error(err.message);
+        if (isAuthPromptCancelledError(err)) {
+          needsUnlockReloadRef.current = true;
+        } else {
+          message.error(err.message);
+        }
       }
     } finally {
       if (seq === scanSeqRef.current) {
@@ -188,7 +197,7 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
         return [...prev, ...extra];
       });
     } catch (err: any) {
-      if (seq === scanSeqRef.current) {
+      if (seq === scanSeqRef.current && !isAuthPromptCancelledError(err)) {
         message.error(err.message);
       }
     } finally {
@@ -216,6 +225,13 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
   useEffect(() => {
     loadKeys(dbIndex, pattern);
   }, [tab.connectionId, dbIndex]);
+
+  useEffect(() => {
+    if (needsUnlockReloadRef.current && connUnlocked) {
+      needsUnlockReloadRef.current = false;
+      void loadKeys(dbIndex, pattern);
+    }
+  }, [connUnlocked, treeRefreshTick]);
 
   const loadKeyDetail = useCallback(
     async (key: string) => {
@@ -492,7 +508,9 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
       setTimeout(() => URL.revokeObjectURL(url), 1500);
       message.success(t('Exported {count} Redis keys', { count: data.entries?.length || 0 }));
     } catch (err: any) {
-      message.error(err.message);
+      if (!isAuthPromptCancelledError(err)) {
+        message.error(err.message);
+      }
     }
   };
 
@@ -513,7 +531,9 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
       message.success(t('Imported {count} Redis keys', { count: res.imported }));
       loadKeys();
     } catch (err: any) {
-      message.error(err.message || t('Failed to import Redis keys'));
+      if (!isAuthPromptCancelledError(err)) {
+        message.error(err.message || t('Failed to import Redis keys'));
+      }
     }
     return false;
   };
@@ -1048,6 +1068,7 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
                     overflow: 'auto',
                     padding: 8,
                     borderRadius: 6,
+                    border: darkMode ? '1px solid rgba(255,255,255,0.12)' : undefined,
                     background: 'rgba(0,0,0,0.78)',
                     color: '#95de64',
                     fontSize: 12,
@@ -1783,7 +1804,7 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
             {t('Source Key')}: <code>{detail?.key}</code>
           </Typography.Text>
           <Input
-            autoFocus
+            autoFocus={!isMobile}
             value={targetKeyName}
             onChange={(e) => setTargetKeyName(e.target.value)}
             onPressEnter={handleRenameOrDuplicate}
@@ -1816,7 +1837,7 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
             })}
           </Typography.Text>
           <Input
-            autoFocus
+            autoFocus={!isMobile}
             value={flushConfirmText}
             onChange={(e) => setFlushConfirmText(e.target.value)}
             placeholder={`DB${dbIndex}`}

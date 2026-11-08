@@ -4,6 +4,22 @@
 
 DBHarbor 的所有重要版本变更均记录于此文件，并与 GitHub 仓库 [Willh92/DBHarbor](https://github.com/Willh92/DBHarbor.git) 保持同步。
 
+## [v1.0.3] - 2026-11-08
+
+### 数据库连接密码默认不落盘（可选记住与随时关闭）、CodeQL 与纵深安全加固、深色模式及移动端体验打磨
+- **数据库连接密码默认不记住、支持编辑随时关闭与认证失败交互式重输 (`ConnectionModal` + `ConnectionAuthModal`)**：
+  - **默认不记住密码（仅当前会话内存有效）**：所有新建网络及 URI 数据库连接（`MySQL`、`MariaDB`、`TiDB`、`OceanBase`、`PostgreSQL`、`KingbaseES`、`ClickHouse`、`SQL Server`、`Oracle`、`达梦 DM8`、`Redis`、`MongoDB`）现在**默认关闭“记住密码”**（`RememberPassword = false`），数据库密码与 URI 凭据不再写入磁盘，仅保存在受配额保护的当前会话内存中（`POST /api/connections/{id}/unlock`），退出登录、会话过期、手动锁定/删除连接或进程关闭时自动彻底清除。
+  - **可选加密记住与编辑一键关闭擦除**：用户可按需勾选 **“记住密码”** 将凭据经 AES-256-GCM 加密持久化至本地保险箱（`conns.enc`）；对已记住密码的历史连接，也可随时通过 **“编辑连接”取消勾选“记住密码”** 并保存，立即擦除磁盘中已保存的密码及 URI 内嵌凭据。
+  - **未解锁连接与账密错误自动弹窗重输**：下次连接未记住密码的数据源（`DB_AUTH_REQUIRED`），或因数据库侧账号密码变更/锁定导致认证失败时（`DB_AUTH_FAILED`，全面覆盖 12 类认证驱动的 `ORA-01017` / `ORA-28000` / `ORA-28001`、PostgreSQL `28P01` / `28000`、MySQL `1045`、SQL Server `18456`、ClickHouse `516` / `401`、Redis `WRONGPASS` / `NOAUTH`、MongoDB `code 18` 等），自动弹出 **`ConnectionAuthModal`** 支持修正用户名与密码、可选切换是否记住密码，并在验证通过后无缝重放刚才被中断的操作（含流式导出预检与多标签页自动重载）。
+- **安全披露策略 (`SECURITY.md`)、GitHub CodeQL 扫描治理与后端内存/并发加固**：
+  - 正式发布 DBHarbor **`SECURITY.md`** 安全漏洞披露策略与双形态安全边界说明，并将全部 GitHub Actions 工作流（`ci.yml`、`release.yml`、`preview.yml`）收敛为顶层最小权限 `contents: read` + 按 Job 精细授予写权限。
+  - 全面修复 Go 与前端静态安全审计项：在连接编辑/测试复用已存密文时增加 `sameEndpointAndSecurity` 校验以阻断改主机/换 URI 或降级 TLS（关闭 `UseSSL` / 开启 `SSLSkipVerify`）窃取原连接密码，禁止非所有者跨账号克隆私有密文，修复 Web 服务版普通授权用户解锁共享“不记住密码”连接的权限校验，统一 ClickHouse 与 Redis TLS 构建器（补齐 SNI `ServerName` 与非管理员 `skipVerify` 限制），严格校验自定义品牌 Favicon 仅允许光栅图 `data:image/...;base64`，全量补齐 API 路径段 `encodeURIComponent` 与 `int32`/`uint32` 整数边界保护。
+  - 内存与句柄安全治理：为会话内存凭据池 `sessionCreds` 增加双层容量上限（`4096` 会话域 / 单域 `256` 连接）与停机自动清零；连接池淘汰改为 `(connID + sessionKey)` 复合键索引（`maxPools = 128`）防止未记住密码会话互相驱逐连接池；流式 SQL/文档导出采用延迟写入 `Content-Disposition: attachment` 响应头避免认证失败下载损坏文本文件；修复 DuckDB CLI 超 `32 MiB` 输出管道死锁及删除/更新连接时的文件句柄释放。
+- **深色模式视觉打磨、启动标签页水合门控与手机端 (`360px`) 兼容性优化**：
+  - 修复深色模式下表格与弹窗出现浅灰滚动条轨道的割裂感（统一改为 `transparent` 透明轨道），消除深色模式下 Monaco SQL/JSON 编辑器首次挂载前的白底闪烁，并随浅色（`#ffffff`）/ 深色（`#141414`）主题实时同步移动端浏览器状态栏 `<meta name="theme-color">`。
+  - 新增启动阶段 `/api/system/bootstrap` 水合门控（`bootstrapped`），彻底消除携带未记住密码标签页刷新页面时的抢跑请求与错误横幅闪烁，并打通全部 8 类工作台标签页在密码解锁成功后的自动无感刷新。
+  - 优化 `360x800` 小屏手机体验：`ServerMonitorTab` 顶部工具栏自适应折行消除横向溢出，移动端 `ConnectionSidebar`（共享/个人）与 `SchemaObjectModal` 自动切换紧凑下拉选择器，抽屉内边距收敛至 `12px`，本地单文件新建表单改为垂直堆叠，并在触屏设备上抑制弹窗打开时软键盘自动抢焦点遮挡视口。
+
 ## [v1.0.2] - 2026-11-07
 
 > **版本形态边界说明**：**原生桌面窗体版 (`dbharbor-desktop-*` / `DBHarbor.app`)** 始终采用**无用户账户体系的纯本地免登录模式**并保有完整本机文件访问权限；浏览器端临时单文件数据库工作区（`<DataDir>/ephemeral_workspaces/`）与非管理员按用户隔离目录（`<DataDir>/local_databases/u_<hash>/`）**仅适用于 Web 服务版 (`dbharbor-*`)**。

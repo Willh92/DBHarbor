@@ -56,6 +56,7 @@ export interface ConnectionFormPayload {
   uri?: string;
   options?: Record<string, string>;
   keepExistingSecret?: boolean;
+  rememberPassword?: boolean;
   visibility?: ConnectionVisibility;
 }
 
@@ -68,6 +69,8 @@ export interface SavedConnection {
   port: number;
   username: string;
   hasPassword: boolean;
+  rememberPassword?: boolean;
+  unlocked?: boolean;
   database: string;
   filePath: string;
   hasUri: boolean;
@@ -78,6 +81,20 @@ export interface SavedConnection {
   ephemeral?: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export type DbAuthPromptReason = 'DB_AUTH_REQUIRED' | 'DB_AUTH_FAILED';
+
+export interface UnlockConnectionPayload {
+  username?: string;
+  password: string;
+  uri?: string;
+  rememberPassword?: boolean;
+}
+
+export interface UnlockConnectionResponse {
+  connection: SavedConnection;
+  serverInfo: ServerInfo;
 }
 
 export interface EphemeralOpenResponse {

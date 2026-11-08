@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -36,7 +36,7 @@ import {
   TeamOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
-import { api } from '../../api/client';
+import { api, isAuthPromptCancelledError } from '../../api/client';
 import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
@@ -53,9 +53,12 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
   const closeTab = useWorkbenchStore((s) => s.closeTab);
   const bumpTreeRefresh = useWorkbenchStore((s) => s.bumpTreeRefresh);
   const openTab = useWorkbenchStore((s) => s.openTab);
+  const connUnlocked = useWorkbenchStore((s) => s.connections.find((c) => c.id === tab.connectionId)?.unlocked);
+  const treeRefreshTick = useWorkbenchStore((s) => s.treeRefreshTick);
   const canWrite = isDesktop || role !== 'readonly';
   const { isMobile } = useResponsive();
   const { t } = useI18n();
+  const needsUnlockReloadRef = useRef(false);
 
   const [collMeta, setCollMeta] = useState<CollectionSummary | null>(null);
   const isView = collMeta?.type === 'view';
@@ -136,11 +139,16 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
         page: p,
         pageSize: ps,
       });
+      needsUnlockReloadRef.current = false;
       setDocs(res.documents || []);
       setTotal(res.total || 0);
       setSelectedIds([]);
     } catch (err: any) {
-      message.error(err.message);
+      if (isAuthPromptCancelledError(err)) {
+        needsUnlockReloadRef.current = true;
+      } else {
+        message.error(err.message);
+      }
     } finally {
       setLoading(false);
     }
@@ -163,6 +171,15 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
     loadDocs(1, pageSize);
     loadIndexes();
   }, [tab.connectionId, tab.database, tab.table]);
+
+  useEffect(() => {
+    if (needsUnlockReloadRef.current && connUnlocked) {
+      needsUnlockReloadRef.current = false;
+      loadCollectionMeta();
+      loadDocs(page, pageSize);
+      loadIndexes();
+    }
+  }, [connUnlocked, treeRefreshTick]);
 
   const handleSaveDoc = async () => {
     if (!tab.table || !canMutateDocs) return;
@@ -260,7 +277,9 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
       await loadCollectionMeta();
       await loadDocs(1, pageSize);
     } catch (err: any) {
-      message.error(err.message);
+      if (!isAuthPromptCancelledError(err)) {
+        message.error(err.message);
+      }
     } finally {
       setSavingOptions(false);
     }
@@ -280,7 +299,9 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
       message.success(t('Collection validation rules updated'));
       await loadCollectionMeta();
     } catch (err: any) {
-      message.error(err.message);
+      if (!isAuthPromptCancelledError(err)) {
+        message.error(err.message);
+      }
     } finally {
       setSavingOptions(false);
     }
@@ -300,7 +321,9 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
         message.success(res.savedPath ? `${t('Export saved')}: ${res.savedPath}` : t('Export started'));
       }
     } catch (err: any) {
-      message.error(err.message);
+      if (!isAuthPromptCancelledError(err)) {
+        message.error(err.message);
+      }
     }
   };
 
@@ -1082,7 +1105,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
         destroyOnClose
       >
         <Input
-          autoFocus
+          autoFocus={!isMobile}
           value={newCollName}
           onChange={(e) => setNewCollName(e.target.value)}
           onPressEnter={handleRenameCollection}

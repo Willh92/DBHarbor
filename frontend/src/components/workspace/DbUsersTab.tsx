@@ -32,7 +32,7 @@ import {
   TeamOutlined,
   UnlockOutlined,
 } from '@ant-design/icons';
-import { api } from '../../api/client';
+import { api, isAuthPromptCancelledError } from '../../api/client';
 import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
@@ -84,7 +84,8 @@ const DDL_DEV_PRESET = [
 export const DbUsersTab: React.FC<Props> = ({ tab }) => {
   const { t } = useI18n();
   const { isMobile } = useResponsive();
-  const { isDesktop, role } = useWorkbenchStore();
+  const { isDesktop, role, connections, treeRefreshTick } = useWorkbenchStore();
+  const conn = connections.find((c) => c.id === tab.connectionId);
   const canWrite = isDesktop || role !== 'readonly';
 
   const [caps, setCaps] = useState<DbPrivilegeCapabilities | null>(null);
@@ -94,6 +95,7 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
   const reqSeqRef = useRef(0);
+  const needsUnlockReloadRef = useRef(false);
 
   // Sync external database / schema updates when Users & Grants is opened from another database
   useEffect(() => {
@@ -143,7 +145,10 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
     try {
       const [capRes, dbList] = await Promise.all([
         api.dbPrivCapabilities(tab.connectionId),
-        api.listDatabases(tab.connectionId).catch(() => []),
+        api.listDatabases(tab.connectionId).catch((err) => {
+          if (isAuthPromptCancelledError(err)) throw err;
+          return [];
+        }),
       ]);
       if (seq !== reqSeqRef.current) return;
       setCaps(capRes);
@@ -160,9 +165,14 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
       } else {
         setUsers([]);
       }
+      needsUnlockReloadRef.current = false;
     } catch (err: any) {
       if (seq === reqSeqRef.current) {
-        message.error(err.message);
+        if (isAuthPromptCancelledError(err)) {
+          needsUnlockReloadRef.current = true;
+        } else {
+          message.error(err.message);
+        }
       }
     } finally {
       if (seq === reqSeqRef.current) {
@@ -174,6 +184,13 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
   useEffect(() => {
     loadUsersAndCaps();
   }, [loadUsersAndCaps]);
+
+  useEffect(() => {
+    if (needsUnlockReloadRef.current && conn?.unlocked) {
+      needsUnlockReloadRef.current = false;
+      void loadUsersAndCaps();
+    }
+  }, [conn?.unlocked, treeRefreshTick, loadUsersAndCaps]);
 
   // Load tables/schemas when targetDB changes inside Grant Drawer
   useEffect(() => {
@@ -827,6 +844,7 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
           </Space>
         }
         width="min(720px, 95vw)"
+        styles={{ body: { padding: isMobile ? 12 : 24 } }}
         onClose={() => setGrantTarget(null)}
       >
         {grantTarget && (

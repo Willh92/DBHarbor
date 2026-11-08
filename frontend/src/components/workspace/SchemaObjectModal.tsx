@@ -1034,23 +1034,29 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
 
     if (objType === 'SEQUENCE') {
       items.push(
-        <Space.Compact key="seq-restart" size="small">
-          <InputNumber
-            value={seqRestartVal}
-            onChange={(v) => setSeqRestartVal(v)}
-            placeholder="1"
-            style={{ width: 110 }}
-          />
-          <Button
-            type="primary"
-            ghost
-            icon={<ReloadOutlined />}
-            loading={lifecycleLoading === 'RESTART'}
-            onClick={() => void runLifecycleAction('RESTART', { restartWith: seqRestartVal ?? 1 })}
-          >
-            {t('Restart Sequence')}
-          </Button>
-        </Space.Compact>
+        <div
+          key="seq-restart"
+          style={{ display: 'flex', flexWrap: 'wrap', gap: 6, width: isMobile ? '100%' : undefined }}
+        >
+          <Space.Compact size="small" style={isMobile ? { width: '100%' } : undefined}>
+            <InputNumber
+              value={seqRestartVal}
+              onChange={(v) => setSeqRestartVal(v)}
+              placeholder="1"
+              style={{ width: isMobile ? 88 : 110 }}
+            />
+            <Button
+              type="primary"
+              ghost
+              style={isMobile ? { flex: 1 } : undefined}
+              icon={<ReloadOutlined />}
+              loading={lifecycleLoading === 'RESTART'}
+              onClick={() => void runLifecycleAction('RESTART', { restartWith: seqRestartVal ?? 1 })}
+            >
+              {t('Restart Sequence')}
+            </Button>
+          </Space.Compact>
+        </div>
       );
     }
 
@@ -1138,24 +1144,29 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
 
     if (objType === 'TYPE') {
       items.push(
-        <Space.Compact key="enum-add" size="small">
-          <Input
-            value={newEnumValue}
-            onChange={(e) => setNewEnumValue(e.target.value)}
-            placeholder={t('New enum label')}
-            style={{ width: 150 }}
-          />
-          <Button
-            type="primary"
-            ghost
-            icon={<PlusOutlined />}
-            disabled={!newEnumValue.trim()}
-            loading={lifecycleLoading === 'ADD_ENUM_VALUE'}
-            onClick={() => void runLifecycleAction('ADD_ENUM_VALUE', { newEnumValue: newEnumValue.trim() })}
-          >
-            {t('Add Enum Value')}
-          </Button>
-        </Space.Compact>
+        <div
+          key="enum-add"
+          style={{ display: 'flex', flexWrap: 'wrap', gap: 6, width: isMobile ? '100%' : undefined }}
+        >
+          <Space.Compact size="small" style={isMobile ? { width: '100%' } : undefined}>
+            <Input
+              value={newEnumValue}
+              onChange={(e) => setNewEnumValue(e.target.value)}
+              placeholder={t('New enum label')}
+              style={{ width: isMobile ? undefined : 150, flex: isMobile ? 1 : undefined, minWidth: 0 }}
+            />
+            <Button
+              type="primary"
+              ghost
+              icon={<PlusOutlined />}
+              disabled={!newEnumValue.trim()}
+              loading={lifecycleLoading === 'ADD_ENUM_VALUE'}
+              onClick={() => void runLifecycleAction('ADD_ENUM_VALUE', { newEnumValue: newEnumValue.trim() })}
+            >
+              {t('Add Enum Value')}
+            </Button>
+          </Space.Compact>
+        </div>
       );
     }
 
@@ -1181,7 +1192,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
           </Text>
           {editObject.status && <Tag color="blue" style={{ margin: 0 }}>{editObject.status}</Tag>}
         </Space>
-        <Space size={6} wrap>
+        <Space size={6} wrap style={isMobile ? { width: '100%' } : undefined}>
           {items}
         </Space>
       </div>
@@ -1377,7 +1388,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
         {objType === 'EVENT' && (
           <>
             <Row gutter={[10, 8]}>
-              <Col xs={12} sm={6}>
+              <Col xs={24} sm={6}>
                 <Form.Item label={t('Schedule Type')} style={{ marginBottom: 10 }}>
                   <Segmented
                     block
@@ -1616,10 +1627,8 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
           <>
             {mode === 'create' && (
               <Form.Item label={t('Source Template')} style={{ marginBottom: 10 }}>
-                <Segmented
-                  value={dictPreset}
-                  onChange={(v) => {
-                    const next = v as 'clickhouse' | 'postgresql' | 'http';
+                {(() => {
+                  const applyDictPreset = (next: 'clickhouse' | 'postgresql' | 'http') => {
                     setDictPreset(next);
                     const qName = qualifiedIdent(dbType, schema, objName || 'new_dictionary');
                     const srcTbl = tables[0] || 'source_table';
@@ -1636,13 +1645,27 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
                         `CREATE OR REPLACE DICTIONARY ${qName}\n(\n  id UInt64,\n  name String\n)\nPRIMARY KEY id\nSOURCE(CLICKHOUSE(DB '${database || 'default'}' TABLE '${srcTbl}'))\nLIFETIME(MIN 60 MAX 300)\nLAYOUT(FLAT());`
                       );
                     }
-                  }}
-                  options={[
+                  };
+                  const dictOptions = [
                     { value: 'clickhouse', label: t('ClickHouse Table') },
                     { value: 'postgresql', label: 'PostgreSQL' },
                     { value: 'http', label: t('HTTP Endpoint') },
-                  ]}
-                />
+                  ];
+                  return isMobile ? (
+                    <Select
+                      style={{ width: '100%' }}
+                      value={dictPreset}
+                      onChange={(v) => applyDictPreset(v as 'clickhouse' | 'postgresql' | 'http')}
+                      options={dictOptions}
+                    />
+                  ) : (
+                    <Segmented
+                      value={dictPreset}
+                      onChange={(v) => applyDictPreset(v as 'clickhouse' | 'postgresql' | 'http')}
+                      options={dictOptions}
+                    />
+                  );
+                })()}
               </Form.Item>
             )}
             <Form.Item label={t('Dictionary DDL')} required style={{ marginBottom: 0 }}>
@@ -1656,7 +1679,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
         {objType === 'MACRO' && (
           <>
             <Row gutter={[10, 8]}>
-              <Col xs={12} sm={8}>
+              <Col xs={24} sm={8}>
                 <Form.Item label={t('Macro Type')} style={{ marginBottom: 10 }}>
                   <Segmented
                     block

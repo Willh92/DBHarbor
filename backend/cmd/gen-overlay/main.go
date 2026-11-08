@@ -90,6 +90,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"sync"
 )
 
@@ -213,6 +214,13 @@ func derivePackedBaseEBuffer(dBuffer, dBuffer2 []int) map[int]int {
 	return derived
 }
 
+func mustUint32(n int) uint32 {
+	if n < 0 || int64(n) > math.MaxUint32 {
+		panic("integer out of uint32 range")
+	}
+	return uint32(n)
+}
+
 func initPackedArchive() {
 	gr, err := gzip.NewReader(bytes.NewReader([]byte(packedOracleCharsetsGzip)))
 	if err != nil {
@@ -244,11 +252,11 @@ func initPackedArchive() {
 
 	offMeta, offSlices, offKeys, offVals := 0, 0, 0, 0
 	for i := 0; i < count; i++ {
-		entryMetaStart := uint32(offMeta)
-		entrySliceStart := uint32(offSlices)
-		entryKeyStart := uint32(offKeys)
-		entryValStart := uint32(offVals)
-		entryIdx := uint32(len(entryLocs))
+		entryMetaStart := mustUint32(offMeta)
+		entrySliceStart := mustUint32(offSlices)
+		entryKeyStart := mustUint32(offKeys)
+		entryValStart := mustUint32(offVals)
+		entryIdx := mustUint32(len(entryLocs))
 		entryLocs = append(entryLocs, packedEntryLoc{
 			metaOff:   entryMetaStart,
 			slicesOff: entrySliceStart,

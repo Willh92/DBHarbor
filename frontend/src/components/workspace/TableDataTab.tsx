@@ -39,7 +39,7 @@ import {
   SettingOutlined,
   SnippetsOutlined,
 } from '@ant-design/icons';
-import { api } from '../../api/client';
+import { api, isAuthPromptCancelledError } from '../../api/client';
 import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
@@ -343,7 +343,12 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
   const isActiveTab = useWorkbenchStore((s) => s.activeTabKey === tab.key);
   const isDesktop = useWorkbenchStore((s) => s.isDesktop);
   const role = useWorkbenchStore((s) => s.role);
+  const connUnlocked = useWorkbenchStore(
+    (s) => s.connections.find((c) => c.id === tab.connectionId)?.unlocked
+  );
+  const treeRefreshTick = useWorkbenchStore((s) => s.treeRefreshTick);
   const canWrite = isDesktop || role !== 'readonly';
+  const needsUnlockReloadRef = useRef(false);
 
   const [loading, setLoading] = useState(false);
   const [columns, setColumns] = useState<QueryColumn[]>([]);
@@ -477,6 +482,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
           ctrl.signal
         );
         if (ctrl.signal.aborted) return;
+        needsUnlockReloadRef.current = false;
 
         setColumns(res.columns || []);
         setPrimaryKeys(res.primaryKeys || []);
@@ -500,7 +506,9 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
         focusedCellRef.current = null;
         setHasFocusedCell(false);
       } catch (err: any) {
-        if (err?.name !== 'AbortError') {
+        if (isAuthPromptCancelledError(err)) {
+          needsUnlockReloadRef.current = true;
+        } else if (err?.name !== 'AbortError') {
           message.error(err.message);
         }
       } finally {
@@ -524,8 +532,16 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
     setWhereInput('');
     setAppliedFilter('');
     setSortSpec([]);
+    needsUnlockReloadRef.current = false;
     loadData(1, pageSize, '', []);
   }, [tab.connectionId, tab.database, tab.schema, tab.table]);
+
+  useEffect(() => {
+    if (needsUnlockReloadRef.current && connUnlocked) {
+      needsUnlockReloadRef.current = false;
+      void loadData();
+    }
+  }, [connUnlocked, treeRefreshTick, loadData]);
 
   const visibleColumns = useMemo(
     () => columns.filter((c) => c.name !== '__dbharbor_rowid__'),
@@ -2826,7 +2842,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
           </Radio.Group>
           <Input.TextArea
             rows={10}
-            autoFocus
+            autoFocus={!isMobile}
             value={pasteText}
             onChange={(e) => setPasteText(e.target.value)}
             placeholder={t('Paste tab-separated rows from Notepad / Excel or a JSON array here...')}
@@ -2916,6 +2932,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
         placement={isMobile ? 'bottom' : 'right'}
         height={isMobile ? '85dvh' : undefined}
         width={isMobile ? '100%' : 'min(480px, 95vw)'}
+        styles={{ body: { padding: isMobile ? 12 : 24 } }}
         title={`${t('Row Inspector')} - ${tab.table}`}
         onClose={() => setInspectRow(null)}
         extra={

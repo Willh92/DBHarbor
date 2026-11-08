@@ -1529,4 +1529,28 @@ export const ZH_TW_DICT: Record<string, string> = {
   'Failed to read image file': '讀取圖片檔案失敗',
   'Embedded file engines do not use server-level accounts.':
     '嵌入式單一檔案資料庫引擎不使用伺服器端帳號與權限體系。',
+  'Remember password': '記住密碼',
+  'Password is encrypted with AES-256-GCM on disk for automatic reconnection.':
+    '密碼使用 AES-256-GCM 加密持久化儲存，下次自動重連。',
+  'Turning this off clears the saved password from disk upon saving; next login will prompt for credentials.':
+    '關閉後儲存將立即清除本機已儲存的密碼，下次登入連線時將提示重新輸入。',
+  'Password is kept only for this sign-in session and will not be saved to disk; you will be prompted on next login.':
+    '密碼僅在目前登入工作階段內有效，不寫入磁碟，下次登入連線時提示輸入。',
+  'Saved password will be cleared from disk (leave blank to keep for current session)':
+    '儲存後將清除本機記住的密碼（留空則在目前工作階段內繼續保持連線）',
+  'Unlocked in current session (leave blank to keep session password)':
+    '目前工作階段已解鎖（留空則保持目前工作階段密碼）',
+  'Password not remembered — session credentials required': '未記住密碼 — 需輸入本次工作階段憑證',
+  'Database Authentication Failed': '資料庫驗證失敗',
+  'Enter Database Credentials': '輸入資料庫憑證',
+  'Connect': '連線',
+  'Connected to {name}': '已連線至 {name}',
+  'Authentication failed': '驗證失敗',
+  'Database username or password was rejected. Please re-enter credentials.':
+    '資料庫帳戶或密碼錯誤，請重新輸入憑證。',
+  'Password is not saved for this connection. Please enter credentials for the current session.':
+    '此連線未儲存密碼，請輸入目前工作階段的存取憑證。',
+  'Optional (Redis 6+ ACL user)': '選填（Redis 6+ ACL 使用者名稱）',
+  'Enter database password': '輸入資料庫密碼',
+  'Connection URI (Optional Override)': '連線 URI（選填覆寫）',
 };

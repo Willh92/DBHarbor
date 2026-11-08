@@ -69,6 +69,7 @@ type RouterOptions struct {
 }
 
 type Server struct {
+	handler                 http.Handler
 	store                   *store.Store
 	pool                    *pool.Manager
 	tokens                  *auth.TokenManager
@@ -80,6 +81,8 @@ type Server struct {
 	startedAt               time.Time
 	metaCacheMu             sync.RWMutex
 	metaCache               map[string]cachedAutocomplete
+	sessionCredMu           sync.RWMutex
+	sessionCreds            map[string]map[string]sessionConnCred
 	ephemeralMu             sync.Mutex
 	inFlightEphemeralByUser map[string]int
 	inFlightEphemeralDirs   map[string]bool
@@ -108,11 +111,15 @@ func parseTrustedProxyNets(entries []string) []*net.IPNet {
 	return nets
 }
 
-func NewRouter(st *store.Store, pm *pool.Manager, tm *auth.TokenManager) http.Handler {
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.handler.ServeHTTP(w, r)
+}
+
+func NewRouter(st *store.Store, pm *pool.Manager, tm *auth.TokenManager) *Server {
 	return NewRouterWithOptions(st, pm, tm, RouterOptions{})
 }
 
-func NewRouterWithOptions(st *store.Store, pm *pool.Manager, tm *auth.TokenManager, opts RouterOptions) http.Handler {
+func NewRouterWithOptions(st *store.Store, pm *pool.Manager, tm *auth.TokenManager, opts RouterOptions) *Server {
 	tm.SetSessionValidator(st.IsSessionActive)
 	sec := opts.ProtectorSecret
 	if len(sec) == 0 {
@@ -134,6 +141,7 @@ func NewRouterWithOptions(st *store.Store, pm *pool.Manager, tm *auth.TokenManag
 		trustedNets:             parseTrustedProxyNets(opts.TrustedProxies),
 		startedAt:               time.Now(),
 		metaCache:               make(map[string]cachedAutocomplete),
+		sessionCreds:            make(map[string]map[string]sessionConnCred),
 		inFlightEphemeralByUser: make(map[string]int),
 		inFlightEphemeralDirs:   make(map[string]bool),
 	}
@@ -144,9 +152,11 @@ func NewRouterWithOptions(st *store.Store, pm *pool.Manager, tm *auth.TokenManag
 	if st != nil {
 		st.SetMaintenanceHook(func() {
 			srv.sweepEphemeralWorkspaces(defaultEphemeralIdleTTL)
+			srv.sweepStaleSessionCreds()
 		})
 	}
-	return srv.buildHandler()
+	srv.handler = srv.buildHandler()
+	return srv
 }
 
 func (s *Server) prepareWebConnectionConfig(cfg driver.ConnectionConfig) driver.ConnectionConfig {
@@ -190,18 +200,9 @@ func (s *Server) maxImportBytes() int64 {
 	return 256 << 20
 }
 
-func (s *Server) acquireConnDriver(c *Context, connID string) (driver.Driver, driver.ConnectionConfig, error) {
-	drv, cfg, release, err := s.pool.Acquire(connID)
-	if err != nil {
-		return nil, cfg, err
-	}
-	c.Defer(release)
-	return drv, cfg, nil
-}
-
 // NewDesktopRouter creates a pure local router without user accounts, passwords, or 2FA,
 // protected against cross-site localhost requests via a one-time boot ticket + HttpOnly SameSite=Strict cookie.
-func NewDesktopRouter(st *store.Store, pm *pool.Manager, dcfg DesktopConfig) http.Handler {
+func NewDesktopRouter(st *store.Store, pm *pool.Manager, dcfg DesktopConfig) *Server {
 	dcfg.Enabled = true
 	srv := &Server{
 		store:                   st,
@@ -211,6 +212,7 @@ func NewDesktopRouter(st *store.Store, pm *pool.Manager, dcfg DesktopConfig) htt
 		opts:                    RouterOptions{MaxImportMB: 512},
 		startedAt:               time.Now(),
 		metaCache:               make(map[string]cachedAutocomplete),
+		sessionCreds:            make(map[string]map[string]sessionConnCred),
 		inFlightEphemeralByUser: make(map[string]int),
 		inFlightEphemeralDirs:   make(map[string]bool),
 	}
@@ -220,7 +222,8 @@ func NewDesktopRouter(st *store.Store, pm *pool.Manager, dcfg DesktopConfig) htt
 			srv.sweepEphemeralWorkspaces(defaultEphemeralIdleTTL)
 		})
 	}
-	return srv.buildHandler()
+	srv.handler = srv.buildHandler()
+	return srv
 }
 
 func (srv *Server) buildHandler() http.Handler {
@@ -331,6 +334,7 @@ func (srv *Server) buildHandler() http.Handler {
 	authed("DELETE /api/connections/{id}", srv.handleDeleteConnection)
 	authed("POST /api/connections/{id}/duplicate", srv.handleDuplicateConnection)
 	authed("POST /api/connections/{id}/ping", srv.handlePingSavedConnection)
+	authed("POST /api/connections/{id}/unlock", srv.handleUnlockConnection)
 	authed("POST /api/connections/{id}/disconnect", srv.handleDisconnectConnection)
 
 	// History & Snippets
@@ -464,6 +468,7 @@ func (s *Server) resolveWebPrincipal(ctx *Context, claims *auth.Claims) (store.U
 			if s.tokens != nil {
 				s.tokens.RevokeSessionInMemory(claims.SessionID, 0)
 			}
+			s.clearSessionByID(claims.SessionID)
 		}
 		ctx.JSON(http.StatusUnauthorized, H{"error": "Account disabled or no longer active; please contact an administrator"})
 		return store.UserPrincipal{}, false

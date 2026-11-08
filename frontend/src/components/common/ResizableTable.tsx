@@ -95,6 +95,14 @@ const ResizableHeaderCell: React.FC<HeaderCellProps> = ({
   const resizerRef = useRef<HTMLSpanElement | null>(null);
   const isDraggingRef = useRef(false);
   const lastTapTimeRef = useRef<number>(0);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+
+  useEffect(
+    () => () => {
+      dragCleanupRef.current?.();
+    },
+    []
+  );
 
   if (!resizable || !onResizeWidth) {
     return (
@@ -108,6 +116,8 @@ const ResizableHeaderCell: React.FC<HeaderCellProps> = ({
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
+
+    dragCleanupRef.current?.();
 
     const pointerId = e.pointerId;
     const pointerType = e.pointerType;
@@ -195,14 +205,10 @@ const ResizableHeaderCell: React.FC<HeaderCellProps> = ({
       }
     };
 
-    const onPointerUp = (upEvent: PointerEvent) => {
-      if (upEvent.pointerId !== pointerId) return;
+    const cleanup = () => {
       if (rafId) {
         window.cancelAnimationFrame(rafId);
         rafId = 0;
-      }
-      if (hasMoved) {
-        applyColWidth();
       }
       try {
         if (resizerEl.hasPointerCapture(pointerId)) {
@@ -220,8 +226,14 @@ const ResizableHeaderCell: React.FC<HeaderCellProps> = ({
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('pointercancel', onPointerUp);
       window.removeEventListener('touchmove', preventTouchScroll);
+      dragCleanupRef.current = null;
+    };
 
+    const onPointerUp = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId !== pointerId) return;
+      cleanup();
       if (hasMoved) {
+        applyColWidth();
         // Block any trailing click on parent sortable <th> right after finishing a drag
         const suppressClick = (clickEvent: MouseEvent) => {
           clickEvent.stopPropagation();
@@ -244,6 +256,7 @@ const ResizableHeaderCell: React.FC<HeaderCellProps> = ({
       }
     };
 
+    dragCleanupRef.current = cleanup;
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
     window.addEventListener('pointercancel', onPointerUp);

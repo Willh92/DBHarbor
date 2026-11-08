@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { api, getAuthToken, setAuthToken } from '../api/client';
+import { api, clearAllConnectionAuthPrompts, getAuthToken, setAuthToken } from '../api/client';
 import { detectInitialLocale, ensureLocaleLoaded, persistLocale, translateWithLocale, type AppLocale } from '../i18n';
 import type { DriverMeta, LoginBrandingConfig, SavedConnection, UserRole, WorkspaceTab } from '../types';
 import { clearAllEphemeralFileHandles } from '../utils/ephemeralFileHandles';
@@ -7,6 +7,7 @@ import { getRuntimeBootMeta, isDesktopRuntime } from '../utils/runtimeMode';
 
 interface WorkbenchState {
   isDesktop: boolean;
+  bootstrapped: boolean;
   token: string;
   username: string;
   displayName: string;
@@ -150,6 +151,7 @@ const initialTabSession = isInitialSessionValid
 
 export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   isDesktop: initialIsDesktop,
+  bootstrapped: false,
   token: getAuthToken(),
   username: initialUsername,
   displayName: '',
@@ -176,6 +178,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     const persisted = loadPersistedSession();
     const mismatchedPersisted = !get().isDesktop && Boolean(persisted.tabs.length > 0 && (!persisted.owner || persisted.owner !== username));
     if (switchedUser) {
+      clearAllConnectionAuthPrompts();
       localStorage.removeItem(TAB_SESSION_STORAGE_KEY);
       void clearAllEphemeralFileHandles();
     } else if (mismatchedPersisted) {
@@ -185,6 +188,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     localStorage.setItem('dbharbor_username', username);
     const nextRole: UserRole = sec?.role || 'admin';
     set({
+      bootstrapped: false,
       token,
       username,
       displayName: sec?.displayName ?? '',
@@ -225,11 +229,13 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     if (callBackend && getAuthToken()) {
       api.logout().catch(() => {});
     }
+    clearAllConnectionAuthPrompts();
     setAuthToken('');
     void clearAllEphemeralFileHandles();
     localStorage.removeItem('dbharbor_username');
     localStorage.removeItem(TAB_SESSION_STORAGE_KEY);
     set({
+      bootstrapped: false,
       token: '',
       username: '',
       displayName: '',
@@ -259,95 +265,105 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   },
 
   loadBootstrap: async () => {
+    const bootToken = get().token;
     const prevUsername = get().username;
     let currentOwner = 'local';
-    if (get().isDesktop) {
-      const [drivers, connections] = await Promise.all([api.listDrivers(), api.listConnections()]);
-      currentOwner = 'local';
-      set({
-        username: 'local',
-        displayName: 'Local Workspace',
-        role: 'admin',
-        canCreateConn: true,
-        totpEnabled: false,
-        passwordChanged: true,
-        recoveryCodesRemaining: 0,
-        drivers,
-        connections,
-      });
-    } else {
-      const [meInfo, drivers, connections] = await Promise.all([
-        api.me(),
-        api.listDrivers(),
-        api.listConnections(),
-      ]);
-      currentOwner = meInfo.username;
-      if (prevUsername && prevUsername !== meInfo.username) {
-        void clearAllEphemeralFileHandles();
-      }
-      localStorage.setItem('dbharbor_username', meInfo.username);
-      const nextRole: UserRole = meInfo.role || 'admin';
-      set({
-        username: meInfo.username,
-        displayName: meInfo.displayName || '',
-        role: nextRole,
-        canCreateConn: meInfo.canCreateConn ?? nextRole === 'admin',
-        totpEnabled: Boolean(meInfo.totpEnabled),
-        passwordChanged: meInfo.passwordChanged !== false,
-        recoveryCodesRemaining: meInfo.recoveryCodesRemaining || 0,
-        drivers,
-        connections,
-      });
-    }
-    const { drivers, connections, isDesktop } = get();
-
-    // Restore & prune persisted tabs only when session owner matches current authenticated identity
-    const persisted = loadPersistedSession();
-    const isOwnerValid = isDesktop
-      ? !persisted.owner || persisted.owner === 'local'
-      : Boolean(persisted.owner && persisted.owner === currentOwner);
-
-    if (!isOwnerValid) {
-      localStorage.removeItem(TAB_SESSION_STORAGE_KEY);
-      if (get().tabs.length > 0 || get().activeTabKey) {
-        set({ tabs: [], activeTabKey: '' });
-      }
-    } else {
-      const connMap = new Map(connections.map((c) => [c.id, c]));
-      const curTabs = get().tabs.length > 0 ? get().tabs : persisted.tabs;
-      const curActive = get().activeTabKey || persisted.activeTabKey;
-      if (curTabs.length > 0) {
-        const validTabs = curTabs
-          .filter((t) => connMap.has(t.connectionId))
-          .map((t) => {
-            const c = connMap.get(t.connectionId)!;
-            return c.name !== t.connName ? { ...t, connName: c.name } : t;
-          });
-        const nextActive = validTabs.some((t) => t.key === curActive) ? curActive : validTabs[0]?.key || '';
-        persistTabSession(validTabs, nextActive, currentOwner);
-        set({ tabs: validTabs, activeTabKey: nextActive });
-      }
-    }
-
-    // Auto-open the first connection's overview tab if no tab is open yet so users immediately see tables & tools
-    if (get().tabs.length === 0 && connections.length > 0) {
-      const first = connections[0];
-      const drv = drivers.find((d) => d.type === first.type);
-      if (drv && (drv.category === 'relational' || drv.category === 'olap')) {
-        const defaultDB =
-          first.database || (first.type === 'sqlite' || first.type === 'duckdb' ? 'main' : '');
-        if (defaultDB) {
-          get().openTab({
-            key: `overview:${first.id}:${defaultDB}:`,
-            title: `${defaultDB} (${translateWithLocale(get().locale, 'Overview')})`,
-            kind: 'overview',
-            connectionId: first.id,
-            connName: first.name,
-            dbType: first.type,
-            database: defaultDB,
-            schema: '',
-          });
+    try {
+      if (get().isDesktop) {
+        const [drivers, connections] = await Promise.all([api.listDrivers(), api.listConnections()]);
+        currentOwner = 'local';
+        set({
+          username: 'local',
+          displayName: 'Local Workspace',
+          role: 'admin',
+          canCreateConn: true,
+          totpEnabled: false,
+          passwordChanged: true,
+          recoveryCodesRemaining: 0,
+          drivers,
+          connections,
+        });
+      } else {
+        const [meInfo, drivers, connections] = await Promise.all([
+          api.me(),
+          api.listDrivers(),
+          api.listConnections(),
+        ]);
+        currentOwner = meInfo.username;
+        if (prevUsername && prevUsername !== meInfo.username) {
+          void clearAllEphemeralFileHandles();
         }
+        localStorage.setItem('dbharbor_username', meInfo.username);
+        const nextRole: UserRole = meInfo.role || 'admin';
+        set({
+          username: meInfo.username,
+          displayName: meInfo.displayName || '',
+          role: nextRole,
+          canCreateConn: meInfo.canCreateConn ?? nextRole === 'admin',
+          totpEnabled: Boolean(meInfo.totpEnabled),
+          passwordChanged: meInfo.passwordChanged !== false,
+          recoveryCodesRemaining: meInfo.recoveryCodesRemaining || 0,
+          drivers,
+          connections,
+        });
+      }
+      const { drivers, connections, isDesktop } = get();
+
+      // Restore & prune persisted tabs only when session owner matches current authenticated identity
+      const persisted = loadPersistedSession();
+      const isOwnerValid = isDesktop
+        ? !persisted.owner || persisted.owner === 'local'
+        : Boolean(persisted.owner && persisted.owner === currentOwner);
+
+      if (!isOwnerValid) {
+        localStorage.removeItem(TAB_SESSION_STORAGE_KEY);
+        if (get().tabs.length > 0 || get().activeTabKey) {
+          set({ tabs: [], activeTabKey: '' });
+        }
+      } else {
+        const connMap = new Map(connections.map((c) => [c.id, c]));
+        const curTabs = get().tabs.length > 0 ? get().tabs : persisted.tabs;
+        const curActive = get().activeTabKey || persisted.activeTabKey;
+        if (curTabs.length > 0) {
+          const validTabs = curTabs
+            .filter((t) => connMap.has(t.connectionId))
+            .map((t) => {
+              const c = connMap.get(t.connectionId)!;
+              return c.name !== t.connName ? { ...t, connName: c.name } : t;
+            });
+          const nextActive = validTabs.some((t) => t.key === curActive) ? curActive : validTabs[0]?.key || '';
+          persistTabSession(validTabs, nextActive, currentOwner);
+          set({ tabs: validTabs, activeTabKey: nextActive });
+        }
+      }
+
+      // Auto-open the first unlocked connection's overview tab if no tab is open yet so users immediately see tables & tools
+      // without triggering unsolicited credential prompts on unremembered connections at startup.
+      if (get().tabs.length === 0 && connections.length > 0) {
+        const first = connections.find((c) => c.rememberPassword !== false || c.unlocked);
+        if (first) {
+          const drv = drivers.find((d) => d.type === first.type);
+          if (drv && (drv.category === 'relational' || drv.category === 'olap')) {
+            const defaultDB =
+              first.database || (first.type === 'sqlite' || first.type === 'duckdb' ? 'main' : '');
+            if (defaultDB) {
+              get().openTab({
+                key: `overview:${first.id}:${defaultDB}:`,
+                title: `${defaultDB} (${translateWithLocale(get().locale, 'Overview')})`,
+                kind: 'overview',
+                connectionId: first.id,
+                connName: first.name,
+                dbType: first.type,
+                database: defaultDB,
+                schema: '',
+              });
+            }
+          }
+        }
+      }
+    } finally {
+      if (get().isDesktop || (bootToken && get().token === bootToken)) {
+        set({ bootstrapped: true });
       }
     }
   },

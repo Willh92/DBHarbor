@@ -35,7 +35,7 @@ import {
   StopOutlined,
 } from '@ant-design/icons';
 import { clearSQLModelAutocomplete, monaco, setSQLModelAutocomplete } from '../../utils/monacoSetup';
-import { api } from '../../api/client';
+import { api, isAuthPromptCancelledError } from '../../api/client';
 import { useResponsive } from '../../hooks/useResponsive';
 import { MonacoEditorSurface } from '../common/MonacoEditorSurface';
 import { ResizableTable, calcSmartColumnWidth } from '../common/ResizableTable';
@@ -68,7 +68,7 @@ function simpleFormatSQL(sql: string): string {
   ];
   let out = sql.trim().replace(/[ \t]+/g, ' ');
   for (const kw of majorClauses) {
-    const re = new RegExp(`\\s+\\b(${kw.replace(' ', '\\s+')})\\b`, 'gi');
+    const re = new RegExp(`\\s+\\b(${kw.replace(/\s+/g, '\\s+')})\\b`, 'gi');
     out = out.replace(re, (_, m) => `\n${m.toUpperCase()}`);
   }
   return out
@@ -399,7 +399,8 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
 const DEFAULT_PLACEHOLDER_PREFIX = '-- Connection: ';
 
 export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
-  const { darkMode, bumpTreeRefresh, openTab, updateTab, isDesktop } = useWorkbenchStore();
+  const { darkMode, bumpTreeRefresh, openTab, updateTab, isDesktop, connections, treeRefreshTick } = useWorkbenchStore();
+  const conn = connections.find((c) => c.id === tab.connectionId);
   const { isMobile } = useResponsive();
   const { t } = useI18n();
   const defaultHeader = `${DEFAULT_PLACEHOLDER_PREFIX}${tab.connName} (${tab.dbType})\n-- Shortcut: Ctrl+Enter / Cmd+Enter to execute selection or full script (semicolon-separated)\n`;
@@ -445,11 +446,15 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
   const modelUriRef = useRef<string>('');
   const latestMetaRef = useRef<{ tables: Record<string, string[]>; databases: string[] }>({ tables: {}, databases: [] });
   const abortRef = useRef<AbortController | null>(null);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+  const needsUnlockReloadRef = useRef(false);
+  const autocompleteSeqRef = useRef(0);
   const executeRef = useRef<(overridePrefix?: string) => void>(() => {});
   const formatRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     return () => {
+      dragCleanupRef.current?.();
       abortRef.current?.abort();
       selectionDispRef.current?.dispose();
       if (modelUriRef.current) {
@@ -465,17 +470,23 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
     }
   }, [tab.initialSQL]);
 
-  useEffect(() => {
+  const loadDatabases = useCallback(() => {
     api
       .listDatabases(tab.connectionId)
       .then((dbs) => {
         setDatabases(dbs);
-        if (!currentDB && dbs[0]?.name) {
-          setCurrentDB(dbs[0].name);
-        }
+        setCurrentDB((prev) => prev || dbs[0]?.name || '');
       })
-      .catch(() => {});
+      .catch((err) => {
+        if (isAuthPromptCancelledError(err)) {
+          needsUnlockReloadRef.current = true;
+        }
+      });
   }, [tab.connectionId]);
+
+  useEffect(() => {
+    loadDatabases();
+  }, [loadDatabases]);
 
   const handleSelectConsoleDB = useCallback(
     (nextDB: string) => {
@@ -485,12 +496,13 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
     [tab.key, updateTab]
   );
 
-  useEffect(() => {
-    let active = true;
+  const loadAutocomplete = useCallback(() => {
+    const seq = ++autocompleteSeqRef.current;
     api
       .getAutocomplete(tab.connectionId, currentDB)
       .then((meta) => {
-        if (!active) return;
+        if (seq !== autocompleteSeqRef.current) return;
+        needsUnlockReloadRef.current = false;
         const tables = meta.tables || {};
         const dbs = meta.databases || [];
         latestMetaRef.current = { tables, databases: dbs };
@@ -513,19 +525,33 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
           setSQLModelAutocomplete(uri, tables, dbs);
         }
       })
-      .catch(() => {
-        if (!active) return;
+      .catch((err) => {
+        if (seq !== autocompleteSeqRef.current) return;
+        if (isAuthPromptCancelledError(err)) {
+          needsUnlockReloadRef.current = true;
+        }
         latestMetaRef.current = { tables: {}, databases: [] };
         const uri = editorRef.current?.getModel()?.uri.toString() || modelUriRef.current;
         if (uri) {
           setSQLModelAutocomplete(uri, {}, []);
         }
       });
+  }, [tab.connectionId, currentDB, defaultHeader, tab.table]);
 
+  useEffect(() => {
+    loadAutocomplete();
     return () => {
-      active = false;
+      autocompleteSeqRef.current += 1;
     };
-  }, [tab.connectionId, currentDB]);
+  }, [loadAutocomplete]);
+
+  useEffect(() => {
+    if (needsUnlockReloadRef.current && conn?.unlocked) {
+      needsUnlockReloadRef.current = false;
+      loadDatabases();
+      loadAutocomplete();
+    }
+  }, [conn?.unlocked, treeRefreshTick, loadDatabases, loadAutocomplete]);
 
   const executeSQL = async (overridePrefix?: string) => {
     const ed = editorRef.current;
@@ -565,7 +591,7 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
     } catch (err: any) {
       if (err?.name === 'AbortError') {
         message.info(t('SQL query aborted'));
-      } else {
+      } else if (!isAuthPromptCancelledError(err)) {
         setExecError(err.message);
         if (err?.data?.partialResults?.length) {
           setResults(err.data.partialResults);
@@ -634,6 +660,7 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
   const handleEditorSplitterPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     e.preventDefault();
+    dragCleanupRef.current?.();
     const pointerId = e.pointerId;
     const splitterEl = e.currentTarget;
     try {
@@ -651,6 +678,7 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
 
     let rafId = 0;
     let latestH = Math.round(startH);
+    let cleanedUp = false;
 
     const applyHeight = () => {
       rafId = 0;
@@ -670,13 +698,13 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
         rafId = window.requestAnimationFrame(applyHeight);
       }
     };
-    const onUp = () => {
+    const cleanup = () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      dragCleanupRef.current = null;
       if (rafId) {
         window.cancelAnimationFrame(rafId);
         rafId = 0;
-      }
-      if (editorPaneRef.current) {
-        editorPaneRef.current.style.height = `${latestH}px`;
       }
       try {
         if (splitterEl.hasPointerCapture(pointerId)) {
@@ -692,6 +720,12 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
+    };
+    const onUp = () => {
+      cleanup();
+      if (editorPaneRef.current) {
+        editorPaneRef.current.style.height = `${latestH}px`;
+      }
       setEditorHeight(latestH);
       localStorage.setItem('dbharbor_sql_editor_height', String(latestH));
       window.requestAnimationFrame(() => {
@@ -699,6 +733,7 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
         window.dispatchEvent(new Event('dbharbor-layout-settled'));
       });
     };
+    dragCleanupRef.current = cleanup;
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onUp);
@@ -1147,6 +1182,7 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
         destroyOnClose
         title={drawerMode === 'history' ? t('SQL Execution History') : t('Saved SQL Snippets')}
         width={isMobile ? '92vw' : 520}
+        styles={{ body: { padding: isMobile ? 12 : 24 } }}
         onClose={() => setDrawerMode(null)}
         extra={
           drawerMode === 'history' && historyList.length > 0 ? (

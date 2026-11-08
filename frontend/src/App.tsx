@@ -29,9 +29,11 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('dbharbor:unauthorized', handler);
   }, [isDesktop, logout]);
 
+  const showWorkbench = Boolean(isDesktop || token);
+
   useEffect(() => {
     document.documentElement.lang = locale;
-    if (isDesktop || token) {
+    if (showWorkbench) {
       document.title = isDesktop
         ? `DBHarbor — ${t('Multi-Database Desktop Workbench')}`
         : `DBHarbor — ${t('Multi-Database Web Workbench')}`;
@@ -41,7 +43,7 @@ export const App: React.FC = () => {
         iconLink.href = '/favicon.svg';
       }
     }
-  }, [isDesktop, token, locale, t]);
+  }, [isDesktop, showWorkbench, locale, t]);
 
   useEffect(() => {
     const themeStr = darkMode ? 'dark' : 'light';
@@ -53,11 +55,11 @@ export const App: React.FC = () => {
       metaTheme.name = 'theme-color';
       document.head.appendChild(metaTheme);
     }
-    metaTheme.content = darkMode ? '#141414' : '#ffffff';
+    metaTheme.content = darkMode ? (showWorkbench ? '#141414' : '#090d16') : '#ffffff';
     if (isDesktop) {
       api.setDesktopWindowTheme(darkMode).catch(() => {});
     }
-  }, [darkMode, isDesktop]);
+  }, [darkMode, isDesktop, showWorkbench]);
 
   useEffect(() => {
     let active = true;

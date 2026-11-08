@@ -134,18 +134,47 @@ type DriverMeta struct {
 }
 
 type ConnectionConfig struct {
-	ID       string            `json:"id"`
-	Name     string            `json:"name"`
-	Type     string            `json:"type"`
-	Color    string            `json:"color,omitempty"`
-	Host     string            `json:"host,omitempty"`
-	Port     int               `json:"port,omitempty"`
-	Username string            `json:"username,omitempty"`
-	Password string            `json:"password,omitempty"`
-	Database string            `json:"database,omitempty"`
-	FilePath string            `json:"filePath,omitempty"`
-	URI      string            `json:"uri,omitempty"`
-	Options  map[string]string `json:"options,omitempty"`
+	ID               string            `json:"id"`
+	Name             string            `json:"name"`
+	Type             string            `json:"type"`
+	Color            string            `json:"color,omitempty"`
+	Host             string            `json:"host,omitempty"`
+	Port             int               `json:"port,omitempty"`
+	Username         string            `json:"username,omitempty"`
+	Password         string            `json:"password,omitempty"`
+	Database         string            `json:"database,omitempty"`
+	FilePath         string            `json:"filePath,omitempty"`
+	URI              string            `json:"uri,omitempty"`
+	Options          map[string]string `json:"options,omitempty"`
+	RememberPassword *bool             `json:"rememberPassword,omitempty"`
+}
+
+// BoolPtr returns a pointer to the given bool value.
+func BoolPtr(v bool) *bool {
+	return &v
+}
+
+// IsCredentialedDriver reports whether dbType uses network credentials (username/password/URI)
+// rather than passwordless local files (SQLite / DuckDB).
+func IsCredentialedDriver(dbType string) bool {
+	switch strings.ToLower(strings.TrimSpace(dbType)) {
+	case "", "sqlite", "duckdb":
+		return false
+	default:
+		return true
+	}
+}
+
+// ShouldRememberPassword reports whether credentials for this connection should be persisted
+// encrypted on disk. When nil (e.g. legacy or internal callers), it defaults to true.
+func (c ConnectionConfig) ShouldRememberPassword() bool {
+	if !IsCredentialedDriver(c.Type) {
+		return true
+	}
+	if c.RememberPassword != nil {
+		return *c.RememberPassword
+	}
+	return true
 }
 
 func (c ConnectionConfig) Option(key, fallback string) string {

@@ -58,6 +58,9 @@ var (
 )
 
 func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
+	if cfg.Option("tls", "false") == "skip-verify" && cfg.Option("__restrict_internal_ip", "") == "1" {
+		return nil, errors.New("TLS skip-verify is not permitted for restricted non-admin connections")
+	}
 	return &Driver{
 		cfg:     cfg,
 		clients: make(map[int]*goredis.Client),
@@ -98,11 +101,9 @@ func (d *Driver) clientForDB(dbIdx int) *goredis.Client {
 	if restrictIP {
 		opts.Dialer = sqlbase.NewRestrictedDialContext(8 * time.Second)
 	}
-	switch d.cfg.Option("tls", "false") {
-	case "true":
-		opts.TLSConfig = &tls.Config{ServerName: cleanHost, MinVersion: tls.VersionTLS12}
-	case "skip-verify":
-		opts.TLSConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
+	if tlsMode := d.cfg.Option("tls", "false"); tlsMode == "true" || tlsMode == "skip-verify" {
+		skipVerify := tlsMode == "skip-verify" && !restrictIP
+		opts.TLSConfig = &tls.Config{ServerName: cleanHost, MinVersion: tls.VersionTLS12, InsecureSkipVerify: skipVerify} // #nosec G402
 	}
 	c := goredis.NewClient(opts)
 	d.clients[dbIdx] = c
@@ -139,7 +140,10 @@ func (d *Driver) Ping(ctx context.Context) (driver.ServerInfo, error) {
 }
 
 func (d *Driver) ListDatabases(ctx context.Context) ([]driver.DatabaseSummary, error) {
-	dbMap := d.keyspaceCounts(ctx)
+	dbMap, err := d.keyspaceCounts(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]driver.DatabaseSummary, 16)
 	for i := 0; i < 16; i++ {
 		out[i] = driver.DatabaseSummary{
@@ -154,11 +158,19 @@ func (d *Driver) CreateDatabase(_ context.Context, _, _ string) error {
 	return errors.New("Redis uses fixed logical database indexes db0 to db15")
 }
 
-func (d *Driver) keyspaceCounts(ctx context.Context) map[int]int64 {
+func (d *Driver) keyspaceCounts(ctx context.Context) (map[int]int64, error) {
 	res := map[int]int64{}
-	info, err := d.clientForDB(0).Info(ctx, "keyspace").Result()
+	c := d.clientForDB(0)
+	info, err := c.Info(ctx, "keyspace").Result()
 	if err != nil {
-		return res
+		if sqlbase.IsAuthError("redis", err) {
+			return nil, err
+		}
+		// ACL-restricted Redis users may forbid INFO while permitting PING/SCAN; verify connectivity & auth via PING.
+		if pingErr := c.Ping(ctx).Err(); pingErr != nil {
+			return nil, pingErr
+		}
+		return res, nil
 	}
 	for _, line := range strings.Split(info, "\n") {
 		line = strings.TrimSpace(line)
@@ -180,7 +192,7 @@ func (d *Driver) keyspaceCounts(ctx context.Context) map[int]int64 {
 			}
 		}
 	}
-	return res
+	return res, nil
 }
 
 func (d *Driver) ScanKeys(ctx context.Context, dbIndex int, pattern string, cursor uint64, count int64) (driver.KVScanResult, error) {
@@ -220,10 +232,11 @@ func (d *Driver) ScanKeys(ctx context.Context, dbIndex int, pattern string, curs
 			TTL:  ttlSec,
 		}
 	}
+	dbKeys, _ := d.keyspaceCounts(ctx)
 	return driver.KVScanResult{
 		Cursor: nextCursor,
 		Keys:   summaries,
-		DBKeys: d.keyspaceCounts(ctx),
+		DBKeys: dbKeys,
 	}, nil
 }
 
@@ -757,7 +770,7 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 		driver.MonitorMetric{Key: "keyspace_hits", Label: "Keyspace Hits", Value: parseRedisInfoField(info, "keyspace_hits")},
 	)
 
-	counts := d.keyspaceCounts(ctx)
+	counts, _ := d.keyspaceCounts(ctx)
 	for i := 0; i < 16; i++ {
 		if counts[i] > 0 {
 			snap.Storage = append(snap.Storage, driver.StorageItem{

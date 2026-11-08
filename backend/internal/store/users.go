@@ -565,6 +565,26 @@ func (s *Store) AdminReset2FA(userID string) error {
 	return nil
 }
 
+func (s *Store) ListActiveUserSessionIDs(userID string) []string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil
+	}
+	rows, err := s.db.Query(`SELECT id FROM auth_sessions WHERE user_id = ? AND revoked = 0`, userID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var sids []string
+	for rows.Next() {
+		var sid string
+		if rows.Scan(&sid) == nil && sid != "" {
+			sids = append(sids, sid)
+		}
+	}
+	return sids
+}
+
 func (s *Store) RevokeAllUserSessions(userID string) ([]string, error) {
 	rows, err := s.db.Query(`SELECT id FROM auth_sessions WHERE user_id = ? AND revoked = 0`, userID)
 	var sids []string
@@ -783,6 +803,22 @@ func (s *Store) ListConnectionsForPrincipal(p UserPrincipal) ([]SavedConnection,
 	return filtered, nil
 }
 
+func (s *Store) GetSavedConnectionForPrincipal(p UserPrincipal, connID string) (SavedConnection, bool) {
+	if connID == "" {
+		return SavedConnection{}, false
+	}
+	list, err := s.ListConnectionsForPrincipal(p)
+	if err != nil {
+		return SavedConnection{}, false
+	}
+	for _, item := range list {
+		if item.ID == connID {
+			return item, true
+		}
+	}
+	return SavedConnection{}, false
+}
+
 func (s *Store) CanAccessConnection(p UserPrincipal, connID string) bool {
 	if connID == "" {
 		return false
@@ -851,8 +887,14 @@ func (s *Store) DuplicateConnection(connID string, p UserPrincipal) (SavedConnec
 	if IsEphemeralConnection(cfg.Options) {
 		return SavedConnection{}, errors.New("temporary browser-loaded database sessions cannot be duplicated")
 	}
-	var origVis string
-	_ = s.db.QueryRow(`SELECT visibility FROM connections WHERE id = ?`, connID).Scan(&origVis)
+	var origOwner, origVis string
+	_ = s.db.QueryRow(`SELECT owner_id, visibility FROM connections WHERE id = ?`, connID).Scan(&origOwner, &origVis)
+
+	if p.ID != "local" && origOwner != "" && origOwner != p.ID {
+		cfg.Password = ""
+		cfg.URI = StripPasswordFromURI(cfg.URI)
+		cfg.RememberPassword = driver.BoolPtr(!driver.IsCredentialedDriver(cfg.Type))
+	}
 
 	cfg.ID = ""
 	cfg.Name = strings.TrimSpace(cfg.Name) + " (Copy)"
@@ -937,16 +979,18 @@ func (s *Store) ImportConnections(profiles []ExportedConnectionProfile, p UserPr
 				vis = "shared"
 			}
 		}
+		rememberImported := !driver.IsCredentialedDriver(tp)
 		_, err := s.SaveConnectionWithMeta(driver.ConnectionConfig{
-			Name:     name,
-			Type:     tp,
-			Color:    item.Color,
-			Host:     item.Host,
-			Port:     item.Port,
-			Username: item.Username,
-			Database: item.Database,
-			FilePath: item.FilePath,
-			Options:  StripReservedConnectionOptions(item.Options),
+			Name:             name,
+			Type:             tp,
+			Color:            item.Color,
+			Host:             item.Host,
+			Port:             item.Port,
+			Username:         item.Username,
+			Database:         item.Database,
+			FilePath:         item.FilePath,
+			Options:          StripReservedConnectionOptions(item.Options),
+			RememberPassword: driver.BoolPtr(rememberImported),
 		}, false, ownerID, vis)
 		if err == nil {
 			imported++

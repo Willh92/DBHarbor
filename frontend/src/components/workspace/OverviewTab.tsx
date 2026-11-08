@@ -40,7 +40,7 @@ import {
   ToolOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
-import { api } from '../../api/client';
+import { api, isAuthPromptCancelledError } from '../../api/client';
 import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
@@ -149,7 +149,9 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
       setItems(merged);
       setSelectedKeys([]);
     } catch (err: any) {
-      message.error(err.message);
+      if (!isAuthPromptCancelledError(err)) {
+        message.error(err.message);
+      }
     } finally {
       setLoading(false);
     }

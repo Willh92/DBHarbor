@@ -115,7 +115,11 @@ func (d *Driver) Ping(ctx context.Context) (driver.ServerInfo, error) {
 	return driver.ServerInfo{Version: banner, Product: "Dameng DM8", LatencyMs: time.Since(start).Milliseconds()}, nil
 }
 
-func (d *Driver) ListDatabases(_ context.Context) ([]driver.DatabaseSummary, error) {
+func (d *Driver) ListDatabases(ctx context.Context) ([]driver.DatabaseSummary, error) {
+	var dummy int
+	if err := d.db.QueryRowContext(ctx, "SELECT 1 FROM DUAL").Scan(&dummy); err != nil {
+		return nil, err
+	}
 	return []driver.DatabaseSummary{{Name: "DAMENG"}}, nil
 }
 
@@ -145,6 +149,9 @@ func (d *Driver) DropSchema(ctx context.Context, _, schema string, cascade bool)
 func (d *Driver) ListSchemas(ctx context.Context, _ string) ([]string, error) {
 	rows, err := d.db.QueryContext(ctx, "SELECT USERNAME FROM ALL_USERS ORDER BY USERNAME")
 	if err != nil {
+		if sqlbase.IsAuthError("dameng", err) {
+			return nil, err
+		}
 		return []string{strings.ToUpper(d.cfg.Username)}, nil
 	}
 	defer rows.Close()
@@ -164,6 +171,9 @@ func (d *Driver) ListObjects(ctx context.Context, database, schema string) (driv
 	}
 	res := driver.SchemaObjects{Database: database, Schema: schema, Tables: []driver.ObjectItem{}, Views: []driver.ObjectItem{}, Routines: []driver.ObjectItem{}}
 	tRows, err := d.db.QueryContext(ctx, "SELECT TABLE_NAME, COALESCE(NUM_ROWS, 0) FROM ALL_TABLES WHERE OWNER = ? ORDER BY TABLE_NAME", schema)
+	if err != nil && sqlbase.IsAuthError("dameng", err) {
+		return driver.SchemaObjects{}, err
+	}
 	if err == nil {
 		defer tRows.Close()
 		for tRows.Next() {
@@ -513,15 +523,17 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 		for _, item := range dbs {
 			meta.Databases = append(meta.Databases, item.Name)
 		}
+	} else if sqlbase.IsAuthError("dameng", err) {
+		return meta, err
 	}
 	defaultOwner := d.defaultSchema()
 	owner := strings.ToUpper(strings.TrimSpace(database))
 	if owner == "" || owner == "DAMENG" {
 		owner = defaultOwner
 	}
-	loadCols := func(targetOwner string) {
+	loadCols := func(targetOwner string) error {
 		if targetOwner == "" {
-			return
+			return nil
 		}
 		rows, err := d.db.QueryContext(ctx, `
 			SELECT TABLE_NAME, COLUMN_NAME
@@ -530,7 +542,10 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 			ORDER BY TABLE_NAME, COLUMN_ID
 		`, targetOwner)
 		if err != nil {
-			return
+			if sqlbase.IsAuthError("dameng", err) {
+				return err
+			}
+			return nil
 		}
 		defer rows.Close()
 		for rows.Next() {
@@ -539,10 +554,15 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 				meta.Tables[tName] = append(meta.Tables[tName], cName)
 			}
 		}
+		return nil
 	}
-	loadCols(owner)
+	if err := loadCols(owner); err != nil {
+		return meta, err
+	}
 	if len(meta.Tables) == 0 && owner != defaultOwner {
-		loadCols(defaultOwner)
+		if err := loadCols(defaultOwner); err != nil {
+			return meta, err
+		}
 	}
 	return meta, nil
 }
@@ -553,7 +573,9 @@ func (d *Driver) ListPartitions(ctx context.Context, _, schema, table string) ([
 	}
 	out := []driver.PartitionInfo{}
 	var strategy string
-	_ = d.db.QueryRowContext(ctx, `SELECT COALESCE(PARTITIONING_TYPE, '') FROM ALL_PART_TABLES WHERE OWNER = ? AND TABLE_NAME = ?`, schema, table).Scan(&strategy)
+	if err := d.db.QueryRowContext(ctx, `SELECT COALESCE(PARTITIONING_TYPE, '') FROM ALL_PART_TABLES WHERE OWNER = ? AND TABLE_NAME = ?`, schema, table).Scan(&strategy); err != nil && sqlbase.IsAuthError("dameng", err) {
+		return nil, err
+	}
 
 	rows, err := d.db.QueryContext(ctx, `
 		SELECT PARTITION_NAME, COALESCE(NUM_ROWS, 0), COALESCE(BLOCKS, 0) * 8192, HIGH_VALUE
@@ -562,6 +584,9 @@ func (d *Driver) ListPartitions(ctx context.Context, _, schema, table string) ([
 		ORDER BY PARTITION_POSITION
 	`, schema, table)
 	if err != nil {
+		if sqlbase.IsAuthError("dameng", err) {
+			return nil, err
+		}
 		return out, nil
 	}
 	defer rows.Close()
@@ -614,9 +639,15 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 	snap := driver.MonitorSnapshot{Timestamp: time.Now().Format(time.RFC3339), Metrics: []driver.MonitorMetric{}, Storage: []driver.StorageItem{}, Sessions: []driver.SessionItem{}, CanKillSession: true}
 	if info, err := d.Ping(ctx); err == nil {
 		snap.Version = info.Version
+	} else if sqlbase.IsAuthError("dameng", err) {
+		return snap, err
 	}
 	rows, err := d.db.QueryContext(ctx, "SELECT SESS_ID, COALESCE(USER_NAME,''), COALESCE(CLNT_IP,''), COALESCE(STATE,''), COALESCE(SQL_TEXT,'') FROM V$SESSIONS LIMIT 100")
-	if err == nil {
+	if err != nil {
+		if sqlbase.IsAuthError("dameng", err) {
+			return snap, err
+		}
+	} else {
 		defer rows.Close()
 		for rows.Next() {
 			var sid int64

@@ -61,7 +61,7 @@ import {
   ThunderboltOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
-import { api } from '../../api/client';
+import { api, isAuthPromptCancelledError } from '../../api/client';
 import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
@@ -382,10 +382,14 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
   useEffect(() => {
     if (drivers.length === 0) return;
     if (!activeConnId && connections.length > 0) {
-      handleSelectConnection(connections[0]);
+      const unlockedFirst = connections.find((c) => c.rememberPassword !== false || c.unlocked);
+      if (unlockedFirst) {
+        handleSelectConnection(unlockedFirst);
+      }
     } else if (activeConnId && !connections.some((c) => c.id === activeConnId)) {
-      if (connections.length > 0) {
-        handleSelectConnection(connections[0]);
+      const unlockedFirst = connections.find((c) => c.rememberPassword !== false || c.unlocked);
+      if (unlockedFirst) {
+        handleSelectConnection(unlockedFirst);
       } else {
         setActiveConnId('');
       }
@@ -520,7 +524,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
       }
       return schemaToUse;
     } catch (err: any) {
-      if (seq === reqSeqRef.current) {
+      if (seq === reqSeqRef.current && !isAuthPromptCancelledError(err)) {
         message.error(err.message);
       }
       return null;
@@ -631,7 +635,11 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
       }
     } catch (err: any) {
       if (seq === reqSeqRef.current) {
-        message.error(`${conn.name}: ${err.message}`);
+        if (isAuthPromptCancelledError(err)) {
+          setActiveConnId('');
+        } else {
+          message.error(`${conn.name}: ${err.message}`);
+        }
       }
     } finally {
       if (seq === reqSeqRef.current) {
@@ -687,13 +695,26 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
       const info = await api.pingConnection(conn.id);
       message.success(`${conn.name}: ${info.version || 'OK'} (${info.latencyMs} ms)`);
     } catch (err: any) {
-      message.error(`${conn.name}: ${err.message}`);
+      if (!isAuthPromptCancelledError(err)) {
+        message.error(`${conn.name}: ${err.message}`);
+      }
     }
   };
 
   const handleDisconnectPool = async (conn: SavedConnection) => {
     try {
       await api.disconnectConnection(conn.id);
+      invalidateConnCache(conn.id);
+      if (conn.rememberPassword === false && activeConnId === conn.id) {
+        setActiveConnId('');
+        setDatabases([]);
+        setSelectedDB('');
+        setSchemas([]);
+        setSelectedSchema('');
+        setSchemaObjects(EMPTY_SCHEMA_OBJECTS);
+        setCollections([]);
+      }
+      await reloadConnections();
       message.success(t('Connection pool released'));
     } catch (err: any) {
       message.error(err.message);
@@ -1812,6 +1833,11 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
                             {t('Temp')}
                           </Tag>
                         )}
+                        {conn.rememberPassword === false && !conn.unlocked && (
+                          <Tooltip title={t('Password not remembered — session credentials required')}>
+                            <KeyOutlined style={{ fontSize: 11, color: '#faad14', flexShrink: 0 }} />
+                          </Tooltip>
+                        )}
                         {!isDesktop && !conn.ephemeral && conn.visibility === 'private' && (
                           <Tooltip title={t('Personal Private Connection')}>
                             <LockOutlined style={{ fontSize: 11, opacity: 0.55, flexShrink: 0 }} />
@@ -2599,17 +2625,31 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
       >
         <Form layout="vertical" size="small">
           <Form.Item label={t('Collection Mode')} style={{ marginBottom: 10 }}>
-            <Segmented
-              block
-              value={mongoCreateKind}
-              onChange={(v) => setMongoCreateKind(v as 'standard' | 'capped' | 'timeseries' | 'view')}
-              options={[
-                { value: 'standard', label: t('Standard') },
-                { value: 'capped', label: t('Capped') },
-                { value: 'timeseries', label: t('Time-Series') },
-                { value: 'view', label: t('MongoDB View') },
-              ]}
-            />
+            {isMobile ? (
+              <Select
+                style={{ width: '100%' }}
+                value={mongoCreateKind}
+                onChange={(v) => setMongoCreateKind(v as 'standard' | 'capped' | 'timeseries' | 'view')}
+                options={[
+                  { value: 'standard', label: t('Standard') },
+                  { value: 'capped', label: t('Capped') },
+                  { value: 'timeseries', label: t('Time-Series') },
+                  { value: 'view', label: t('MongoDB View') },
+                ]}
+              />
+            ) : (
+              <Segmented
+                block
+                value={mongoCreateKind}
+                onChange={(v) => setMongoCreateKind(v as 'standard' | 'capped' | 'timeseries' | 'view')}
+                options={[
+                  { value: 'standard', label: t('Standard') },
+                  { value: 'capped', label: t('Capped') },
+                  { value: 'timeseries', label: t('Time-Series') },
+                  { value: 'view', label: t('MongoDB View') },
+                ]}
+              />
+            )}
           </Form.Item>
           <Form.Item
             label={mongoCreateKind === 'view' ? t('View Name') : t('Collection Name')}

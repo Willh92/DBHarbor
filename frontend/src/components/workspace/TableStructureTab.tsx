@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   AutoComplete,
@@ -39,7 +39,7 @@ import {
   SyncOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
-import { api } from '../../api/client';
+import { api, isAuthPromptCancelledError } from '../../api/client';
 import { ResizableTable } from '../common/ResizableTable';
 import { SqlCodeViewer } from '../common/SqlCodeViewer';
 import { useResponsive } from '../../hooks/useResponsive';
@@ -92,8 +92,10 @@ interface Props {
 }
 
 export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
-  const { drivers, darkMode, updateTab, closeTab, bumpTreeRefresh, openTab, isDesktop, role } =
+  const { drivers, connections, treeRefreshTick, darkMode, updateTab, closeTab, bumpTreeRefresh, openTab, isDesktop, role } =
     useWorkbenchStore();
+  const conn = connections.find((c) => c.id === tab.connectionId);
+  const needsUnlockReloadRef = useRef(false);
   const canWrite = isDesktop || role !== 'readonly';
   const { isMobile } = useResponsive();
   const { t } = useI18n();
@@ -174,6 +176,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
     setLoading(true);
     try {
       const st = await api.getTableStructure(tab.connectionId, tab.database, tab.schema || '', tab.table);
+      needsUnlockReloadRef.current = false;
       setStructure(st);
       setRenameVal(tab.table);
       setCommentVal(st.comment || '');
@@ -188,15 +191,27 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
         }
       }
     } catch (err: any) {
-      message.error(err.message);
+      if (isAuthPromptCancelledError(err)) {
+        needsUnlockReloadRef.current = true;
+      } else {
+        message.error(err.message);
+      }
     } finally {
       setLoading(false);
     }
   }, [tab.connectionId, tab.database, tab.schema, tab.table, supportsPartitions]);
 
   useEffect(() => {
+    needsUnlockReloadRef.current = false;
     void loadStructure();
   }, [loadStructure]);
+
+  useEffect(() => {
+    if (needsUnlockReloadRef.current && conn?.unlocked) {
+      needsUnlockReloadRef.current = false;
+      void loadStructure();
+    }
+  }, [conn?.unlocked, treeRefreshTick, loadStructure]);
 
   const typeOptions = Array.from(new Set([...(drv?.defaultTypes || []), ...COMMON_TYPES])).map((tp) => ({
     value: tp,
@@ -570,7 +585,9 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
       message.success(remove ? t('Table TTL removed') : t('Table TTL updated'));
       await loadStructure();
     } catch (err: any) {
-      message.error(err.message);
+      if (!isAuthPromptCancelledError(err)) {
+        message.error(err.message);
+      }
     } finally {
       setOpLoading(false);
     }
@@ -608,7 +625,9 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
         output,
       });
     } catch (err: any) {
-      message.error(err.message);
+      if (!isAuthPromptCancelledError(err)) {
+        message.error(err.message);
+      }
     } finally {
       setPragmaCheckLoading(false);
     }
@@ -772,7 +791,9 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
         table: newTbl,
       });
     } catch (err: any) {
-      message.error(err.message);
+      if (!isAuthPromptCancelledError(err)) {
+        message.error(err.message);
+      }
     } finally {
       setOpLoading(false);
     }
@@ -792,7 +813,9 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
       message.success(t('Table comment updated'));
       await loadStructure();
     } catch (err: any) {
-      message.error(err.message);
+      if (!isAuthPromptCancelledError(err)) {
+        message.error(err.message);
+      }
     } finally {
       setOpLoading(false);
     }
@@ -828,7 +851,9 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
         table: target,
       });
     } catch (err: any) {
-      message.error(err.message);
+      if (!isAuthPromptCancelledError(err)) {
+        message.error(err.message);
+      }
     } finally {
       setOpLoading(false);
     }
@@ -852,7 +877,9 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
         await loadStructure();
       }
     } catch (err: any) {
-      message.error(err.message);
+      if (!isAuthPromptCancelledError(err)) {
+        message.error(err.message);
+      }
     } finally {
       setOpLoading(false);
     }

@@ -455,7 +455,7 @@ body.dbharbor-is-dragging iframe {
 
 html[data-theme='dark'] *::-webkit-scrollbar-track,
 html[data-theme='dark'] *::-webkit-scrollbar-corner {
-  background: #141414;
+  background: transparent;
 }
 
 html[data-theme='dark'] *::-webkit-scrollbar-thumb {

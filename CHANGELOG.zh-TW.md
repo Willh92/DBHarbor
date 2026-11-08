@@ -4,6 +4,22 @@
 
 DBHarbor 的所有重要變更皆記錄於本檔案，並與 GitHub 專案 [Willh92/DBHarbor](https://github.com/Willh92/DBHarbor.git) 同步。
 
+## [v1.0.3] - 2026-11-08
+
+### 資料庫連線密碼預設不落盤（可選記住與隨時關閉）、CodeQL 與縱深安全強化、深色模式及行動裝置體驗最佳化
+- **資料庫連線密碼預設不記住、支援編輯隨時關閉與驗證失敗互動式重輸 (`ConnectionModal` + `ConnectionAuthModal`)**：
+  - **預設不記住密碼（僅目前工作階段記憶體有效）**：所有新增網路與 URI 資料庫連線（`MySQL`、`MariaDB`、`TiDB`、`OceanBase`、`PostgreSQL`、`KingbaseES`、`ClickHouse`、`SQL Server`、`Oracle`、`達夢 DM8`、`Redis`、`MongoDB`）現在**預設關閉「記住密碼」**（`RememberPassword = false`），密碼與 URI 憑證不再寫入磁碟，僅暫存於受配額保護的工作階段記憶體（`POST /api/connections/{id}/unlock`），登出、工作階段逾時、鎖定/刪除連線或程式關閉時自動清除。
+  - **可選加密記住與編輯一鍵關閉抹除**：使用者可依需求勾選 **「記住密碼」** 將憑證以 AES-256-GCM 加密儲存至本機保險箱（`conns.enc`）；針對已記住密碼的既有連線，亦可隨時透過 **「編輯連線」取消勾選「記住密碼」** 並儲存，立即抹除磁碟中已儲存的密碼與 URI 內嵌憑證。
+  - **未解鎖連線與帳密錯誤自動彈窗重輸**：連線至未記住密碼的資料來源（`DB_AUTH_REQUIRED`），或因資料庫帳號密碼變更/鎖定導致驗證失敗時（`DB_AUTH_FAILED`，涵蓋 12 類認證驅動之 `ORA-01017` / `ORA-28000` / `ORA-28001`、PostgreSQL `28P01` / `28000`、MySQL `1045`、SQL Server `18456`、ClickHouse `516` / `401`、Redis `WRONGPASS` / `NOAUTH`、MongoDB `code 18` 等），自動開啟 **`ConnectionAuthModal`** 支援修正帳號密碼、切換是否記住密碼，並於驗證成功後無縫重試原操作（含串流匯出預檢與多分頁自動重載）。
+- **安全揭露政策 (`SECURITY.md`)、GitHub CodeQL 掃描修補與後端記憶體/並行強化**：
+  - 正式發佈 DBHarbor **`SECURITY.md`** 資安漏洞通報政策，並將所有 GitHub Actions 工作流程（`ci.yml`、`release.yml`、`preview.yml`）收斂為頂層最小權限 `contents: read` 與依 Job 精確授權寫入權限。
+  - 全面修補 Go 與前端靜態安全掃描項目：於連線編輯/測試重用既有密文時新增 `sameEndpointAndSecurity` 檢查以阻斷變更主機/URI 或降級 TLS（關閉 `UseSSL` / 開啟 `SSLSkipVerify`）竊取原密碼，禁止跨擁有者複製私密憑證，修正 Web 服務版授權一般使用者解鎖共用「不記住密碼」連線之權限判斷，統一 ClickHouse 與 Redis TLS 設定（補齊 SNI `ServerName` 與非管理員 `skipVerify` 限制），嚴格驗證自訂品牌 Favicon 僅允許點陣圖 `data:image/...;base64`，補齊 API 路徑 `encodeURIComponent` 與 `int32`/`uint32` 整數邊界保護。
+  - 記憶體與檔案鎖定治理：為工作階段憑證池 `sessionCreds` 加入雙層容量上限（`4096` 範圍 / 單範圍 `256` 連線）與關機自動歸零；連線池淘汰改採 `(connID + sessionKey)` 複合鍵（`maxPools = 128`）；串流 SQL/文件匯出延遲送出 `Content-Disposition: attachment` 標頭避免驗證失敗下載損毀檔案；修正 DuckDB CLI 超過 `32 MiB` 輸出管線死結與刪除/更新連線時之檔案鎖定釋放。
+- **深色模式視覺打磨、啟動分頁水合門控與行動裝置 (`360px`) 相容性最佳化**：
+  - 消除深色模式下資料表與視窗出現淺灰捲軸軌道的突兀感（統一改為 `transparent` 透明軌道），防止深色模式下 Monaco SQL/JSON 編輯器首次掛載前的白底閃爍，並隨淺色（`#ffffff`）/ 深色（`#141414`）主題同步更新瀏覽器 `<meta name="theme-color">`。
+  - 新增啟動階段 `/api/system/bootstrap` 水合門控（`bootstrapped`），消除攜帶未記住密碼分頁重新整理時的搶跑請求與錯誤提示閃爍，並串接全部 8 類工作台分頁於密碼解鎖成功後的自動重新整理。
+  - 最佳化 `360x800` 手機瀏覽體驗：`ServerMonitorTab` 頂部工具列自動換行消除水平溢位，行動版 `ConnectionSidebar`（共用/個人）與 `SchemaObjectModal` 自動切換緊湊下拉選單，抽屜內距調整為 `12px`，本機單檔資料庫建立表單改為垂直堆疊，並於觸控裝置抑制視窗開啟時虛擬鍵盤自動彈出遮擋畫面。
+
 ## [v1.0.2] - 2026-11-07
 
 > **版本形態邊界說明**：**原生桌面視窗版 (`dbharbor-desktop-*` / `DBHarbor.app`)** 維持**無使用者帳戶體系的純本機免登入模式**並保有完整本機檔案存取權限；瀏覽器端臨時單一檔案資料庫工作區（`<DataDir>/ephemeral_workspaces/`）與非管理員依使用者隔離目錄（`<DataDir>/local_databases/u_<hash>/`）**僅適用於 Web 服務版 (`dbharbor-*`)**。

@@ -32,8 +32,7 @@ on:
         type: boolean
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 env:
   CGO_ENABLED: "0"
@@ -43,6 +42,8 @@ jobs:
   test:
     name: Pre-Release Test Suite
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 15
     steps:
       - name: Checkout repository
@@ -67,6 +68,8 @@ jobs:
     name: Build All 12 Binaries & Publish (${{ github.event_name == 'push' && github.ref_name || inputs.channel }})
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     timeout-minutes: 30
     outputs:
       version: ${{ steps.meta.outputs.version }}
@@ -409,6 +412,9 @@ jobs:
     needs: [test, build-release]
     if: needs.build-release.outputs.should_release == 'true' && (github.event_name == 'push' || inputs.publish_ghcr == true)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     timeout-minutes: 25
 
     steps:

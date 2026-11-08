@@ -3,7 +3,7 @@
 **语言切换**: [English](./README.md) | **简体中文** | [繁體中文](./README.zh-TW.md) | [日本語](./README.ja.md)
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.2-1677ff.svg)](./CHANGELOG.zh-CN.md)
+[![Version](https://img.shields.io/badge/Version-v1.0.3-1677ff.svg)](./CHANGELOG.zh-CN.md)
 [![CGO_ENABLED=0](https://img.shields.io/badge/Go-CGO__ENABLED%3D0-00ADD8.svg)](https://github.com/Willh92/DBHarbor.git)
 
 一款融合 **phpMyAdmin 经典高效可视化操作体验** 与 **现代多引擎 IDE 能力** 的零外部依赖单文件跨平台 Web 数据库管理平台。
@@ -26,6 +26,7 @@
   - **流式导入导出与批量表运维**：支持整库与多表勾选 SQL Dump 备份、单表/筛选结果/自定义查询/MongoDB/Redis/DuckDB 流式导出与 `< 64 KiB` 内存流式分片上传（`SQL` / `CSV-BOM` / `CSV` / `JSON` / `JSONL` / `Markdown`）、大结果集流式内存上限保护、大文件分批事务导入，以及直接粘贴执行多条 SQL 脚本。
 - **Web 多成员三级 RBAC、登录品牌定制、安全沙箱与应急找回 *(仅 Web 服务版)***：
   - **无默认弱口令初始化、登录页品牌定制与防搜索引擎收录**：首次启动自动引导**管理员初始化向导**（密码至少 `8` 位，移除内置 `admin123`）、零指纹登录界面、支持自定义浏览器 `<title>`、顶部图标（上传 `<= 128 KB` 图标并同步 Favicon）及主副标题，内置 `/robots.txt`、`X-Robots-Tag` 与 `<meta name="robots">` 三重防爬虫收录保护。
+  - **默认不落盘的会话级数据库凭据策略与认证失败重输**：新建数据库连接**默认不勾选“记住密码”**（密码仅保存在当前登录会话内存中、磁盘零落盘，下次登录连接时自动弹窗提示输入；可选勾选以 `AES-256-GCM` 加密持久化保存，已记住密码的连接也可随时通过“编辑连接”关闭记住并立即清除本地密文）；当记住密码的连接因数据库账户或密码变更/错误导致连接或执行失败时，系统自动驱逐旧连接池并弹出凭据重输窗口，验证通过后无缝重试原请求。
   - **多成员 RBAC、2FA 与纵深安全加固**：三级 RBAC（`Admin` / `Read-Write` / `Read-Only`）与按账号独立隔离的工作区标签页/SQL 草稿、主密钥派生单次有效图形验证码、`trustedProxies` 可信反代限流 (`HTTP 429`)、离线二维码 **RFC 6238 TOTP 双因素认证** + 8 个一次性备用恢复码 + 2FA 尝试次数限制、驱动级严格 TLS 证书校验、非管理员 `<DataDir>/local_databases/u_<hash>/` 与 `<DataDir>/ephemeral_workspaces/` 按用户隔离沙箱（词法级拦截 SQLite `ATTACH`/文件函数、DuckDB `-safe` 模式 + `stdin` 传参 + `enable_external_access = false`、解包识别 MariaDB `/*M!...*/` 可执行注释）、全远程驱动拨号期防 DNS 重绑定 SSRF 拦截、引用计数并发连接池安全回收、SQL Server 独占连接 `USE [db]` 隔离，以及 `<DataDir>/config.json` 持久化配置与**自动擦除式管理员应急找回**。
 - **原生深色标题栏同步、手机端全触控工作台与多语言国际化 (i18n)**：
   - 桌面端支持系统级原生深色标题栏同步（`Win32 DWM`、`macOS DarkAqua`、`Linux GTK3`）；手机端与触屏设备专属搭载 GPU 原生 `position: sticky` 零闪烁固定表头、手指拖拽调整列宽 + 双击自动撑开列宽、侧栏与表格触控 `[⋮]` 及长按菜单、手机 SQL 快捷符号栏、长文本单元格点击预览、`85dvh` 底部抽屉编辑器、左侧菜单 `keep-alive` 瞬时缓存与全局弹层视口防溢出夹紧。

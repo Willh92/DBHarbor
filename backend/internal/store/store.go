@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,24 +98,26 @@ type AuditLogFilter struct {
 }
 
 type SavedConnection struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Type        string            `json:"type"`
-	Color       string            `json:"color"`
-	Host        string            `json:"host"`
-	Port        int               `json:"port"`
-	Username    string            `json:"username"`
-	HasPassword bool              `json:"hasPassword"`
-	Database    string            `json:"database"`
-	FilePath    string            `json:"filePath"`
-	HasURI      bool              `json:"hasUri"`
-	Options     map[string]string `json:"options"`
-	OwnerID     string            `json:"ownerId,omitempty"`
-	Visibility  string            `json:"visibility"`
-	Editable    bool              `json:"editable"`
-	Ephemeral   bool              `json:"ephemeral,omitempty"`
-	CreatedAt   string            `json:"createdAt"`
-	UpdatedAt   string            `json:"updatedAt"`
+	ID               string            `json:"id"`
+	Name             string            `json:"name"`
+	Type             string            `json:"type"`
+	Color            string            `json:"color"`
+	Host             string            `json:"host"`
+	Port             int               `json:"port"`
+	Username         string            `json:"username"`
+	HasPassword      bool              `json:"hasPassword"`
+	RememberPassword bool              `json:"rememberPassword"`
+	Unlocked         bool              `json:"unlocked"`
+	Database         string            `json:"database"`
+	FilePath         string            `json:"filePath"`
+	HasURI           bool              `json:"hasUri"`
+	Options          map[string]string `json:"options"`
+	OwnerID          string            `json:"ownerId,omitempty"`
+	Visibility       string            `json:"visibility"`
+	Editable         bool              `json:"editable"`
+	Ephemeral        bool              `json:"ephemeral,omitempty"`
+	CreatedAt        string            `json:"createdAt"`
+	UpdatedAt        string            `json:"updatedAt"`
 }
 
 func IsEphemeralConnection(opts map[string]string) bool {
@@ -865,6 +868,11 @@ func (s *Store) RevokeSession(userID, sessionID string) error {
 }
 
 func (s *Store) RevokeOtherSessions(userID, keepSessionID string) (int, error) {
+	ids, err := s.RevokeOtherSessionsWithIDs(userID, keepSessionID)
+	return len(ids), err
+}
+
+func (s *Store) RevokeOtherSessionsWithIDs(userID, keepSessionID string) ([]string, error) {
 	rows, err := s.db.Query(`SELECT id FROM auth_sessions WHERE user_id = ? AND id <> ? AND revoked = 0`, userID, keepSessionID)
 	var ids []string
 	if err == nil {
@@ -882,12 +890,11 @@ func (s *Store) RevokeOtherSessions(userID, keepSessionID string) (int, error) {
 	}
 	s.sessMu.Unlock()
 
-	res, err := s.db.Exec(`UPDATE auth_sessions SET revoked = 1 WHERE user_id = ? AND id <> ? AND revoked = 0`, userID, keepSessionID)
+	_, err = s.db.Exec(`UPDATE auth_sessions SET revoked = 1 WHERE user_id = ? AND id <> ? AND revoked = 0`, userID, keepSessionID)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	aff, _ := res.RowsAffected()
-	return int(aff), nil
+	return ids, nil
 }
 
 // --- Security Audit Logs ---
@@ -961,9 +968,164 @@ func (s *Store) ListAuditLogsFiltered(filter AuditLogFilter) ([]AuditLogEntry, e
 
 // --- Connections, History & Snippets ---
 
+func isPortDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func splitURIUserinfoFallback(raw string) (schemePrefix, user, pass, hostPart, tail string, hasPass, ok bool) {
+	schemeIdx := strings.Index(raw, "://")
+	if schemeIdx <= 0 {
+		return "", "", "", "", "", false, false
+	}
+	schemePrefix = raw[:schemeIdx+3]
+	rest := raw[schemeIdx+3:]
+
+	var authority string
+	if firstSlash := strings.IndexByte(rest, '/'); firstSlash >= 0 {
+		authority = rest[:firstSlash]
+		tail = rest[firstSlash:]
+	} else if qIdx := strings.IndexAny(rest, "?#"); qIdx >= 0 {
+		if strings.Contains(rest[:qIdx], "@") {
+			authority = rest[:qIdx]
+			tail = rest[qIdx:]
+		} else if atIdx := strings.LastIndex(rest, "@"); atIdx > qIdx {
+			prefix := rest[:qIdx]
+			colonIdx := strings.Index(prefix, ":")
+			if colonIdx >= 0 && !isPortDigits(prefix[colonIdx+1:]) {
+				postAt := rest[atIdx+1:]
+				if postTailIdx := strings.IndexAny(postAt, "?#"); postTailIdx >= 0 {
+					authority = rest[:atIdx+1] + postAt[:postTailIdx]
+					tail = postAt[postTailIdx:]
+				} else {
+					authority = rest
+				}
+			} else {
+				authority = rest[:qIdx]
+				tail = rest[qIdx:]
+			}
+		} else {
+			authority = rest[:qIdx]
+			tail = rest[qIdx:]
+		}
+	} else {
+		authority = rest
+	}
+
+	atIdx := strings.LastIndex(authority, "@")
+	if atIdx < 0 {
+		return "", "", "", "", "", false, false
+	}
+	userinfo := authority[:atIdx]
+	hostPart = authority[atIdx+1:]
+	if colonIdx := strings.Index(userinfo, ":"); colonIdx >= 0 {
+		return schemePrefix, userinfo[:colonIdx], userinfo[colonIdx+1:], hostPart, tail, true, true
+	}
+	return schemePrefix, userinfo, "", hostPart, tail, false, true
+}
+
+// StripPasswordFromURI removes any embedded password from a connection URI (e.g. mongodb://user:pass@host/db -> mongodb://user@host/db)
+// so unremembered URI connections never persist database credentials on disk.
+func StripPasswordFromURI(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if u, err := url.Parse(raw); err == nil && u.User != nil {
+		username := u.User.Username()
+		if username != "" {
+			u.User = url.User(username)
+		} else {
+			u.User = nil
+		}
+		return u.String()
+	}
+	// Fallback for URIs containing unescaped special characters in userinfo (scheme://user:pass@host/...)
+	if schemePrefix, userOnly, _, hostPart, tail, hasPass, ok := splitURIUserinfoFallback(raw); ok && hasPass {
+		if userOnly != "" {
+			return schemePrefix + userOnly + "@" + hostPart + tail
+		}
+		return schemePrefix + hostPart + tail
+	}
+	return raw
+}
+
+// ExtractUsernameFromURI extracts the username component from a connection URI if present.
+func ExtractUsernameFromURI(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if u, err := url.Parse(raw); err == nil && u.User != nil {
+		return u.User.Username()
+	}
+	if _, user, _, _, _, _, ok := splitURIUserinfoFallback(raw); ok {
+		if unesc, err := url.PathUnescape(user); err == nil {
+			return unesc
+		}
+		return user
+	}
+	return ""
+}
+
+// ExtractPasswordFromURI extracts the password component from a connection URI if present.
+func ExtractPasswordFromURI(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if u, err := url.Parse(raw); err == nil && u.User != nil {
+		if pass, ok := u.User.Password(); ok {
+			return pass
+		}
+	}
+	if _, _, rawPass, _, _, hasPass, ok := splitURIUserinfoFallback(raw); ok && hasPass {
+		if unesc, err := url.PathUnescape(rawPass); err == nil {
+			return unesc
+		}
+		return rawPass
+	}
+	return ""
+}
+
+// InjectCredentialsIntoURI merges runtime username/password credentials into a connection URI.
+func InjectCredentialsIntoURI(rawURI, username, password string) string {
+	rawURI = strings.TrimSpace(rawURI)
+	if rawURI == "" {
+		return ""
+	}
+	stripped := StripPasswordFromURI(rawURI)
+	u, err := url.Parse(rawURI)
+	if err != nil || (u.User == nil && stripped != rawURI) {
+		u, err = url.Parse(stripped)
+		if err != nil {
+			return rawURI
+		}
+	}
+	effUser := strings.TrimSpace(username)
+	if effUser == "" && u.User != nil {
+		effUser = u.User.Username()
+	}
+	if effUser == "" && password == "" {
+		u.User = nil
+	} else if password == "" {
+		u.User = url.User(effUser)
+	} else {
+		u.User = url.UserPassword(effUser, password)
+	}
+	return u.String()
+}
+
 func (s *Store) ListConnections() ([]SavedConnection, error) {
 	rows, err := s.db.Query(`
-		SELECT id, name, type, color, host, port, username, password_enc, database_name, file_path, uri_enc, options_json, owner_id, visibility, created_at, updated_at
+		SELECT id, name, type, color, host, port, username, password_enc, database_name, file_path, uri_enc, options_json, owner_id, visibility, remember_password, created_at, updated_at
 		FROM connections ORDER BY created_at ASC
 	`)
 	if err != nil {
@@ -975,10 +1137,11 @@ func (s *Store) ListConnections() ([]SavedConnection, error) {
 	for rows.Next() {
 		var item SavedConnection
 		var passEnc, uriEnc, optJSON string
+		var rememberInt int
 		if err := rows.Scan(
 			&item.ID, &item.Name, &item.Type, &item.Color, &item.Host, &item.Port,
 			&item.Username, &passEnc, &item.Database, &item.FilePath, &uriEnc, &optJSON,
-			&item.OwnerID, &item.Visibility, &item.CreatedAt, &item.UpdatedAt,
+			&item.OwnerID, &item.Visibility, &rememberInt, &item.CreatedAt, &item.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -988,6 +1151,13 @@ func (s *Store) ListConnections() ([]SavedConnection, error) {
 		item.Editable = true
 		item.HasPassword = passEnc != ""
 		item.HasURI = uriEnc != ""
+		if !driver.IsCredentialedDriver(item.Type) {
+			item.RememberPassword = true
+			item.Unlocked = true
+		} else {
+			item.RememberPassword = rememberInt != 0
+			item.Unlocked = item.RememberPassword
+		}
 		item.Options = make(map[string]string)
 		_ = json.Unmarshal([]byte(optJSON), &item.Options)
 		item.Ephemeral = IsEphemeralConnection(item.Options)
@@ -999,12 +1169,13 @@ func (s *Store) ListConnections() ([]SavedConnection, error) {
 func (s *Store) GetDecryptedConnection(id string) (driver.ConnectionConfig, error) {
 	var cfg driver.ConnectionConfig
 	var passEnc, uriEnc, optJSON string
+	var rememberInt int
 	err := s.db.QueryRow(`
-		SELECT id, name, type, color, host, port, username, password_enc, database_name, file_path, uri_enc, options_json
+		SELECT id, name, type, color, host, port, username, password_enc, database_name, file_path, uri_enc, options_json, remember_password
 		FROM connections WHERE id = ?
 	`, id).Scan(
 		&cfg.ID, &cfg.Name, &cfg.Type, &cfg.Color, &cfg.Host, &cfg.Port,
-		&cfg.Username, &passEnc, &cfg.Database, &cfg.FilePath, &uriEnc, &optJSON,
+		&cfg.Username, &passEnc, &cfg.Database, &cfg.FilePath, &uriEnc, &optJSON, &rememberInt,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1012,6 +1183,8 @@ func (s *Store) GetDecryptedConnection(id string) (driver.ConnectionConfig, erro
 		}
 		return cfg, err
 	}
+	remember := !driver.IsCredentialedDriver(cfg.Type) || rememberInt != 0
+	cfg.RememberPassword = driver.BoolPtr(remember)
 	if passEnc != "" {
 		dec, err := s.vault.Decrypt(passEnc)
 		if err != nil {
@@ -1049,41 +1222,59 @@ func (s *Store) InsertConnectionWithMeta(cfg driver.ConnectionConfig, ownerID, v
 	if visibility != "private" && visibility != "shared" {
 		visibility = "shared"
 	}
+	remember := cfg.ShouldRememberPassword()
+	rememberInt := 0
+	if remember {
+		rememberInt = 1
+	}
+	passPlain := cfg.Password
+	uriPlain := cfg.URI
+	if !remember {
+		if strings.TrimSpace(cfg.Username) == "" && uriPlain != "" {
+			if extracted := ExtractUsernameFromURI(uriPlain); extracted != "" {
+				cfg.Username = extracted
+			}
+		}
+		passPlain = ""
+		uriPlain = StripPasswordFromURI(uriPlain)
+	}
 	optBytes, _ := json.Marshal(cfg.Options)
-	passEnc, err := s.vault.Encrypt(cfg.Password)
+	passEnc, err := s.vault.Encrypt(passPlain)
 	if err != nil {
 		return SavedConnection{}, err
 	}
-	uriEnc, err := s.vault.Encrypt(cfg.URI)
+	uriEnc, err := s.vault.Encrypt(uriPlain)
 	if err != nil {
 		return SavedConnection{}, err
 	}
 	_, err = s.db.Exec(`
-		INSERT INTO connections (id, name, type, color, host, port, username, password_enc, database_name, file_path, uri_enc, options_json, owner_id, visibility, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, cfg.ID, cfg.Name, cfg.Type, cfg.Color, cfg.Host, cfg.Port, cfg.Username, passEnc, cfg.Database, cfg.FilePath, uriEnc, string(optBytes), ownerID, visibility, now, now)
+		INSERT INTO connections (id, name, type, color, host, port, username, password_enc, database_name, file_path, uri_enc, options_json, owner_id, visibility, remember_password, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, cfg.ID, cfg.Name, cfg.Type, cfg.Color, cfg.Host, cfg.Port, cfg.Username, passEnc, cfg.Database, cfg.FilePath, uriEnc, string(optBytes), ownerID, visibility, rememberInt, now, now)
 	if err != nil {
 		return SavedConnection{}, err
 	}
 	return SavedConnection{
-		ID:          cfg.ID,
-		Name:        cfg.Name,
-		Type:        cfg.Type,
-		Color:       cfg.Color,
-		Host:        cfg.Host,
-		Port:        cfg.Port,
-		Username:    cfg.Username,
-		HasPassword: passEnc != "",
-		Database:    cfg.Database,
-		FilePath:    cfg.FilePath,
-		HasURI:      uriEnc != "",
-		Options:     cfg.Options,
-		OwnerID:     ownerID,
-		Visibility:  visibility,
-		Editable:    true,
-		Ephemeral:   IsEphemeralConnection(cfg.Options),
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:               cfg.ID,
+		Name:             cfg.Name,
+		Type:             cfg.Type,
+		Color:            cfg.Color,
+		Host:             cfg.Host,
+		Port:             cfg.Port,
+		Username:         cfg.Username,
+		HasPassword:      passEnc != "",
+		RememberPassword: remember,
+		Unlocked:         remember,
+		Database:         cfg.Database,
+		FilePath:         cfg.FilePath,
+		HasURI:           uriEnc != "",
+		Options:          cfg.Options,
+		OwnerID:          ownerID,
+		Visibility:       visibility,
+		Editable:         true,
+		Ephemeral:        IsEphemeralConnection(cfg.Options),
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}, nil
 }
 
@@ -1101,30 +1292,48 @@ func (s *Store) SaveConnectionWithMeta(cfg driver.ConnectionConfig, keepExisting
 	optBytes, _ := json.Marshal(cfg.Options)
 
 	var passEnc, uriEnc, createdAt string
+	var remember bool
 	var err error
 
 	if cfg.ID == "" {
 		cfg.ID = crypto.NewUUID()
 		createdAt = now
-		passEnc, err = s.vault.Encrypt(cfg.Password)
+		remember = cfg.ShouldRememberPassword()
+		rememberInt := 0
+		if remember {
+			rememberInt = 1
+		}
+		passPlain := cfg.Password
+		uriPlain := cfg.URI
+		if !remember {
+			if strings.TrimSpace(cfg.Username) == "" && uriPlain != "" {
+				if extracted := ExtractUsernameFromURI(uriPlain); extracted != "" {
+					cfg.Username = extracted
+				}
+			}
+			passPlain = ""
+			uriPlain = StripPasswordFromURI(uriPlain)
+		}
+		passEnc, err = s.vault.Encrypt(passPlain)
 		if err != nil {
 			return SavedConnection{}, err
 		}
-		uriEnc, err = s.vault.Encrypt(cfg.URI)
+		uriEnc, err = s.vault.Encrypt(uriPlain)
 		if err != nil {
 			return SavedConnection{}, err
 		}
 		_, err = s.db.Exec(`
-			INSERT INTO connections (id, name, type, color, host, port, username, password_enc, database_name, file_path, uri_enc, options_json, owner_id, visibility, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, cfg.ID, cfg.Name, cfg.Type, cfg.Color, cfg.Host, cfg.Port, cfg.Username, passEnc, cfg.Database, cfg.FilePath, uriEnc, string(optBytes), ownerID, visibility, now, now)
+			INSERT INTO connections (id, name, type, color, host, port, username, password_enc, database_name, file_path, uri_enc, options_json, owner_id, visibility, remember_password, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, cfg.ID, cfg.Name, cfg.Type, cfg.Color, cfg.Host, cfg.Port, cfg.Username, passEnc, cfg.Database, cfg.FilePath, uriEnc, string(optBytes), ownerID, visibility, rememberInt, now, now)
 		if err != nil {
 			return SavedConnection{}, err
 		}
 	} else {
-		var oldPassEnc, oldURIEnc, oldOwner, oldVis string
-		err = s.db.QueryRow(`SELECT password_enc, uri_enc, owner_id, visibility, created_at FROM connections WHERE id = ?`, cfg.ID).
-			Scan(&oldPassEnc, &oldURIEnc, &oldOwner, &oldVis, &createdAt)
+		var oldUsername, oldPassEnc, oldURIEnc, oldOwner, oldVis string
+		var oldRememberInt int
+		err = s.db.QueryRow(`SELECT username, password_enc, uri_enc, owner_id, visibility, remember_password, created_at FROM connections WHERE id = ?`, cfg.ID).
+			Scan(&oldUsername, &oldPassEnc, &oldURIEnc, &oldOwner, &oldVis, &oldRememberInt, &createdAt)
 		if err != nil {
 			return SavedConnection{}, fmt.Errorf("connection not found: %w", err)
 		}
@@ -1134,51 +1343,103 @@ func (s *Store) SaveConnectionWithMeta(cfg driver.ConnectionConfig, keepExisting
 		if visibility == "" {
 			visibility = oldVis
 		}
-		if cfg.Password == "" && keepExistingSecret {
-			passEnc = oldPassEnc
+		if !driver.IsCredentialedDriver(cfg.Type) {
+			remember = true
+		} else if cfg.RememberPassword != nil {
+			remember = *cfg.RememberPassword
 		} else {
-			passEnc, err = s.vault.Encrypt(cfg.Password)
+			remember = oldRememberInt != 0
+		}
+		rememberInt := 0
+		if remember {
+			rememberInt = 1
+		}
+
+		if !remember {
+			// Turning off or keeping RememberPassword=false guarantees zero password stored on disk.
+			passEnc = ""
+			rawURI := cfg.URI
+			if rawURI == "" && keepExistingSecret && oldURIEnc != "" {
+				if decURI, decErr := s.vault.Decrypt(oldURIEnc); decErr == nil {
+					rawURI = decURI
+				}
+			}
+			if strings.TrimSpace(cfg.Username) == "" && rawURI != "" {
+				if extracted := ExtractUsernameFromURI(rawURI); extracted != "" {
+					cfg.Username = extracted
+				}
+			}
+			uriEnc, err = s.vault.Encrypt(StripPasswordFromURI(rawURI))
 			if err != nil {
 				return SavedConnection{}, err
 			}
-		}
-		if cfg.URI == "" && keepExistingSecret {
-			uriEnc = oldURIEnc
 		} else {
-			uriEnc, err = s.vault.Encrypt(cfg.URI)
-			if err != nil {
-				return SavedConnection{}, err
+			var effectivePassword string
+			if cfg.Password == "" && keepExistingSecret {
+				passEnc = oldPassEnc
+				if oldPassEnc != "" {
+					effectivePassword, _ = s.vault.Decrypt(oldPassEnc)
+				}
+			} else {
+				effectivePassword = cfg.Password
+				passEnc, err = s.vault.Encrypt(cfg.Password)
+				if err != nil {
+					return SavedConnection{}, err
+				}
+			}
+			if cfg.URI == "" && keepExistingSecret {
+				uriEnc = oldURIEnc
+				if oldURIEnc != "" && (cfg.Password != "" || strings.TrimSpace(cfg.Username) != strings.TrimSpace(oldUsername)) {
+					if decURI, decErr := s.vault.Decrypt(oldURIEnc); decErr == nil && decURI != "" {
+						passForURI := effectivePassword
+						if passForURI == "" && cfg.Password == "" {
+							passForURI = ExtractPasswordFromURI(decURI)
+						}
+						updatedURI := InjectCredentialsIntoURI(decURI, cfg.Username, passForURI)
+						uriEnc, err = s.vault.Encrypt(updatedURI)
+						if err != nil {
+							return SavedConnection{}, err
+						}
+					}
+				}
+			} else {
+				uriEnc, err = s.vault.Encrypt(cfg.URI)
+				if err != nil {
+					return SavedConnection{}, err
+				}
 			}
 		}
 		_, err = s.db.Exec(`
 			UPDATE connections
-			SET name=?, type=?, color=?, host=?, port=?, username=?, password_enc=?, database_name=?, file_path=?, uri_enc=?, options_json=?, visibility=?, updated_at=?
+			SET name=?, type=?, color=?, host=?, port=?, username=?, password_enc=?, database_name=?, file_path=?, uri_enc=?, options_json=?, visibility=?, remember_password=?, updated_at=?
 			WHERE id=?
-		`, cfg.Name, cfg.Type, cfg.Color, cfg.Host, cfg.Port, cfg.Username, passEnc, cfg.Database, cfg.FilePath, uriEnc, string(optBytes), visibility, now, cfg.ID)
+		`, cfg.Name, cfg.Type, cfg.Color, cfg.Host, cfg.Port, cfg.Username, passEnc, cfg.Database, cfg.FilePath, uriEnc, string(optBytes), visibility, rememberInt, now, cfg.ID)
 		if err != nil {
 			return SavedConnection{}, err
 		}
 	}
 
 	return SavedConnection{
-		ID:          cfg.ID,
-		Name:        cfg.Name,
-		Type:        cfg.Type,
-		Color:       cfg.Color,
-		Host:        cfg.Host,
-		Port:        cfg.Port,
-		Username:    cfg.Username,
-		HasPassword: passEnc != "",
-		Database:    cfg.Database,
-		FilePath:    cfg.FilePath,
-		HasURI:      uriEnc != "",
-		Options:     cfg.Options,
-		OwnerID:     ownerID,
-		Visibility:  visibility,
-		Editable:    true,
-		Ephemeral:   IsEphemeralConnection(cfg.Options),
-		CreatedAt:   createdAt,
-		UpdatedAt:   now,
+		ID:               cfg.ID,
+		Name:             cfg.Name,
+		Type:             cfg.Type,
+		Color:            cfg.Color,
+		Host:             cfg.Host,
+		Port:             cfg.Port,
+		Username:         cfg.Username,
+		HasPassword:      passEnc != "",
+		RememberPassword: remember,
+		Unlocked:         remember,
+		Database:         cfg.Database,
+		FilePath:         cfg.FilePath,
+		HasURI:           uriEnc != "",
+		Options:          cfg.Options,
+		OwnerID:          ownerID,
+		Visibility:       visibility,
+		Editable:         true,
+		Ephemeral:        IsEphemeralConnection(cfg.Options),
+		CreatedAt:        createdAt,
+		UpdatedAt:        now,
 	}, nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/url"
 	"sort"
@@ -1041,7 +1042,13 @@ func (d *Driver) ListIndexes(ctx context.Context, database, collection string) (
 				Sparse: sparse,
 			}
 			if expRaw, exists := m["expireAfterSeconds"]; exists && expRaw != nil {
-				sec := int32(toInt64(expRaw))
+				v := toInt64(expRaw)
+				if v < 0 {
+					v = 0
+				} else if v > math.MaxInt32 {
+					v = math.MaxInt32
+				}
+				sec := int32(v)
 				info.ExpireAfterSeconds = &sec
 			}
 			if pfRaw, exists := m["partialFilterExpression"]; exists && pfRaw != nil {
@@ -1125,7 +1132,7 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 		CanKillSession: true,
 	}
 	var status bson.M
-	if d.client.Database("admin").RunCommand(ctx, bson.D{{Key: "serverStatus", Value: 1}}).Decode(&status) == nil {
+	if err := d.client.Database("admin").RunCommand(ctx, bson.D{{Key: "serverStatus", Value: 1}}).Decode(&status); err == nil {
 		snap.Version = fmt.Sprintf("%v", status["version"])
 		snap.UptimeSec = toInt64(status["uptime"])
 		if conns, ok := status["connections"].(bson.M); ok {
@@ -1139,6 +1146,8 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 				driver.MonitorMetric{Key: "resident", Label: "Resident Memory", Value: fmt.Sprintf("%d", toInt64(mem["resident"])), Unit: "MB"},
 			)
 		}
+	} else if sqlbase.IsAuthError("mongodb", err) {
+		return snap, err
 	}
 
 	if dbs, err := d.ListDatabases(ctx); err == nil {

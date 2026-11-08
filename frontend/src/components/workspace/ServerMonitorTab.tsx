@@ -1,4 +1,4 @@
-import React, { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Button,
   Card,
@@ -15,7 +15,7 @@ import {
   message,
 } from 'antd';
 import { ReloadOutlined, SearchOutlined, StopOutlined } from '@ant-design/icons';
-import { api } from '../../api/client';
+import { api, isAuthPromptCancelledError } from '../../api/client';
 import { ResizableTable } from '../common/ResizableTable';
 import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
@@ -24,7 +24,8 @@ import type { MonitorSnapshot, SessionItem, StorageItem, WorkspaceTab } from '..
 import { formatBytes, formatDuration } from '../../utils/format';
 
 export const ServerMonitorTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
-  const { activeTabKey, isDesktop, role } = useWorkbenchStore();
+  const { activeTabKey, isDesktop, role, connections, treeRefreshTick } = useWorkbenchStore();
+  const conn = connections.find((c) => c.id === tab.connectionId);
   const { isMobile } = useResponsive();
   const canWrite = isDesktop || role !== 'readonly';
   const { t } = useI18n();
@@ -32,13 +33,20 @@ export const ServerMonitorTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
   const [loading, setLoading] = useState(false);
   const [pollSec, setPollSec] = useState<number>(0);
   const [sessionFilter, setSessionFilter] = useState('');
+  const needsUnlockReloadRef = useRef(false);
 
   const fetchMonitor = useCallback(async () => {
     setLoading(true);
     try {
       const snap = await api.getMonitor(tab.connectionId);
+      needsUnlockReloadRef.current = false;
       setSnapshot(snap);
     } catch (err: any) {
+      if (isAuthPromptCancelledError(err)) {
+        needsUnlockReloadRef.current = true;
+        setPollSec(0);
+        return;
+      }
       message.error(err.message);
     } finally {
       setLoading(false);
@@ -48,6 +56,13 @@ export const ServerMonitorTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
   useEffect(() => {
     fetchMonitor();
   }, [fetchMonitor]);
+
+  useEffect(() => {
+    if (needsUnlockReloadRef.current && conn?.unlocked) {
+      needsUnlockReloadRef.current = false;
+      void fetchMonitor();
+    }
+  }, [conn?.unlocked, treeRefreshTick, fetchMonitor]);
 
   useEffect(() => {
     if (pollSec <= 0 || activeTabKey !== tab.key) return;
@@ -162,10 +177,22 @@ export const ServerMonitorTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
     [t, maxStorageBytes]
   );
 
+  const sessionFilterInput = (
+    <Input
+      size="small"
+      allowClear
+      prefix={<SearchOutlined />}
+      placeholder={t('Filter user / SQL / ID')}
+      style={{ width: isMobile ? '100%' : 240 }}
+      value={sessionFilter}
+      onChange={(e) => setSessionFilter(e.target.value)}
+    />
+  );
+
   return (
     <div style={{ padding: isMobile ? 8 : 16, height: '100%', overflowY: 'auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
-        <Space>
+        <Space wrap>
           <Typography.Title level={5} style={{ margin: 0 }}>
             {tab.connName} — {t('Live Runtime Monitor & Session Governance')}
           </Typography.Title>
@@ -173,7 +200,7 @@ export const ServerMonitorTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
           {(snapshot?.uptimeSec ?? 0) > 0 && <Tag color="green">{formatDuration(snapshot?.uptimeSec)}</Tag>}
         </Space>
 
-        <Space>
+        <Space wrap>
           <Select
             size="small"
             value={pollSec}
@@ -213,18 +240,9 @@ export const ServerMonitorTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
           <Card
             size="small"
             title={t('Active Sessions / Processlist')}
-            extra={
-              <Input
-                size="small"
-                allowClear
-                prefix={<SearchOutlined />}
-                placeholder={t('Filter user / SQL / ID')}
-                style={{ width: 200, maxWidth: '52vw' }}
-                value={sessionFilter}
-                onChange={(e) => setSessionFilter(e.target.value)}
-              />
-            }
+            extra={!isMobile ? sessionFilterInput : undefined}
           >
+            {isMobile && <div style={{ marginBottom: 8 }}>{sessionFilterInput}</div>}
             <ResizableTable<SessionItem>
               rowKey="id"
               size="small"

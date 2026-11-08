@@ -25,7 +25,7 @@ func (s *Server) handleGetObjectDDL(c *Context) {
 		c.Query("objectName"),
 	)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"ddl": ddl})
@@ -51,12 +51,12 @@ func (s *Server) handlePrivListUsers(c *Context) {
 	}
 	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	users, err := dbprivs.ListUsers(c.Request.Context(), cfg.Type, drv, c.Query("database"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	if users == nil {
@@ -72,7 +72,7 @@ func (s *Server) handlePrivGetUserGrants(c *Context) {
 	}
 	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	grants, err := dbprivs.GetUserGrants(
@@ -84,7 +84,7 @@ func (s *Server) handlePrivGetUserGrants(c *Context) {
 		c.Query("database"),
 	)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	if grants == nil {
@@ -123,7 +123,7 @@ func (s *Server) handlePrivExecute(c *Context) {
 	}
 	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	var req dbprivs.ActionRequest
@@ -135,7 +135,7 @@ func (s *Server) handlePrivExecute(c *Context) {
 	redacted, _ := dbprivs.BuildRedactedStatements(cfg.Type, req)
 	_, err = dbprivs.ExecuteAction(c.Request.Context(), cfg.Type, drv, req)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error(), "statements": redacted})
+		s.respondConnErrorWithFields(c, connID, cfg.Type, err, H{"statements": redacted})
 		return
 	}
 	s.store.AddHistory(store.HistoryEntry{

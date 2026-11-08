@@ -11,6 +11,7 @@ import (
 	"dbharbor/backend/internal/driver"
 	"dbharbor/backend/internal/driver/mongodb"
 	"dbharbor/backend/internal/driver/redis"
+	"dbharbor/backend/internal/driver/sqlbase"
 	"dbharbor/backend/internal/store"
 )
 
@@ -21,7 +22,7 @@ func (s *Server) getKVDriverAccess(c *Context, requireWrite bool) (driver.KeyVal
 	}
 	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return nil, cfg, false
 	}
 	kvDrv, ok := drv.(driver.KeyValueDriver)
@@ -39,7 +40,7 @@ func (s *Server) getDocDriverAccess(c *Context, requireWrite bool) (driver.Docum
 	}
 	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return nil, cfg, false
 	}
 	docDrv, ok := drv.(driver.DocumentDriver)
@@ -53,7 +54,7 @@ func (s *Server) getDocDriverAccess(c *Context, requireWrite bool) (driver.Docum
 // Redis Handlers
 
 func (s *Server) handleKVScan(c *Context) {
-	kvDrv, _, ok := s.getKVDriverAccess(c, false)
+	kvDrv, cfg, ok := s.getKVDriverAccess(c, false)
 	if !ok {
 		return
 	}
@@ -62,28 +63,28 @@ func (s *Server) handleKVScan(c *Context) {
 	count, _ := strconv.ParseInt(c.DefaultQuery("count", "200"), 10, 64)
 	res, err := kvDrv.ScanKeys(c.Request.Context(), dbIdx, c.DefaultQuery("pattern", "*"), cursor, count)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, res)
 }
 
 func (s *Server) handleKVGetKey(c *Context) {
-	kvDrv, _, ok := s.getKVDriverAccess(c, false)
+	kvDrv, cfg, ok := s.getKVDriverAccess(c, false)
 	if !ok {
 		return
 	}
 	dbIdx, _ := strconv.Atoi(c.DefaultQuery("db", "0"))
 	detail, err := kvDrv.GetKey(c.Request.Context(), dbIdx, c.Query("key"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, detail)
 }
 
 func (s *Server) handleKVSetKey(c *Context) {
-	kvDrv, _, ok := s.getKVDriverAccess(c, true)
+	kvDrv, cfg, ok := s.getKVDriverAccess(c, true)
 	if !ok {
 		return
 	}
@@ -96,14 +97,14 @@ func (s *Server) handleKVSetKey(c *Context) {
 		return
 	}
 	if err := kvDrv.SetKey(c.Request.Context(), req.DB, req.KVSetRequest); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"message": "Key saved successfully"})
 }
 
 func (s *Server) handleKVMutateItem(c *Context) {
-	kvDrv, _, ok := s.getKVDriverAccess(c, true)
+	kvDrv, cfg, ok := s.getKVDriverAccess(c, true)
 	if !ok {
 		return
 	}
@@ -116,14 +117,14 @@ func (s *Server) handleKVMutateItem(c *Context) {
 		return
 	}
 	if err := kvDrv.MutateCollectionItem(c.Request.Context(), req.DB, req.KVItemMutationRequest); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"message": "Operation completed successfully"})
 }
 
 func (s *Server) handleKVDeleteKeys(c *Context) {
-	kvDrv, _, ok := s.getKVDriverAccess(c, true)
+	kvDrv, cfg, ok := s.getKVDriverAccess(c, true)
 	if !ok {
 		return
 	}
@@ -137,14 +138,14 @@ func (s *Server) handleKVDeleteKeys(c *Context) {
 	}
 	deleted, err := kvDrv.DeleteKeys(c.Request.Context(), req.DB, req.Keys)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"deleted": deleted})
 }
 
 func (s *Server) handleKVSetTTL(c *Context) {
-	kvDrv, _, ok := s.getKVDriverAccess(c, true)
+	kvDrv, cfg, ok := s.getKVDriverAccess(c, true)
 	if !ok {
 		return
 	}
@@ -158,7 +159,7 @@ func (s *Server) handleKVSetTTL(c *Context) {
 		return
 	}
 	if err := kvDrv.SetTTL(c.Request.Context(), req.DB, req.Key, req.TTL); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"message": "TTL updated successfully"})
@@ -186,7 +187,7 @@ func (s *Server) handleKVRenameKey(c *Context) {
 	}
 	start := time.Now()
 	if err := ext.RenameKey(c.Request.Context(), req.DB, req.OldKey, req.NewKey, req.NXOnly); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	s.store.AddHistory(store.HistoryEntry{
@@ -219,7 +220,7 @@ func (s *Server) handleKVDuplicateKey(c *Context) {
 	}
 	start := time.Now()
 	if err := ext.DuplicateKey(c.Request.Context(), req.DB, req.SrcKey, req.DstKey, req.Replace); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	s.store.AddHistory(store.HistoryEntry{
@@ -249,7 +250,7 @@ func (s *Server) handleKVFlushDB(c *Context) {
 	}
 	start := time.Now()
 	if err := ext.FlushDB(c.Request.Context(), req.DB); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	s.store.AddHistory(store.HistoryEntry{
@@ -292,7 +293,7 @@ func (s *Server) handleKVCommand(c *Context) {
 		ElapsedMs: res.ElapsedMs, Status: status, ErrorMsg: errMsg,
 	})
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, res)
@@ -306,7 +307,7 @@ type kvBackupPayload struct {
 }
 
 func (s *Server) handleKVExportKeys(c *Context) {
-	kvDrv, _, ok := s.getKVDriverAccess(c, false)
+	kvDrv, cfg, ok := s.getKVDriverAccess(c, false)
 	if !ok {
 		return
 	}
@@ -335,7 +336,7 @@ func (s *Server) handleKVExportKeys(c *Context) {
 		for len(keys) < req.MaxKeys {
 			scanRes, err := kvDrv.ScanKeys(ctx, req.DB, pattern, cursor, 200)
 			if err != nil {
-				c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+				s.respondConnError(c, cfg.ID, cfg.Type, err)
 				return
 			}
 			for _, ks := range scanRes.Keys {
@@ -420,7 +421,7 @@ func (s *Server) handleKVImportKeys(c *Context) {
 }
 
 func (s *Server) handleKVGetStreamInfo(c *Context) {
-	kvDrv, _, ok := s.getKVDriverAccess(c, false)
+	kvDrv, cfg, ok := s.getKVDriverAccess(c, false)
 	if !ok {
 		return
 	}
@@ -432,7 +433,7 @@ func (s *Server) handleKVGetStreamInfo(c *Context) {
 	dbIdx, _ := strconv.Atoi(c.DefaultQuery("db", "0"))
 	info, err := diag.GetStreamInfo(c.Request.Context(), dbIdx, c.Query("key"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, info)
@@ -455,7 +456,7 @@ func (s *Server) handleKVManageStreamGroup(c *Context) {
 	}
 	start := time.Now()
 	if err := diag.ManageStreamGroup(c.Request.Context(), req); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	s.store.AddHistory(store.HistoryEntry{
@@ -468,7 +469,7 @@ func (s *Server) handleKVManageStreamGroup(c *Context) {
 }
 
 func (s *Server) handleKVGetDiagnostics(c *Context) {
-	kvDrv, _, ok := s.getKVDriverAccess(c, false)
+	kvDrv, cfg, ok := s.getKVDriverAccess(c, false)
 	if !ok {
 		return
 	}
@@ -483,7 +484,7 @@ func (s *Server) handleKVGetDiagnostics(c *Context) {
 		pattern := strings.TrimSpace(c.DefaultQuery("pattern", "*"))
 		items, err := diag.GetConfig(c.Request.Context(), pattern)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+			s.respondConnError(c, cfg.ID, cfg.Type, err)
 			return
 		}
 		c.JSON(http.StatusOK, H{"config": items})
@@ -491,7 +492,7 @@ func (s *Server) handleKVGetDiagnostics(c *Context) {
 		count, _ := strconv.ParseInt(c.DefaultQuery("count", "50"), 10, 64)
 		entries, err := diag.GetSlowlog(c.Request.Context(), count)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+			s.respondConnError(c, cfg.ID, cfg.Type, err)
 			return
 		}
 		c.JSON(http.StatusOK, H{"slowlog": entries})
@@ -523,7 +524,7 @@ func (s *Server) handleKVActionDiagnostics(c *Context) {
 	switch strings.ToUpper(strings.TrimSpace(req.Action)) {
 	case "RESET_SLOWLOG":
 		if err := diag.ResetSlowlog(c.Request.Context()); err != nil {
-			c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+			s.respondConnError(c, cfg.ID, cfg.Type, err)
 			return
 		}
 		s.store.AddHistory(store.HistoryEntry{
@@ -533,7 +534,7 @@ func (s *Server) handleKVActionDiagnostics(c *Context) {
 		c.JSON(http.StatusOK, H{"message": "Slowlog reset successfully"})
 	case "SET_CONFIG":
 		if err := diag.SetConfig(c.Request.Context(), req.Key, req.Value); err != nil {
-			c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+			s.respondConnError(c, cfg.ID, cfg.Type, err)
 			return
 		}
 		s.store.AddHistory(store.HistoryEntry{
@@ -544,7 +545,7 @@ func (s *Server) handleKVActionDiagnostics(c *Context) {
 	case "PUBLISH":
 		receivers, err := diag.PublishMessage(c.Request.Context(), req.Channel, req.Message)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+			s.respondConnError(c, cfg.ID, cfg.Type, err)
 			return
 		}
 		s.store.AddHistory(store.HistoryEntry{
@@ -560,20 +561,20 @@ func (s *Server) handleKVActionDiagnostics(c *Context) {
 // MongoDB Handlers
 
 func (s *Server) handleDocListCollections(c *Context) {
-	docDrv, _, ok := s.getDocDriverAccess(c, false)
+	docDrv, cfg, ok := s.getDocDriverAccess(c, false)
 	if !ok {
 		return
 	}
 	colls, err := docDrv.ListCollections(c.Request.Context(), c.Query("database"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"collections": colls})
 }
 
 func (s *Server) handleDocGetCollectionOptions(c *Context) {
-	docDrv, _, ok := s.getDocDriverAccess(c, false)
+	docDrv, cfg, ok := s.getDocDriverAccess(c, false)
 	if !ok {
 		return
 	}
@@ -584,7 +585,7 @@ func (s *Server) handleDocGetCollectionOptions(c *Context) {
 	}
 	summary, err := gov.GetCollectionOptions(c.Request.Context(), c.Query("database"), c.Query("collection"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, summary)
@@ -609,7 +610,7 @@ func (s *Server) handleDocCreateCollection(c *Context) {
 		err = docDrv.CreateCollection(c.Request.Context(), req.Database, req.Collection)
 	}
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	s.store.AddHistory(store.HistoryEntry{
@@ -638,7 +639,7 @@ func (s *Server) handleDocModifyCollectionOptions(c *Context) {
 	req.Collection = strings.TrimSpace(req.Collection)
 	start := time.Now()
 	if err := gov.ModifyCollectionOptions(c.Request.Context(), req); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	s.store.AddHistory(store.HistoryEntry{
@@ -650,12 +651,12 @@ func (s *Server) handleDocModifyCollectionOptions(c *Context) {
 }
 
 func (s *Server) handleDocDropCollection(c *Context) {
-	docDrv, _, ok := s.getDocDriverAccess(c, true)
+	docDrv, cfg, ok := s.getDocDriverAccess(c, true)
 	if !ok {
 		return
 	}
 	if err := docDrv.DropCollection(c.Request.Context(), c.Query("database"), c.Query("collection")); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"message": "Collection dropped"})
@@ -682,7 +683,7 @@ func (s *Server) handleDocRenameCollection(c *Context) {
 	}
 	start := time.Now()
 	if err := ext.RenameCollection(c.Request.Context(), req.Database, req.OldName, req.NewName); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	s.store.AddHistory(store.HistoryEntry{
@@ -694,7 +695,7 @@ func (s *Server) handleDocRenameCollection(c *Context) {
 }
 
 func (s *Server) handleDocExport(c *Context) {
-	docDrv, _, ok := s.getDocDriverAccess(c, false)
+	docDrv, cfg, ok := s.getDocDriverAccess(c, false)
 	if !ok {
 		return
 	}
@@ -723,15 +724,29 @@ func (s *Server) handleDocExport(c *Context) {
 		contentType = "text/csv; charset=utf-8"
 	}
 	filename := fmt.Sprintf("%s_%s.%s", sanitizeExportName(collection), time.Now().Format("20060102_150405"), extName)
-	c.Header("Content-Type", contentType)
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
-	if err := ext.StreamExportCollection(c.Request.Context(), database, collection, c.Query("filterJson"), c.Query("sortJson"), format, maxRows, c.Writer); err != nil {
-		_, _ = fmt.Fprintf(c.Writer, "\n/* Export Error: %s */\n", err.Error())
+	dw := &delayedAttachmentWriter{
+		w:           c.Writer,
+		contentType: contentType,
+		disposition: fmt.Sprintf("attachment; filename=%q", filename),
 	}
+	if err := ext.StreamExportCollection(c.Request.Context(), database, collection, c.Query("filterJson"), c.Query("sortJson"), format, maxRows, dw); err != nil {
+		if !dw.wroteHeader {
+			s.respondConnError(c, cfg.ID, cfg.Type, err)
+			return
+		}
+		if sqlbase.IsAuthError(cfg.Type, err) {
+			s.evictCallerConnPool(c, cfg.ID)
+		}
+		if format == "sql" {
+			_, _ = fmt.Fprintf(dw, "\n/* Export Error: %s */\n", err.Error())
+		}
+		return
+	}
+	dw.commitHeaders()
 }
 
 func (s *Server) handleDocFind(c *Context) {
-	docDrv, _, ok := s.getDocDriverAccess(c, false)
+	docDrv, cfg, ok := s.getDocDriverAccess(c, false)
 	if !ok {
 		return
 	}
@@ -742,14 +757,14 @@ func (s *Server) handleDocFind(c *Context) {
 	}
 	res, err := docDrv.FindDocuments(c.Request.Context(), req)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, res)
 }
 
 func (s *Server) handleDocInsert(c *Context) {
-	docDrv, _, ok := s.getDocDriverAccess(c, true)
+	docDrv, cfg, ok := s.getDocDriverAccess(c, true)
 	if !ok {
 		return
 	}
@@ -764,7 +779,7 @@ func (s *Server) handleDocInsert(c *Context) {
 	}
 	id, err := docDrv.InsertDocument(c.Request.Context(), req.Database, req.Collection, req.Document)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"insertedId": id})
@@ -838,7 +853,7 @@ func (s *Server) handleDocImport(c *Context) {
 
 	res, err := extDrv.ImportDocuments(c.Request.Context(), database, collection, reader, format, continueOnError)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error(), "importedRows": res.ImportedRows})
+		s.respondConnErrorWithFields(c, cfg.ID, cfg.Type, err, H{"importedRows": res.ImportedRows})
 		return
 	}
 	s.store.AddHistory(store.HistoryEntry{
@@ -850,7 +865,7 @@ func (s *Server) handleDocImport(c *Context) {
 }
 
 func (s *Server) handleDocUpdate(c *Context) {
-	docDrv, _, ok := s.getDocDriverAccess(c, true)
+	docDrv, cfg, ok := s.getDocDriverAccess(c, true)
 	if !ok {
 		return
 	}
@@ -865,14 +880,14 @@ func (s *Server) handleDocUpdate(c *Context) {
 		return
 	}
 	if err := docDrv.UpdateDocument(c.Request.Context(), req.Database, req.Collection, req.ID, req.Document); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"message": "Document updated successfully"})
 }
 
 func (s *Server) handleDocDelete(c *Context) {
-	docDrv, _, ok := s.getDocDriverAccess(c, true)
+	docDrv, cfg, ok := s.getDocDriverAccess(c, true)
 	if !ok {
 		return
 	}
@@ -887,27 +902,27 @@ func (s *Server) handleDocDelete(c *Context) {
 	}
 	cnt, err := docDrv.DeleteDocuments(c.Request.Context(), req.Database, req.Collection, req.IDs)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"deleted": cnt})
 }
 
 func (s *Server) handleDocListIndexes(c *Context) {
-	docDrv, _, ok := s.getDocDriverAccess(c, false)
+	docDrv, cfg, ok := s.getDocDriverAccess(c, false)
 	if !ok {
 		return
 	}
 	idxs, err := docDrv.ListIndexes(c.Request.Context(), c.Query("database"), c.Query("collection"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"indexes": idxs})
 }
 
 func (s *Server) handleDocCreateIndex(c *Context) {
-	docDrv, _, ok := s.getDocDriverAccess(c, true)
+	docDrv, cfg, ok := s.getDocDriverAccess(c, true)
 	if !ok {
 		return
 	}
@@ -923,19 +938,19 @@ func (s *Server) handleDocCreateIndex(c *Context) {
 		err = docDrv.CreateIndex(c.Request.Context(), req.Database, req.Collection, req.KeysJSON, req.Unique)
 	}
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"message": "Index created successfully"})
 }
 
 func (s *Server) handleDocDropIndex(c *Context) {
-	docDrv, _, ok := s.getDocDriverAccess(c, true)
+	docDrv, cfg, ok := s.getDocDriverAccess(c, true)
 	if !ok {
 		return
 	}
 	if err := docDrv.DropIndex(c.Request.Context(), c.Query("database"), c.Query("collection"), c.Query("name")); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"message": "Index dropped"})
@@ -974,7 +989,7 @@ func (s *Server) handleDocRunCommand(c *Context) {
 		Database: req.Database, Query: req.CommandJSON, ElapsedMs: elapsed, Status: status, ErrorMsg: errMsg,
 	})
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"result": out, "elapsedMs": elapsed})
@@ -987,9 +1002,9 @@ func (s *Server) handleGetMonitor(c *Context) {
 	if !s.authorizeConn(c, connID, false) {
 		return
 	}
-	drv, _, err := s.acquireConnDriver(c, connID)
+	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	mp, ok := drv.(driver.MonitorProvider)
@@ -999,7 +1014,7 @@ func (s *Server) handleGetMonitor(c *Context) {
 	}
 	snap, err := mp.GetMonitorSnapshot(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	if !c.CanWrite() {
@@ -1013,9 +1028,9 @@ func (s *Server) handleKillSession(c *Context) {
 	if !s.authorizeConn(c, connID, true) {
 		return
 	}
-	drv, _, err := s.acquireConnDriver(c, connID)
+	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	mp, ok := drv.(driver.MonitorProvider)
@@ -1031,7 +1046,7 @@ func (s *Server) handleKillSession(c *Context) {
 		return
 	}
 	if err := mp.KillSession(c.Request.Context(), req.SessionID); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"message": "Session termination command sent"})

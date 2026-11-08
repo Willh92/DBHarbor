@@ -3,7 +3,7 @@
 **語言切換**: [English](./README.md) | [简体中文](./README.zh-CN.md) | **繁體中文** | [日本語](./README.ja.md)
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.2-1677ff.svg)](./CHANGELOG.zh-TW.md)
+[![Version](https://img.shields.io/badge/Version-v1.0.3-1677ff.svg)](./CHANGELOG.zh-TW.md)
 [![CGO_ENABLED=0](https://img.shields.io/badge/Go-CGO__ENABLED%3D0-00ADD8.svg)](https://github.com/Willh92/DBHarbor.git)
 
 融合 **phpMyAdmin 經典直覺式資料表操作體驗** 與 **現代多引擎 IDE 能力** 的零外部相依性單一執行檔跨平台 Web 資料庫管理平台。
@@ -26,6 +26,7 @@
   - **串流匯入匯出與批次資料表維運**：支援整庫與多表勾選 SQL Dump、單表/篩選結果/自訂查詢/MongoDB/Redis/DuckDB 串流匯出與 `< 64 KiB` 記憶體串流上傳（`SQL` / `CSV-BOM` / `CSV` / `JSON` / `JSONL` / `Markdown`）、串流記憶體上限保護、批次匯入與直接貼上執行 SQL 腳本。
 - **Web 多成員三級 RBAC、登入品牌自訂、安全沙箱與管理員緊急復原 *(僅 Web 服務版)***：
   - **零預設弱密碼初始化、登入頁品牌自訂與防搜尋引擎收錄**：首次啟動開啟一次性**初始化管理員帳號精靈**（密碼至少 `8` 碼，移除預設 `admin123`）、零指紋登入介面、支援自訂瀏覽器 `<title>`、頂部圖示（上傳 `<= 128 KB` 圖示並同步 Favicon）與主副標題，內建 `/robots.txt`、`X-Robots-Tag` 與 `<meta name="robots">` 三重防爬蟲收錄保護。
+  - **預設不落盤的工作階段級資料庫憑證策略與驗證失敗重輸**：新增資料庫連線**預設不勾選「記住密碼」**（密碼僅保留於目前登入工作階段記憶體中、磁碟零寫入，下次登入連線時自動彈窗提示輸入；可選勾選以 `AES-256-GCM` 加密持久化儲存，已記住密碼的連線亦可隨時透過「編輯連線」關閉記住並立即清除本機密文）；當記住密碼的連線因資料庫帳戶或密碼變更/錯誤導致連線或執行失敗時，系統自動釋放舊連線池並彈出憑證重輸視窗，驗證通過後無縫重試原請求。
   - **多成員 RBAC、2FA 與縱深安全強化**：三級 RBAC（`Admin` / `Read-Write` / `Read-Only`）與依帳號隔離的工作區分頁/SQL 草稿、金鑰衍生單次有效圖形驗證碼、`trustedProxies` 可信反向代理限流 (`HTTP 429`)、離線 QR Code **RFC 6238 TOTP 雙重驗證** + 8 組一次性備用恢復碼 + 2FA 嘗試次數限制、嚴格 TLS 憑證驗證、非管理員 `<DataDir>/local_databases/u_<hash>/` 與 `<DataDir>/ephemeral_workspaces/` 依使用者隔離沙箱（詞法級阻擋 SQLite `ATTACH`/檔案函式、DuckDB `-safe` 模式 + `stdin` 傳參 + `enable_external_access = false`、解開辨識 MariaDB `/*M!...*/` 可執行註解）、全遠端驅動連線期防 DNS 重新綁定 SSRF 防護、引用計數並行連線池安全回收、SQL Server 獨佔連線 `USE [db]` 隔離，以及 `<DataDir>/config.json` 持久化設定與**自動清除式管理員緊急復原**。
 - **原生深色標題列同步、手機端全觸控工作台與多語言支援 (i18n)**：
   - 桌面端支援系統級原生深色標題列同步（`Win32 DWM`、`macOS DarkAqua`、`Linux GTK3`）；手機與觸控裝置支援原生 GPU CSS `position: sticky` 零閃爍固定表頭、手指拖曳調整欄寬 + 雙擊自動展開欄寬、側欄與表格觸控 `[⋮]` 及長按選單、手機 SQL 快捷符號列、點選檢視截斷儲存格、底部抽屜編輯器、左側導覽列 `keep-alive` 記憶體快取與全域彈出選單邊界防溢出定位。

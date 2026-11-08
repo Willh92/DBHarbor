@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"dbharbor/backend/internal/crypto"
+	"dbharbor/backend/internal/driver"
 )
 
 func TestOpenCustomAdminBootstrapAndValidation(t *testing.T) {
@@ -219,5 +220,263 @@ VALUES ('c-legacy-1', 'Legacy SQLite', 'sqlite', '/tmp/legacy.db', '2026-01-01T0
 		Heading:   "Enterprise Data",
 	}); err != nil {
 		t.Fatalf("expected system_settings branding save to work after migration: %v", err)
+	}
+}
+
+func TestConnectionRememberPasswordPersistenceAndWipe(t *testing.T) {
+	// 1. URI credential helpers (standard + special characters)
+	rawURI := "mongodb://app_user:p%40ss%3Aw%23rd@mongo.internal:27017/orders?authSource=admin"
+	stripped := StripPasswordFromURI(rawURI)
+	if strings.Contains(stripped, "p%40ss") || strings.Contains(stripped, "w%23rd") {
+		t.Fatalf("expected StripPasswordFromURI to remove password, got %q", stripped)
+	}
+	if gotUser := ExtractUsernameFromURI(stripped); gotUser != "app_user" {
+		t.Fatalf("expected ExtractUsernameFromURI=%q, got %q", "app_user", gotUser)
+	}
+	reinjected := InjectCredentialsIntoURI(stripped, "app_user", "p@ss:w#rd")
+	if !strings.Contains(reinjected, "app_user:") || StripPasswordFromURI(reinjected) != stripped {
+		t.Fatalf("unexpected InjectCredentialsIntoURI round-trip: %q", reinjected)
+	}
+
+	// Fallback unescaped special char password in URI
+	unescapedURI := "mongodb://root:raw@pass:123@127.0.0.1:27017/admin"
+	strippedUnescaped := StripPasswordFromURI(unescapedURI)
+	if strings.Contains(strippedUnescaped, "raw@pass") {
+		t.Fatalf("expected fallback StripPasswordFromURI to scrub unescaped password, got %q", strippedUnescaped)
+	}
+
+	// 2. Store persistence when RememberPassword == false (zero secret on disk)
+	tmpDir := t.TempDir()
+	vault, err := crypto.NewVaultFromDataDir(tmpDir, "")
+	if err != nil {
+		t.Fatalf("NewVaultFromDataDir: %v", err)
+	}
+	st, err := Open(tmpDir, vault, "admin", "AdminPass123!")
+	if err != nil {
+		t.Fatalf("Open store: %v", err)
+	}
+	defer st.Close()
+
+	savedUnremembered, err := st.InsertConnectionWithMeta(driver.ConnectionConfig{
+		ID:               "conn-no-remember",
+		Name:             "Prod MySQL (Session Only)",
+		Type:             "mysql",
+		Host:             "10.0.0.10",
+		Port:             3306,
+		Username:         "dba",
+		Password:         "TopSecret!999",
+		Database:         "app",
+		RememberPassword: driver.BoolPtr(false),
+	}, "u-1", "private")
+	if err != nil {
+		t.Fatalf("InsertConnectionWithMeta(unremembered): %v", err)
+	}
+	if savedUnremembered.RememberPassword {
+		t.Fatalf("expected RememberPassword=false on SavedConnection, got true")
+	}
+
+	var rawPassEnc, rawURIEnc string
+	var rawRememberInt int
+	if err := st.db.QueryRow(`SELECT password_enc, uri_enc, remember_password FROM connections WHERE id = ?`, "conn-no-remember").
+		Scan(&rawPassEnc, &rawURIEnc, &rawRememberInt); err != nil {
+		t.Fatalf("query raw connection row: %v", err)
+	}
+	if rawPassEnc != "" || rawRememberInt != 0 {
+		t.Fatalf("expected zero password_enc on disk and remember_password=0, got password_enc=%q remember_password=%d", rawPassEnc, rawRememberInt)
+	}
+	decUnremembered, err := st.GetDecryptedConnection("conn-no-remember")
+	if err != nil {
+		t.Fatalf("GetDecryptedConnection(unremembered): %v", err)
+	}
+	if decUnremembered.Password != "" || decUnremembered.ShouldRememberPassword() {
+		t.Fatalf("expected decrypted unremembered config to have empty password and ShouldRememberPassword()=false, got %+v", decUnremembered)
+	}
+
+	// 3. Store persistence when RememberPassword == true -> encrypted on disk, then turning OFF wipes disk secret!
+	savedRemembered, err := st.InsertConnectionWithMeta(driver.ConnectionConfig{
+		ID:               "conn-mongo-remember",
+		Name:             "Analytics Mongo",
+		Type:             "mongodb",
+		Host:             "10.0.0.20",
+		Port:             27017,
+		Username:         "mongo_admin",
+		Password:         "MongoSecret!888",
+		URI:              "mongodb://mongo_admin:MongoSecret!888@10.0.0.20:27017/analytics",
+		RememberPassword: driver.BoolPtr(true),
+	}, "u-1", "private")
+	if err != nil {
+		t.Fatalf("InsertConnectionWithMeta(remembered): %v", err)
+	}
+	if !savedRemembered.RememberPassword {
+		t.Fatalf("expected RememberPassword=true on SavedConnection")
+	}
+	decRemembered, err := st.GetDecryptedConnection("conn-mongo-remember")
+	if err != nil {
+		t.Fatalf("GetDecryptedConnection(remembered): %v", err)
+	}
+	if decRemembered.Password != "MongoSecret!888" || !strings.Contains(decRemembered.URI, "MongoSecret!888") {
+		t.Fatalf("expected remembered password & URI to decrypt intact, got pass=%q uri=%q", decRemembered.Password, decRemembered.URI)
+	}
+
+	// Edit existing remembered connection to turn OFF RememberPassword without re-typing password (keepExistingSecret=true)
+	toggledOff, err := st.SaveConnectionWithMeta(driver.ConnectionConfig{
+		ID:               "conn-mongo-remember",
+		Name:             "Analytics Mongo",
+		Type:             "mongodb",
+		Host:             "10.0.0.20",
+		Port:             27017,
+		Username:         "mongo_admin",
+		Password:         "", // left blank while unchecking Remember password
+		URI:              "",
+		RememberPassword: driver.BoolPtr(false),
+	}, true, "u-1", "private")
+	if err != nil {
+		t.Fatalf("SaveConnectionWithMeta(turn off remember): %v", err)
+	}
+	if toggledOff.RememberPassword {
+		t.Fatalf("expected RememberPassword=false after turning off remember")
+	}
+	if err := st.db.QueryRow(`SELECT password_enc, remember_password FROM connections WHERE id = ?`, "conn-mongo-remember").
+		Scan(&rawPassEnc, &rawRememberInt); err != nil {
+		t.Fatalf("query raw toggled connection row: %v", err)
+	}
+	if rawPassEnc != "" || rawRememberInt != 0 {
+		t.Fatalf("expected turning off RememberPassword to wipe password_enc on disk immediately, got password_enc=%q remember=%d", rawPassEnc, rawRememberInt)
+	}
+	decToggled, err := st.GetDecryptedConnection("conn-mongo-remember")
+	if err != nil {
+		t.Fatalf("GetDecryptedConnection(toggled off): %v", err)
+	}
+	if decToggled.Password != "" || strings.Contains(decToggled.URI, "MongoSecret!888") {
+		t.Fatalf("expected wiped password & stripped URI after turning off remember, got pass=%q uri=%q", decToggled.Password, decToggled.URI)
+	}
+
+	// 4. ImportConnections defaults credentialed drivers to RememberPassword=false and file drivers to true
+	if _, ok := driver.GetMeta("postgres"); !ok {
+		driver.Register(driver.DriverMeta{Type: "postgres", Name: "PostgreSQL"}, nil)
+	}
+	if _, ok := driver.GetMeta("sqlite"); !ok {
+		driver.Register(driver.DriverMeta{Type: "sqlite", Name: "SQLite"}, nil)
+	}
+	imported, err := st.ImportConnections([]ExportedConnectionProfile{
+		{Name: "Imported PG", Type: "postgres", Host: "10.0.0.30", Port: 5432, Username: "pguser"},
+		{Name: "Imported SQLite", Type: "sqlite", FilePath: filepath.Join(tmpDir, "local.db")},
+	}, UserPrincipal{ID: "u-1", Role: RoleAdmin})
+	if err != nil || imported != 2 {
+		t.Fatalf("ImportConnections failed: imported=%d err=%v", imported, err)
+	}
+	allConns, err := st.ListConnections()
+	if err != nil {
+		t.Fatalf("ListConnections: %v", err)
+	}
+	var foundPG, foundSQLite bool
+	for _, c := range allConns {
+		if c.Name == "Imported PG" {
+			foundPG = true
+			if c.RememberPassword {
+				t.Fatalf("expected Imported PG to default to RememberPassword=false")
+			}
+		}
+		if c.Name == "Imported SQLite" {
+			foundSQLite = true
+			if !c.RememberPassword {
+				t.Fatalf("expected Imported SQLite (passwordless file engine) to have RememberPassword=true")
+			}
+		}
+	}
+	if !foundPG || !foundSQLite {
+		t.Fatalf("expected both imported profiles in ListConnections")
+	}
+}
+
+func TestURICredentialHelpersSyncAndCrossOwnerDuplicateScrub(t *testing.T) {
+	if got := ExtractPasswordFromURI("mongodb://alice:S3cr3t%21@10.0.0.5:27017/app"); got != "S3cr3t!" {
+		t.Fatalf("ExtractPasswordFromURI escaped = %q, want %q", got, "S3cr3t!")
+	}
+	if got := ExtractPasswordFromURI("mongodb://alice@10.0.0.5:27017/app"); got != "" {
+		t.Fatalf("ExtractPasswordFromURI passwordless = %q, want empty", got)
+	}
+	if got := ExtractPasswordFromURI("mongodb://alice:raw@pass@10.0.0.5:27017/app"); got != "raw@pass" {
+		t.Fatalf("ExtractPasswordFromURI fallback = %q, want %q", got, "raw@pass")
+	}
+
+	// InjectCredentialsIntoURI retries StripPasswordFromURI on malformed unescaped userinfo and strips stale :oldpass when empty
+	injectedFallback := InjectCredentialsIntoURI("mongodb://alice:old@pass@10.0.0.5:27017/app", "alice", "newpass")
+	if injectedFallback != "mongodb://alice:newpass@10.0.0.5:27017/app" {
+		t.Fatalf("InjectCredentialsIntoURI fallback = %q", injectedFallback)
+	}
+	strippedNoUser := InjectCredentialsIntoURI("mongodb://:oldpass@10.0.0.5:27017/app", "", "")
+	if strippedNoUser != "mongodb://10.0.0.5:27017/app" {
+		t.Fatalf("InjectCredentialsIntoURI empty user/pass = %q, want stale password stripped", strippedNoUser)
+	}
+
+	tmpDir := t.TempDir()
+	vault, err := crypto.NewVaultFromDataDir(tmpDir, "test-uri-sync-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(tmpDir, vault, "admin", "AdminPass123!")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if _, ok := driver.GetMeta("mongodb"); !ok {
+		driver.Register(driver.DriverMeta{Type: "mongodb", Name: "MongoDB"}, nil)
+	}
+
+	// SaveConnectionWithMeta keeps oldURIEnc in sync when cfg.URI == "" && keepExistingSecret && password/username changes
+	saved, err := st.SaveConnectionWithMeta(driver.ConnectionConfig{
+		Name:             "Synced Mongo",
+		Type:             "mongodb",
+		Username:         "alice",
+		Password:         "PassV1",
+		URI:              "mongodb://alice:PassV1@10.0.0.9:27017/prod?authSource=admin",
+		RememberPassword: driver.BoolPtr(true),
+	}, false, "user-owner", "private")
+	if err != nil {
+		t.Fatalf("initial SaveConnectionWithMeta: %v", err)
+	}
+
+	_, err = st.SaveConnectionWithMeta(driver.ConnectionConfig{
+		ID:               saved.ID,
+		Name:             "Synced Mongo",
+		Type:             "mongodb",
+		Username:         "bob",
+		Password:         "PassV2",
+		URI:              "",
+		RememberPassword: driver.BoolPtr(true),
+	}, true, "user-owner", "private")
+	if err != nil {
+		t.Fatalf("update SaveConnectionWithMeta: %v", err)
+	}
+
+	dec, err := st.GetDecryptedConnection(saved.ID)
+	if err != nil {
+		t.Fatalf("GetDecryptedConnection: %v", err)
+	}
+	if dec.Password != "PassV2" || !strings.Contains(dec.URI, "bob:PassV2@10.0.0.9:27017") {
+		t.Fatalf("expected decrypted URI to stay synced with updated username/password, got pass=%q uri=%q", dec.Password, dec.URI)
+	}
+
+	// Cross-owner DuplicateConnection (e.g. Admin duplicating another user's private connection) must scrub secrets
+	dup, err := st.DuplicateConnection(saved.ID, UserPrincipal{
+		ID:            "admin-other",
+		Username:      "admin",
+		Role:          RoleAdmin,
+		CanCreateConn: true,
+	})
+	if err != nil {
+		t.Fatalf("DuplicateConnection cross-owner: %v", err)
+	}
+	if dup.RememberPassword {
+		t.Fatalf("expected cross-owner duplicated credentialed connection to force RememberPassword=false")
+	}
+	dupDec, err := st.GetDecryptedConnection(dup.ID)
+	if err != nil {
+		t.Fatalf("GetDecryptedConnection(dup): %v", err)
+	}
+	if dupDec.Password != "" || strings.Contains(dupDec.URI, "PassV2") {
+		t.Fatalf("expected cross-owner duplicate to scrub private secret, got pass=%q uri=%q", dupDec.Password, dupDec.URI)
 	}
 }

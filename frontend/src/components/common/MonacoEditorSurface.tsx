@@ -149,7 +149,12 @@ export const MonacoEditorSurface: React.FC<MonacoEditorSurfaceProps> = ({
     });
   }, [readOnly, fontSize, wordWrap, compactGutter, paddingTop, paddingBottom]);
 
-  return <div ref={containerRef} style={{ width: '100%', height: '100%' }} />;
+  return (
+    <div
+      ref={containerRef}
+      style={{ width: '100%', height: '100%', background: effectiveDarkMode ? '#1e1e1e' : '#ffffff' }}
+    />
+  );
 };
 
 export default MonacoEditorSurface;

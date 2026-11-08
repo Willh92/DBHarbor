@@ -3,7 +3,7 @@
 **言語切替**: [English](./README.md) | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | **日本語**
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.2-1677ff.svg)](./CHANGELOG.ja.md)
+[![Version](https://img.shields.io/badge/Version-v1.0.3-1677ff.svg)](./CHANGELOG.ja.md)
 [![CGO_ENABLED=0](https://img.shields.io/badge/Go-CGO__ENABLED%3D0-00ADD8.svg)](https://github.com/Willh92/DBHarbor.git)
 
 **phpMyAdmin の直感的なビジュアル操作性**と**モダンなマルチエンジン IDE 機能**を融合した、外部依存ゼロ・単一バイナリの Web データベース管理プラットフォームです。
@@ -25,6 +25,7 @@
   - **ブラウザからの一時ローカル単一ファイル DB (`SQLite 3` / `DuckDB`)・フルハイトグリッド & スマート SQL コンソール**: Web サーバー版で手元の `.db`/`.sqlite`/`.duckdb` ファイルをドラッグ＆ドロップまたは **「ローカル DB を開く (`Open Local DB`)」** で直接開き、Chromium ブラウザでの**元ファイルへの直接上書き保存**および最新スナップショットのダウンロードに対応。省メモリ `CellStateHub` フルハイトグリッド（空白行クリック直接挿入、一括カラム編集、Excel・メモ帳互換の TSV コピー＆ペースト）、軽量 Monaco Editor、`Ctrl/Cmd + Enter` 実行、`EXPLAIN` 実行計画、DB 全体/複数テーブルのストリーミング入出力（アップロード RAM `< 64 KiB`）、SQL スクリプト直接実行。
 - **Web マルチユーザー RBAC・ログイン画面ブランディング・セキュリティ保護 & 緊急リカバリ *(Web サーバー版のみ)***:
   - **初期デフォルト認証情報ゼロ・ブランディング設定 & インデックス登録防止**: 初回起動時の**初期管理者セットアップウィザード**（パスワード最低 `8` 文字、`admin123` 廃止）、未認証時の情報漏洩ゼロ化、ブラウザ `<title>`・上部アイコン（`<= 128 KB` カスタム画像＋Favicon 同期）・見出し・サブタイトルの自由変更、および `/robots.txt`・`X-Robots-Tag`・`<meta name="robots">` による三重の検索エンジンクローラ拒否を搭載。
+  - **セッション優先の DB パスワード非保存ポリシー & 認証エラー時の再入力プロンプト**: 新規データベース接続はデフォルトで **「パスワードを保存」がオフ**（パスワードは現在のログインセッションのメモリ内でのみ保持されディスクには一切保存されず、次回ログイン時に認証情報の入力を要求。チェック時は `AES-256-GCM` で暗号化保存され、保存済みの接続も「接続を編集」からオフにしてディスク上の暗号化パスワードを即座に消去可能）。また、パスワード保存済みの接続でも DB 側のアカウントやパスワード変更・不一致でエラーになった際は、古いプールを破棄して再入力モーダルを自動表示し、認証成功後に元のリクエストを透過的に再試行します。
   - **3 階層 RBAC・TOTP 2FA & 多層サンドボックス**: 3 階層 RBAC（`Admin` / `Read-Write` / `Read-Only`）とユーザー別のタブ/SQL 下書き分離、秘密鍵派生の使い捨て CAPTCHA、`trustedProxies` 対応レート制限 (`HTTP 429`)、オフライン QR コードによる RFC 6238 TOTP 2FA + 8 個のリカバリコード + 2FA 試行回数制限、厳格な TLS 証明書検証、非管理者向け `<DataDir>/local_databases/u_<hash>/` ＆ `<DataDir>/ephemeral_workspaces/` ユーザー別サンドボックス（字句スキャナによる SQLite `ATTACH`/ファイル関数遮断、サーバー管理の `duckdbCliPath` と DuckDB `-safe` モード + `stdin` 入力 + `enable_external_access = false`、MariaDB `/*M!...*/` 読み取り専用ガード）、全リモートドライバのダイヤル時 DNS リバインディング SSRF 検証、参照カウント式コネクションプール、SQL Server `USE [db]` 接続固定、永続設定 `<DataDir>/config.json` と**自動無害化機能付き緊急管理者リカバリ**に対応。
 - **ネイティブダークタイトルバー同期・モバイルタッチ最適化 & 多言語対応 (i18n)**:
   - デスクトップ版の OS ネイティブダークタイトルバー同期（`Win32 DWM`、`macOS DarkAqua`、`Linux GTK3`）に加え、モバイル・タッチ端末向けにちらつきゼロのネイティブ GPU CSS `position: sticky` ヘッダー、タッチドラッグ列幅調整＋ダブルタップ自動幅拡張、サイドバー/テーブルの `[⋮]` ＆長押しメニュー、モバイル SQL クイック記号バー、省略セルのタップ確認、サイドバー `keep-alive` メモリキャッシュ、ポップアップの画面端クランプを搭載。

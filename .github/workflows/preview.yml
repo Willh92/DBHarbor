@@ -18,8 +18,7 @@ on:
         type: boolean
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 concurrency:
   group: preview-channel-${{ github.workflow }}
@@ -33,6 +32,8 @@ jobs:
   publish-preview:
     name: Build & Publish Rolling Preview Pre-Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     timeout-minutes: 30
     outputs:
       version: ${{ steps.meta.outputs.version }}
@@ -246,6 +247,9 @@ jobs:
     needs: publish-preview
     if: github.event_name == 'push' || inputs.publish_ghcr == true
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     timeout-minutes: 25
 
     steps:

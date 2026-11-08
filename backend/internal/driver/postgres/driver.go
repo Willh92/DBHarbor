@@ -175,8 +175,17 @@ func (d *Driver) poolForDB(dbName string) (*sql.DB, error) {
 		}
 	}
 
-	db.SetMaxOpenConns(8)
-	db.SetMaxIdleConns(2)
+	defaultDB := d.cfg.Database
+	if defaultDB == "" {
+		defaultDB = "postgres"
+	}
+	if dbName == defaultDB {
+		db.SetMaxOpenConns(8)
+		db.SetMaxIdleConns(2)
+	} else {
+		db.SetMaxOpenConns(4)
+		db.SetMaxIdleConns(1)
+	}
 	db.SetConnMaxLifetime(15 * time.Minute)
 	db.SetConnMaxIdleTime(3 * time.Minute)
 	d.pools[dbName] = db
@@ -970,9 +979,14 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 		for _, item := range dbs {
 			meta.Databases = append(meta.Databases, item.Name)
 		}
+	} else if sqlbase.IsAuthError(d.variantType, err) {
+		return meta, err
 	}
 	db, err := d.poolForDB(database)
 	if err != nil {
+		if sqlbase.IsAuthError(d.variantType, err) {
+			return meta, err
+		}
 		return meta, nil
 	}
 	rows, err := db.QueryContext(ctx, `
@@ -981,6 +995,9 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 		ORDER BY table_name, ordinal_position
 	`)
 	if err != nil {
+		if sqlbase.IsAuthError(d.variantType, err) {
+			return meta, err
+		}
 		return meta, nil
 	}
 	defer rows.Close()
@@ -1005,11 +1022,17 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 		Sessions:       []driver.SessionItem{},
 		CanKillSession: true,
 	}
-	_ = db.QueryRowContext(ctx, "SHOW server_version").Scan(&snap.Version)
-	_ = db.QueryRowContext(ctx, "SELECT COALESCE(EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))::bigint, 0)").Scan(&snap.UptimeSec)
+	if err := db.QueryRowContext(ctx, "SHOW server_version").Scan(&snap.Version); err != nil && sqlbase.IsAuthError(d.variantType, err) {
+		return snap, err
+	}
+	if err := db.QueryRowContext(ctx, "SELECT COALESCE(EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))::bigint, 0)").Scan(&snap.UptimeSec); err != nil && sqlbase.IsAuthError(d.variantType, err) {
+		return snap, err
+	}
 
 	var activeConns, totalConns int64
-	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FILTER (WHERE state = 'active'), COUNT(*) FROM pg_stat_activity").Scan(&activeConns, &totalConns)
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FILTER (WHERE state = 'active'), COUNT(*) FROM pg_stat_activity").Scan(&activeConns, &totalConns); err != nil && sqlbase.IsAuthError(d.variantType, err) {
+		return snap, err
+	}
 	snap.Metrics = append(snap.Metrics,
 		driver.MonitorMetric{Key: "total_conns", Label: "Total Connections", Value: strconv.FormatInt(totalConns, 10)},
 		driver.MonitorMetric{Key: "active_conns", Label: "Active Queries", Value: strconv.FormatInt(activeConns, 10)},
@@ -1019,6 +1042,8 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 		for _, item := range dbs {
 			snap.Storage = append(snap.Storage, driver.StorageItem{Name: item.Name, Category: "DATABASE", SizeBytes: item.SizeBytes})
 		}
+	} else if sqlbase.IsAuthError(d.variantType, err) {
+		return snap, err
 	}
 
 	pRows, err := db.QueryContext(ctx, `
@@ -1028,7 +1053,11 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 		WHERE pid <> pg_backend_pid()
 		ORDER BY query_start ASC NULLS LAST LIMIT 100
 	`)
-	if err == nil {
+	if err != nil {
+		if sqlbase.IsAuthError(d.variantType, err) {
+			return snap, err
+		}
+	} else {
 		defer pRows.Close()
 		for pRows.Next() {
 			var pid, dur int64

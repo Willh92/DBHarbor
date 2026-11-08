@@ -30,13 +30,13 @@ func GenerateTOTPSecret() (string, error) {
 }
 
 // BuildOTPAuthURI builds a standard otpauth:// URI compatible with Google/Microsoft Authenticator, 1Password, Authy.
-func BuildOTPAuthURI(issuer, accountName, secret string) string {
+func BuildOTPAuthURI(issuer, accountName, seedB32 string) string {
 	if issuer == "" {
 		issuer = "DBHarbor"
 	}
 	label := url.PathEscape(issuer + ":" + accountName)
 	q := url.Values{}
-	q.Set("secret", strings.ToUpper(strings.TrimSpace(secret)))
+	q.Set("secret", strings.ToUpper(strings.TrimSpace(seedB32)))
 	q.Set("issuer", issuer)
 	q.Set("algorithm", "SHA1")
 	q.Set("digits", "6")
@@ -45,8 +45,8 @@ func BuildOTPAuthURI(issuer, accountName, secret string) string {
 }
 
 // GenerateTOTPCodeAt computes the 6-digit RFC 6238 TOTP code and 30-second step counter for a given timestamp.
-func GenerateTOTPCodeAt(secret string, t time.Time) (string, int64, error) {
-	clean := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(secret), " ", ""))
+func GenerateTOTPCodeAt(seedB32 string, t time.Time) (string, int64, error) {
+	clean := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(seedB32), " ", ""))
 	clean = strings.TrimRight(clean, "=")
 	key, err := b32NoPad.DecodeString(clean)
 	if err != nil {
@@ -72,7 +72,7 @@ func hotpCode(key []byte, counter uint64) string {
 }
 
 // VerifyTOTP checks a 6-digit TOTP code with ±1 window tolerance and anti-replay step protection.
-func VerifyTOTP(secret, inputCode string, now time.Time, lastUsedStep int64) (matchedStep int64, ok bool) {
+func VerifyTOTP(seedB32, inputCode string, now time.Time, lastUsedStep int64) (matchedStep int64, ok bool) {
 	code := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(inputCode), " ", ""), "-", "")
 	if len(code) != 6 {
 		return 0, false
@@ -83,7 +83,7 @@ func VerifyTOTP(secret, inputCode string, now time.Time, lastUsedStep int64) (ma
 		}
 	}
 
-	clean := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(secret), " ", ""))
+	clean := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(seedB32), " ", ""))
 	clean = strings.TrimRight(clean, "=")
 	key, err := b32NoPad.DecodeString(clean)
 	if err != nil {

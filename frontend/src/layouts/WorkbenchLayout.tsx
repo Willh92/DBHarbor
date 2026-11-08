@@ -58,6 +58,7 @@ import {
 } from '../api/client';
 import { BrandLogo } from '../components/common/BrandLogo';
 import { LanguageSwitcher } from '../components/common/LanguageSwitcher';
+import { ConnectionAuthModal } from '../components/connection/ConnectionAuthModal';
 import { ConnectionSidebar } from '../components/connection/ConnectionSidebar';
 import type { TransferModalMode, TransferOpenOptions } from '../components/workspace/ContextNavBar';
 import { useResponsive } from '../hooks/useResponsive';
@@ -124,6 +125,7 @@ const MAX_MOUNTED_TABS_MOBILE = 2;
 export const WorkbenchLayout: React.FC = () => {
   const {
     isDesktop,
+    bootstrapped,
     username,
     displayName,
     role,
@@ -172,8 +174,16 @@ export const WorkbenchLayout: React.FC = () => {
   });
   const asideRef = useRef<HTMLElement | null>(null);
   const sidebarSplitterRef = useRef<HTMLDivElement | null>(null);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
   const isNarrowRef = useRef(isNarrowViewport);
   isNarrowRef.current = isNarrowViewport;
+
+  useEffect(
+    () => () => {
+      dragCleanupRef.current?.();
+    },
+    []
+  );
 
   const [draggingTabKey, setDraggingTabKey] = useState<string>('');
   const [dragOverTabKey, setDragOverTabKey] = useState<string>('');
@@ -233,8 +243,12 @@ export const WorkbenchLayout: React.FC = () => {
   const [handleBindTick, setHandleBindTick] = useState(0);
 
   useEffect(() => {
-    loadBootstrap().catch((err) => message.error(err.message));
+    if (!bootstrapped) {
+      loadBootstrap().catch((err) => message.error(err.message));
+    }
+  }, [bootstrapped, loadBootstrap]);
 
+  useEffect(() => {
     // Fetch runtime version, lightweight memory stats, and non-blocking GitHub update check
     api.getVersion().then(setBuildInfo).catch(() => {});
     api.getSystemStats().then(setSysStats).catch(() => {});
@@ -731,18 +745,19 @@ export const WorkbenchLayout: React.FC = () => {
               <span>{tabItem.title}</span>
             </Space>
           ),
-          children: isKeepAlive ? renderTabContent(tabItem) : null,
+          children: bootstrapped && isKeepAlive ? renderTabContent(tabItem) : null,
         };
       }),
-    [tabs, activeTabKey, lruTabKeys, renderTabContent]
+    [bootstrapped, tabs, activeTabKey, lruTabKeys, renderTabContent]
   );
 
-  const displayVersion = updateCheck?.currentVersion || buildInfo?.displayVersion || 'v1.0.2';
+  const displayVersion = updateCheck?.currentVersion || buildInfo?.displayVersion || 'v1.0.3';
   const hasNewVersion = Boolean(updateCheck?.hasUpdate);
 
   const handleSidebarSplitterPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     e.preventDefault();
+    dragCleanupRef.current?.();
     const pointerId = e.pointerId;
     const splitterEl = e.currentTarget;
     try {
@@ -775,13 +790,10 @@ export const WorkbenchLayout: React.FC = () => {
       }
     };
 
-    const onUp = () => {
+    const cleanup = () => {
       if (rafId) {
         window.cancelAnimationFrame(rafId);
         rafId = 0;
-      }
-      if (asideRef.current) {
-        asideRef.current.style.width = `${latestW}px`;
       }
       try {
         if (splitterEl.hasPointerCapture(pointerId)) {
@@ -797,6 +809,14 @@ export const WorkbenchLayout: React.FC = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
+      dragCleanupRef.current = null;
+    };
+
+    const onUp = () => {
+      cleanup();
+      if (asideRef.current) {
+        asideRef.current.style.width = `${latestW}px`;
+      }
       setSidebarWidth(latestW);
       localStorage.setItem('dbharbor_sidebar_width', String(latestW));
       window.requestAnimationFrame(() => {
@@ -804,6 +824,7 @@ export const WorkbenchLayout: React.FC = () => {
       });
     };
 
+    dragCleanupRef.current = cleanup;
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onUp);
@@ -1529,7 +1550,7 @@ export const WorkbenchLayout: React.FC = () => {
         )}
 
         <main style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          {!isDesktop && tabs.length > 0 && activeTabConn?.ephemeral && (
+          {!isDesktop && bootstrapped && tabs.length > 0 && activeTabConn?.ephemeral && (
             <div
               style={{
                 minHeight: isMobile ? 36 : 38,
@@ -1613,7 +1634,11 @@ export const WorkbenchLayout: React.FC = () => {
               </Space>
             </div>
           )}
-          {tabs.length === 0 ? (
+          {!bootstrapped ? (
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Spin size="large" />
+            </div>
+          ) : tabs.length === 0 ? (
             <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? 14 : 32 }}>
               <div style={{ maxWidth: 920, margin: '0 auto' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 10 : 14, marginBottom: 8 }}>
@@ -2166,7 +2191,7 @@ export const WorkbenchLayout: React.FC = () => {
         destroyOnClose
       >
         <Input
-          autoFocus
+          autoFocus={!isMobile}
           value={renameTitle}
           maxLength={80}
           placeholder={t('Enter custom tab title')}
@@ -2260,6 +2285,8 @@ export const WorkbenchLayout: React.FC = () => {
           />
         )}
       </Suspense>
+
+      <ConnectionAuthModal />
     </div>
   );
 };

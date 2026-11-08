@@ -80,7 +80,7 @@ function precompressEmbedDir(dir) {
 function resolveVersionMeta() {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf8'));
   const envVer = (process.env.DBHARBOR_BUILD_VERSION || '').trim().replace(/^[vV]/, '');
-  const version = envVer || pkg.version || '1.0.2';
+  const version = envVer || pkg.version || '1.0.3';
   const rawChannel = (process.env.DBHARBOR_BUILD_CHANNEL || '').trim().toLowerCase();
   const channel = rawChannel === 'preview' || rawChannel === 'release'
     ? rawChannel

@@ -773,6 +773,8 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 		for _, item := range dbs {
 			meta.Databases = append(meta.Databases, item.Name)
 		}
+	} else if sqlbase.IsAuthError(d.variantType, err) {
+		return meta, err
 	}
 	if database == "" {
 		return meta, nil
@@ -782,6 +784,9 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 		WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, ORDINAL_POSITION
 	`, database)
 	if err != nil {
+		if sqlbase.IsAuthError(d.variantType, err) {
+			return meta, err
+		}
 		return meta, nil
 	}
 	defer rows.Close()
@@ -802,7 +807,9 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 		Sessions:       []driver.SessionItem{},
 		CanKillSession: true,
 	}
-	_ = d.db.QueryRowContext(ctx, "SELECT VERSION()").Scan(&snap.Version)
+	if err := d.db.QueryRowContext(ctx, "SELECT VERSION()").Scan(&snap.Version); err != nil && sqlbase.IsAuthError(d.variantType, err) {
+		return snap, err
+	}
 
 	statusKeys := map[string]string{
 		"Threads_connected": "Connected Threads",
@@ -812,7 +819,11 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 		"Uptime":            "Uptime Seconds",
 	}
 	sRows, err := d.db.QueryContext(ctx, "SHOW GLOBAL STATUS WHERE Variable_name IN ('Threads_connected','Threads_running','Questions','Slow_queries','Uptime')")
-	if err == nil {
+	if err != nil {
+		if sqlbase.IsAuthError(d.variantType, err) {
+			return snap, err
+		}
+	} else {
 		defer sRows.Close()
 		for sRows.Next() {
 			var k, v string

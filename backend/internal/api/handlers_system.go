@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"runtime"
 	"strconv"
 	"strings"
@@ -393,6 +394,7 @@ func (s *Server) handleLogout(c *Context) {
 	if sid != "" {
 		_ = s.store.RevokeSession(c.UserID(), sid)
 		s.tokens.RevokeSessionInMemory(sid, 0)
+		s.clearSessionByID(sid)
 	}
 	s.store.AddAuditLog("LOGOUT", c.Username(), c.ClientIP(), c.Request.UserAgent(), "Signed out explicitly")
 	c.JSON(http.StatusOK, H{"message": "Signed out successfully"})
@@ -462,7 +464,14 @@ func (s *Server) handleChangePassword(c *Context) {
 	}
 	revokedCnt := 0
 	if req.RevokeOtherSessions {
-		revokedCnt, _ = s.store.RevokeOtherSessions(c.UserID(), c.SessionID())
+		sids, _ := s.store.RevokeOtherSessionsWithIDs(c.UserID(), c.SessionID())
+		revokedCnt = len(sids)
+		for _, sid := range sids {
+			if s.tokens != nil {
+				s.tokens.RevokeSessionInMemory(sid, 0)
+			}
+			s.clearSessionByID(sid)
+		}
 	}
 	s.store.AddAuditLog("PASSWORD_CHANGED", c.Username(), c.ClientIP(), c.Request.UserAgent(), fmt.Sprintf("Password updated; revoked %d other session(s)", revokedCnt))
 	c.JSON(http.StatusOK, H{"message": "Password updated successfully", "revokedSessions": revokedCnt})
@@ -557,16 +566,24 @@ func (s *Server) handleRevokeSession(c *Context) {
 		return
 	}
 	s.tokens.RevokeSessionInMemory(sid, 0)
+	s.clearSessionByID(sid)
 	s.store.AddAuditLog("SESSION_REVOKED", c.Username(), c.ClientIP(), c.Request.UserAgent(), "Revoked session "+sid)
 	c.JSON(http.StatusOK, H{"message": "Session revoked"})
 }
 
 func (s *Server) handleRevokeOtherSessions(c *Context) {
-	cnt, err := s.store.RevokeOtherSessions(c.UserID(), c.SessionID())
+	sids, err := s.store.RevokeOtherSessionsWithIDs(c.UserID(), c.SessionID())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
 		return
 	}
+	for _, sid := range sids {
+		if s.tokens != nil {
+			s.tokens.RevokeSessionInMemory(sid, 0)
+		}
+		s.clearSessionByID(sid)
+	}
+	cnt := len(sids)
 	s.store.AddAuditLog("SESSIONS_REVOKED_OTHERS", c.Username(), c.ClientIP(), c.Request.UserAgent(), fmt.Sprintf("Revoked %d other active session(s)", cnt))
 	c.JSON(http.StatusOK, H{"revoked": cnt, "message": fmt.Sprintf("Revoked %d other device session(s)", cnt)})
 }
@@ -653,7 +670,76 @@ func (s *Server) handleListConnections(c *Context) {
 		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
 		return
 	}
+	list = s.annotateConnectionsUnlockState(c, list)
 	c.JSON(http.StatusOK, H{"connections": list})
+}
+
+func isTLSEnabledOption(cfg driver.ConnectionConfig) bool {
+	switch strings.ToLower(strings.TrimSpace(cfg.Option("tls", ""))) {
+	case "true", "1", "skip-verify", "preferred", "custom":
+		return true
+	}
+	if sslMode := strings.ToLower(strings.TrimSpace(cfg.Option("sslmode", ""))); sslMode != "" && sslMode != "disable" {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Option("encrypt", ""))) {
+	case "true", "1", "mandatory", "strict":
+		return true
+	}
+	rawURI := strings.TrimSpace(cfg.URI)
+	if rawURI != "" {
+		lowURI := strings.ToLower(rawURI)
+		if strings.HasPrefix(lowURI, "mongodb+srv://") || strings.HasPrefix(lowURI, "rediss://") {
+			if strings.Contains(lowURI, "tls=false") || strings.Contains(lowURI, "ssl=false") {
+				return false
+			}
+			return true
+		}
+		if strings.Contains(lowURI, "tls=true") || strings.Contains(lowURI, "ssl=true") ||
+			strings.Contains(lowURI, "tls=1") || strings.Contains(lowURI, "ssl=1") {
+			return true
+		}
+		if u, err := url.Parse(store.StripPasswordFromURI(rawURI)); err == nil {
+			q := u.Query()
+			for _, k := range []string{"tls", "ssl"} {
+				switch strings.ToLower(strings.TrimSpace(q.Get(k))) {
+				case "true", "1":
+					return true
+				}
+			}
+			if sm := strings.ToLower(strings.TrimSpace(q.Get("sslmode"))); sm != "" && sm != "disable" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sameEndpointAndSecurity(oldCfg, newCfg driver.ConnectionConfig) bool {
+	if !strings.EqualFold(strings.TrimSpace(oldCfg.Type), strings.TrimSpace(newCfg.Type)) {
+		return false
+	}
+	if strings.TrimSpace(oldCfg.Host) != strings.TrimSpace(newCfg.Host) || oldCfg.Port != newCfg.Port {
+		return false
+	}
+	oldURI := strings.TrimSpace(oldCfg.URI)
+	newURI := strings.TrimSpace(newCfg.URI)
+	if oldURI == "" && newURI != "" {
+		return false
+	}
+	if oldURI != "" && newURI != "" {
+		if store.StripPasswordFromURI(oldURI) != store.StripPasswordFromURI(newURI) {
+			return false
+		}
+	}
+	effNew := newCfg
+	if strings.TrimSpace(effNew.URI) == "" && oldURI != "" {
+		effNew.URI = oldURI
+	}
+	if isTLSEnabledOption(oldCfg) && !isTLSEnabledOption(effNew) {
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleTestConnection(c *Context) {
@@ -667,15 +753,50 @@ func (s *Server) handleTestConnection(c *Context) {
 			c.JSON(http.StatusForbidden, H{"error": "Permission denied: cannot test or modify this connection"})
 			return
 		}
-		if cfg.Password == "" && cfg.URI == "" {
+		if cfg.Password == "" || strings.TrimSpace(cfg.URI) == "" {
 			if existing, err := s.store.GetDecryptedConnection(cfg.ID); err == nil {
-				// Prevent stored credential exfiltration if target host/port was altered without re-entering password
-				if existing.Host == cfg.Host && existing.Port == cfg.Port && existing.Type == cfg.Type {
-					if cfg.Password == "" {
-						cfg.Password = existing.Password
-					}
-					if cfg.URI == "" {
-						cfg.URI = existing.URI
+				// Prevent stored credential exfiltration if target host/port/URI was altered or TLS was downgraded without re-entering password
+				if sameEndpointAndSecurity(existing, cfg) {
+					cred, hasCred := s.getSessionCred(s.credSessionKey(c), cfg.ID)
+					typedNewPass := cfg.Password != ""
+					typedRawURI := strings.TrimSpace(cfg.URI)
+					typedURIHasSecret := typedRawURI != "" && typedRawURI != store.StripPasswordFromURI(typedRawURI)
+
+					if !typedNewPass && !typedURIHasSecret {
+						if hasCred && cred.Password != "" {
+							cfg.Password = cred.Password
+						} else if hasCred && cred.URI != "" {
+							cfg.Password = store.ExtractPasswordFromURI(cred.URI)
+						} else if existing.Password != "" {
+							cfg.Password = existing.Password
+						} else if existing.URI != "" {
+							cfg.Password = store.ExtractPasswordFromURI(existing.URI)
+						}
+						if typedRawURI != "" {
+							cfg.URI = store.InjectCredentialsIntoURI(typedRawURI, cfg.Username, cfg.Password)
+						} else {
+							baseURI := ""
+							if hasCred && cred.URI != "" {
+								baseURI = cred.URI
+							} else if existing.URI != "" {
+								baseURI = existing.URI
+							}
+							if baseURI != "" {
+								cfg.URI = store.InjectCredentialsIntoURI(baseURI, cfg.Username, cfg.Password)
+							}
+						}
+					} else if typedNewPass {
+						if typedRawURI == "" {
+							baseURI := existing.URI
+							if baseURI == "" && hasCred && cred.URI != "" {
+								baseURI = cred.URI
+							}
+							if baseURI != "" {
+								cfg.URI = store.InjectCredentialsIntoURI(store.StripPasswordFromURI(baseURI), cfg.Username, cfg.Password)
+							}
+						} else if !typedURIHasSecret {
+							cfg.URI = store.InjectCredentialsIntoURI(typedRawURI, cfg.Username, cfg.Password)
+						}
 					}
 				}
 			}
@@ -726,17 +847,21 @@ func (s *Server) handlePingSavedConnection(c *Context) {
 	if !s.authorizeConn(c, id, false) {
 		return
 	}
-	drv, _, err := s.acquireConnDriver(c, id)
+	drv, cfg, err := s.acquireConnDriver(c, id)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, id, cfg.Type, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 	info, err := drv.Ping(ctx)
 	if err != nil {
-		s.pool.Evict(id)
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		if scope := s.credSessionKey(c); scope != "" && s.hasSessionCred(scope, id) {
+			s.pool.Evict(id + "::" + scope)
+		} else {
+			s.pool.Evict(id)
+		}
+		s.respondConnError(c, id, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, info)
@@ -755,6 +880,10 @@ func (s *Server) handleCreateConnection(c *Context) {
 		c.JSON(http.StatusBadRequest, H{"error": "Invalid connection payload"})
 		return
 	}
+	if req.RememberPassword == nil && driver.IsCredentialedDriver(req.Type) {
+		// New credentialed connections default to RememberPassword = false (session-only password).
+		req.RememberPassword = driver.BoolPtr(false)
+	}
 	req.Options = store.StripReservedConnectionOptions(req.Options)
 	req.FilePath = s.normalizeConnectionFilePathForWebUser(c, req.FilePath)
 	if status, errMsg := s.validateConnectionFilePath(c, req.Type, req.FilePath); status != http.StatusOK {
@@ -769,6 +898,8 @@ func (s *Server) handleCreateConnection(c *Context) {
 		delete(req.Options, "cliPath")
 	}
 	req.ConnectionConfig.ID = ""
+	rawPassword := req.Password
+	rawURI := strings.TrimSpace(req.URI)
 	ownerID := c.UserID()
 	vis := "private"
 	if s.desktop.Enabled {
@@ -786,6 +917,23 @@ func (s *Server) handleCreateConnection(c *Context) {
 		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
 		return
 	}
+	if !saved.RememberPassword && (rawPassword != "" || (rawURI != "" && rawURI != store.StripPasswordFromURI(rawURI))) {
+		fullURI := rawURI
+		if fullURI != "" && rawPassword != "" && fullURI == store.StripPasswordFromURI(fullURI) {
+			fullURI = store.InjectCredentialsIntoURI(fullURI, saved.Username, rawPassword)
+		}
+		effPass := rawPassword
+		if effPass == "" {
+			effPass = store.ExtractPasswordFromURI(fullURI)
+		}
+		s.setSessionCred(s.credSessionKey(c), saved.ID, sessionConnCred{
+			Username:  saved.Username,
+			Password:  effPass,
+			URI:       fullURI,
+			UpdatedAt: time.Now(),
+		})
+	}
+	saved = s.annotateSavedConnectionUnlock(c, saved)
 	c.JSON(http.StatusOK, saved)
 }
 
@@ -795,7 +943,12 @@ func (s *Server) handleUpdateConnection(c *Context) {
 		c.JSON(http.StatusForbidden, H{"error": "Permission denied: only an administrator or the connection owner can modify this connection"})
 		return
 	}
-	if existingCfg, gErr := s.store.GetDecryptedConnection(id); gErr == nil && store.IsEphemeralConnection(existingCfg.Options) {
+	existingCfg, existingErr := s.store.GetDecryptedConnection(id)
+	if existingErr != nil {
+		c.JSON(http.StatusNotFound, H{"error": existingErr.Error()})
+		return
+	}
+	if store.IsEphemeralConnection(existingCfg.Options) {
 		c.JSON(http.StatusForbidden, H{"error": "Temporary browser-loaded database sessions cannot be reconfigured"})
 		return
 	}
@@ -821,6 +974,57 @@ func (s *Server) handleUpdateConnection(c *Context) {
 	if !s.desktop.Enabled && req.Options != nil {
 		delete(req.Options, "cliPath")
 	}
+
+	rawPassword := req.Password
+	rawURI := strings.TrimSpace(req.URI)
+	uriHasEmbeddedSecret := rawURI != "" && rawURI != store.StripPasswordFromURI(rawURI)
+
+	sameEndpoint := sameEndpointAndSecurity(existingCfg, req.ConnectionConfig)
+	if !sameEndpoint {
+		// Prevent exfiltrating stored credentials by editing host/port/URI or downgrading TLS without re-typing credentials.
+		req.KeepExistingSecret = false
+	}
+
+	scope := s.credSessionKey(c)
+	prevSessionCred, hadSessionCred := s.getSessionCred(scope, id)
+
+	wantRemember := true
+	if driver.IsCredentialedDriver(req.Type) {
+		if req.RememberPassword != nil {
+			wantRemember = *req.RememberPassword
+		} else {
+			wantRemember = existingCfg.ShouldRememberPassword()
+		}
+	}
+	req.RememberPassword = driver.BoolPtr(wantRemember)
+
+	// If switching RememberPassword false -> true while the current session already holds the unlocked secret,
+	// promote the active session secret onto disk when the user left the password field blank.
+	if wantRemember && rawPassword == "" && !uriHasEmbeddedSecret && req.KeepExistingSecret && sameEndpoint && !existingCfg.ShouldRememberPassword() && hadSessionCred {
+		effPass := prevSessionCred.Password
+		if effPass == "" && prevSessionCred.URI != "" {
+			effPass = store.ExtractPasswordFromURI(prevSessionCred.URI)
+		}
+		req.Password = effPass
+		if rawURI != "" {
+			req.URI = store.InjectCredentialsIntoURI(rawURI, req.Username, effPass)
+		} else if prevSessionCred.URI != "" {
+			req.URI = store.InjectCredentialsIntoURI(prevSessionCred.URI, req.Username, effPass)
+		}
+	} else if wantRemember && rawURI != "" && !uriHasEmbeddedSecret {
+		if rawPassword != "" {
+			req.URI = store.InjectCredentialsIntoURI(rawURI, req.Username, rawPassword)
+		} else if req.KeepExistingSecret && sameEndpoint && existingCfg.ShouldRememberPassword() {
+			effOldPass := existingCfg.Password
+			if effOldPass == "" && existingCfg.URI != "" {
+				effOldPass = store.ExtractPasswordFromURI(existingCfg.URI)
+			}
+			if effOldPass != "" {
+				req.URI = store.InjectCredentialsIntoURI(rawURI, req.Username, effOldPass)
+			}
+		}
+	}
+
 	req.ConnectionConfig.ID = id
 	vis := ""
 	if s.desktop.Enabled {
@@ -837,8 +1041,72 @@ func (s *Server) handleUpdateConnection(c *Context) {
 		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
 		return
 	}
-	s.pool.Evict(id)
+
+	if saved.RememberPassword {
+		s.clearConnectionSessionCreds(id)
+	} else {
+		if !sameEndpoint {
+			s.clearConnectionSessionCreds(id)
+		}
+		if rawPassword != "" || uriHasEmbeddedSecret {
+			fullURI := rawURI
+			if fullURI == "" && existingCfg.URI != "" && sameEndpoint {
+				fullURI = store.InjectCredentialsIntoURI(existingCfg.URI, saved.Username, rawPassword)
+			} else if fullURI != "" && rawPassword != "" && !uriHasEmbeddedSecret {
+				fullURI = store.InjectCredentialsIntoURI(fullURI, saved.Username, rawPassword)
+			}
+			effPass := rawPassword
+			if effPass == "" {
+				effPass = store.ExtractPasswordFromURI(fullURI)
+			}
+			s.setSessionCred(scope, id, sessionConnCred{
+				Username:  saved.Username,
+				Password:  effPass,
+				URI:       fullURI,
+				UpdatedAt: time.Now(),
+			})
+		} else if req.KeepExistingSecret && sameEndpoint {
+			if hadSessionCred {
+				updatedCred := prevSessionCred
+				updatedCred.Username = saved.Username
+				if updatedCred.Password == "" && updatedCred.URI != "" {
+					updatedCred.Password = store.ExtractPasswordFromURI(updatedCred.URI)
+				}
+				if rawURI != "" {
+					updatedCred.URI = store.InjectCredentialsIntoURI(rawURI, saved.Username, updatedCred.Password)
+				} else if updatedCred.URI != "" {
+					updatedCred.URI = store.InjectCredentialsIntoURI(updatedCred.URI, saved.Username, updatedCred.Password)
+				}
+				updatedCred.UpdatedAt = time.Now()
+				s.setSessionCred(scope, id, updatedCred)
+			} else if existingCfg.ShouldRememberPassword() && (existingCfg.Password != "" || (existingCfg.URI != "" && existingCfg.URI != store.StripPasswordFromURI(existingCfg.URI))) {
+				// Turning OFF Remember Password on an existing remembered connection wipes disk secret immediately
+				// while preserving the active session's credential until logout/next login.
+				effPass := existingCfg.Password
+				if effPass == "" {
+					effPass = store.ExtractPasswordFromURI(existingCfg.URI)
+				}
+				fullURI := existingCfg.URI
+				if rawURI != "" {
+					fullURI = store.InjectCredentialsIntoURI(rawURI, saved.Username, effPass)
+				} else if fullURI != "" && effPass != "" && fullURI == store.StripPasswordFromURI(fullURI) {
+					fullURI = store.InjectCredentialsIntoURI(fullURI, saved.Username, effPass)
+				}
+				s.setSessionCred(scope, id, sessionConnCred{
+					Username:  saved.Username,
+					Password:  effPass,
+					URI:       fullURI,
+					UpdatedAt: time.Now(),
+				})
+			}
+		} else {
+			s.clearSessionCred(scope, id)
+		}
+	}
+
+	s.pool.EvictConnectionAll(id)
 	s.invalidateConnCache(id)
+	saved = s.annotateSavedConnectionUnlock(c, saved)
 	c.JSON(http.StatusOK, saved)
 }
 
@@ -855,11 +1123,39 @@ func (s *Server) handleDuplicateConnection(c *Context) {
 		c.JSON(http.StatusForbidden, H{"error": "Permission denied: only an administrator or the connection owner can duplicate this connection"})
 		return
 	}
+	srcCfg, srcErr := s.store.GetDecryptedConnection(id)
+	if srcErr != nil {
+		c.JSON(http.StatusNotFound, H{"error": srcErr.Error()})
+		return
+	}
+	srcSaved, hasSrcSaved := s.store.GetSavedConnectionForPrincipal(c.Principal, id)
+	if !s.desktop.Enabled && !c.IsAdmin() {
+		srcFilePath := s.normalizeConnectionFilePathForWebUser(c, srcCfg.FilePath)
+		if status, errMsg := s.validateConnectionFilePath(c, srcCfg.Type, srcFilePath); status != http.StatusOK {
+			c.JSON(status, H{"error": errMsg})
+			return
+		}
+		checkCfg := srcCfg
+		checkCfg.Options = store.StripReservedConnectionOptions(checkCfg.Options)
+		if status, errMsg := s.validateRemoteEndpointForWebUser(c, checkCfg); status != http.StatusOK {
+			c.JSON(status, H{"error": errMsg})
+			return
+		}
+	}
 	saved, err := s.store.DuplicateConnection(id, c.Principal)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
 	}
+	sameOwner := s.desktop.Enabled || (hasSrcSaved && (srcSaved.OwnerID == c.UserID() || (c.IsAdmin() && srcSaved.OwnerID == "")))
+	if !saved.RememberPassword && sameOwner {
+		scope := s.credSessionKey(c)
+		if cred, ok := s.getSessionCred(scope, id); ok {
+			cred.UpdatedAt = time.Now()
+			s.setSessionCred(scope, saved.ID, cred)
+		}
+	}
+	saved = s.annotateSavedConnectionUnlock(c, saved)
 	c.JSON(http.StatusOK, saved)
 }
 
@@ -940,8 +1236,11 @@ func (s *Server) handleDisconnectConnection(c *Context) {
 	if !s.authorizeConn(c, id, false) {
 		return
 	}
-	s.pool.Evict(id)
-	s.invalidateConnCache(id)
+	s.clearSessionCred(s.credSessionKey(c), id)
+	if s.store.CanEditConnection(c.Principal, id) {
+		s.pool.EvictConnectionAll(id)
+		s.invalidateConnCache(id)
+	}
 	c.JSON(http.StatusOK, H{"message": "Connection pool released"})
 }
 
@@ -952,6 +1251,7 @@ func (s *Server) handleDeleteConnection(c *Context) {
 		return
 	}
 	existingCfg, _ := s.store.GetDecryptedConnection(id)
+	s.clearConnectionSessionCreds(id)
 	s.pool.EvictAndWait(id, 1500*time.Millisecond)
 	s.invalidateConnCache(id)
 	if err := s.store.DeleteConnection(id); err != nil {

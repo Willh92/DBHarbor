@@ -115,6 +115,7 @@ func (s *Server) handleAdminUpdateUser(c *Context) {
 		c.JSON(http.StatusBadRequest, H{"error": "Cannot disable your own currently signed-in account"})
 		return
 	}
+	priorSIDs := s.store.ListActiveUserSessionIDs(uid)
 	updated, err := s.store.UpdateUser(uid, in)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
@@ -123,6 +124,16 @@ func (s *Server) handleAdminUpdateUser(c *Context) {
 	event := "USER_UPDATED"
 	if updated.Disabled {
 		event = "USER_DISABLED"
+		for _, sid := range priorSIDs {
+			if s.tokens != nil {
+				s.tokens.RevokeSessionInMemory(sid, 0)
+			}
+			s.clearSessionByID(sid)
+		}
+		s.clearSessionScope("user:" + uid)
+		s.sweepStaleSessionCreds()
+	} else {
+		s.pruneUnauthorizedUserSessionCreds(uid)
 	}
 	s.store.AddAuditLog(
 		event,
@@ -153,12 +164,15 @@ func (s *Server) handleAdminDeleteUser(c *Context) {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
 		return
 	}
-	if s.tokens != nil {
-		for _, sid := range sids {
+	for _, sid := range sids {
+		if s.tokens != nil {
 			s.tokens.RevokeSessionInMemory(sid, 0)
 		}
+		s.clearSessionByID(sid)
 	}
+	s.clearSessionScope("user:" + uid)
 	for _, cid := range privConnIDs {
+		s.clearConnectionSessionCreds(cid)
 		s.pool.EvictAndWait(cid, 1500*time.Millisecond)
 		s.invalidateConnCache(cid)
 	}
@@ -200,11 +214,13 @@ func (s *Server) handleAdminResetPassword(c *Context) {
 	if s.protector != nil {
 		s.protector.ResetUser(target.Username)
 	}
-	if s.tokens != nil {
-		for _, sid := range sids {
+	for _, sid := range sids {
+		if s.tokens != nil {
 			s.tokens.RevokeSessionInMemory(sid, 0)
 		}
+		s.clearSessionByID(sid)
 	}
+	s.clearSessionScope("user:" + uid)
 	s.store.AddAuditLog(
 		"ADMIN_RESET_PASSWORD",
 		c.Username(),
@@ -254,11 +270,13 @@ func (s *Server) handleAdminRevokeUserSessions(c *Context) {
 		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
 		return
 	}
-	if s.tokens != nil {
-		for _, sid := range sids {
+	for _, sid := range sids {
+		if s.tokens != nil {
 			s.tokens.RevokeSessionInMemory(sid, 0)
 		}
+		s.clearSessionByID(sid)
 	}
+	s.clearSessionScope("user:" + uid)
 	s.store.AddAuditLog(
 		"ADMIN_REVOKE_SESSIONS",
 		c.Username(),

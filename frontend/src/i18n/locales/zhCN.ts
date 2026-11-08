@@ -1529,4 +1529,28 @@ export const ZH_CN_DICT: Record<string, string> = {
   'Failed to read image file': '读取图片文件失败',
   'Embedded file engines do not use server-level accounts.':
     '嵌入式单文件数据库引擎不使用服务端账号与权限体系。',
+  'Remember password': '记住密码',
+  'Password is encrypted with AES-256-GCM on disk for automatic reconnection.':
+    '密码使用 AES-256-GCM 加密持久化保存，下次自动重连。',
+  'Turning this off clears the saved password from disk upon saving; next login will prompt for credentials.':
+    '关闭后保存将立即清除本地已保存的密码，下次登录连接时将提示重新输入。',
+  'Password is kept only for this sign-in session and will not be saved to disk; you will be prompted on next login.':
+    '密码仅在当前登录会话内有效，不写入磁盘，下次登录连接时提示输入。',
+  'Saved password will be cleared from disk (leave blank to keep for current session)':
+    '保存后将清除本地记住的密码（留空则在当前会话内继续保持连接）',
+  'Unlocked in current session (leave blank to keep session password)':
+    '当前会话已解锁（留空则保持当前会话密码）',
+  'Password not remembered — session credentials required': '未记住密码 — 需输入本次会话凭据',
+  'Database Authentication Failed': '数据库认证失败',
+  'Enter Database Credentials': '输入数据库凭据',
+  'Connect': '连接',
+  'Connected to {name}': '已连接至 {name}',
+  'Authentication failed': '认证失败',
+  'Database username or password was rejected. Please re-enter credentials.':
+    '数据库账户或密码错误，请重新输入凭据。',
+  'Password is not saved for this connection. Please enter credentials for the current session.':
+    '该连接未保存密码，请输入当前会话的访问凭据。',
+  'Optional (Redis 6+ ACL user)': '可选（Redis 6+ ACL 用户名）',
+  'Enter database password': '输入数据库密码',
+  'Connection URI (Optional Override)': '连接 URI（可选覆盖）',
 };

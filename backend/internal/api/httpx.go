@@ -346,3 +346,36 @@ func (g *gzipAPIResponseWriter) close() {
 		g.gw = nil
 	}
 }
+
+type delayedAttachmentWriter struct {
+	w           http.ResponseWriter
+	contentType string
+	disposition string
+	wroteHeader bool
+}
+
+func (d *delayedAttachmentWriter) commitHeaders() {
+	if d.wroteHeader {
+		return
+	}
+	d.wroteHeader = true
+	d.w.Header().Set("Content-Type", d.contentType)
+	d.w.Header().Set("Content-Disposition", d.disposition)
+	d.w.WriteHeader(http.StatusOK)
+}
+
+func (d *delayedAttachmentWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	d.commitHeaders()
+	return d.w.Write(p)
+}
+
+func (d *delayedAttachmentWriter) Flush() {
+	if d.wroteHeader {
+		if fl, ok := d.w.(http.Flusher); ok {
+			fl.Flush()
+		}
+	}
+}

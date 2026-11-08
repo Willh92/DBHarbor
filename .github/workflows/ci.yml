@@ -23,6 +23,8 @@ jobs:
   verify:
     name: Build & Test (Server + Desktop GUI)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 20
 
     steps:

@@ -113,10 +113,16 @@ export const LoginPage: React.FC = () => {
 
     const iconLink = document.querySelector('link[rel="icon"]') as HTMLLinkElement | null;
     if (iconLink) {
-      if (effectiveBranding.iconMode === 'custom' && effectiveBranding.customIconDataUrl) {
-        const mimeMatch = /^data:(image\/[a-zA-Z0-9+.-]+);base64,/i.exec(effectiveBranding.customIconDataUrl);
-        iconLink.type = mimeMatch?.[1] || 'image/png';
-        iconLink.href = effectiveBranding.customIconDataUrl;
+      const safeRasterIconMatch =
+        effectiveBranding.iconMode === 'custom' && effectiveBranding.customIconDataUrl
+          ? /^(data:image\/(?:png|jpeg|jpg|webp|gif|x-icon|vnd\.microsoft\.icon);base64,[A-Za-z0-9+/=]+)$/i.exec(
+              effectiveBranding.customIconDataUrl.trim()
+            )
+          : null;
+      if (safeRasterIconMatch) {
+        const mimeMatch = /^data:(image\/[a-z0-9.+-]+);base64,/i.exec(safeRasterIconMatch[1]);
+        iconLink.type = mimeMatch?.[1]?.toLowerCase() || 'image/png';
+        iconLink.href = safeRasterIconMatch[1];
       } else {
         iconLink.type = 'image/svg+xml';
         iconLink.href = '/favicon.svg';

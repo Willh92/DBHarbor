@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Button,
+  Checkbox,
   Col,
   Empty,
   Form,
@@ -47,6 +48,7 @@ const PRESET_BADGE_COLORS = [
 ];
 
 const ColorSwatchPicker: React.FC<{ value?: string; onChange?: (hex: string) => void }> = ({ value, onChange }) => {
+  const darkMode = useWorkbenchStore((s) => s.darkMode);
   const hex = typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value) ? value : '#1677ff';
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', minHeight: 32 }}>
@@ -64,7 +66,7 @@ const ColorSwatchPicker: React.FC<{ value?: string; onChange?: (hex: string) => 
               padding: 0,
               borderRadius: 4,
               background: c,
-              border: active ? '2px solid #fff' : '1px solid rgba(128,128,128,0.35)',
+              border: active ? (darkMode ? '2px solid rgba(255,255,255,0.88)' : '2px solid #fff') : '2px solid transparent',
               boxShadow: active ? `0 0 0 2px ${c}` : 'none',
               cursor: 'pointer',
               flexShrink: 0,
@@ -193,6 +195,9 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
     [drivers, selectedType]
   );
 
+  const isCredentialedDriver = selectedType !== 'sqlite' && selectedType !== 'duckdb';
+  const rememberPasswordVal = Form.useWatch('rememberPassword', form);
+
   const filteredDrivers = useMemo(() => {
     if (categoryFilter === 'all') return drivers;
     if (categoryFilter === 'nosql') {
@@ -218,6 +223,8 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
         port: editing.port,
         username: editing.username,
         password: '',
+        rememberPassword:
+          editing.type === 'sqlite' || editing.type === 'duckdb' ? true : editing.rememberPassword !== false,
         database: editing.database,
         filePath: editing.filePath,
         uri: '',
@@ -237,6 +244,7 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
       name: `${drv.name} ${t('Connection')}`,
       color: drv.badgeColor || '#1677ff',
       visibility: role === 'admin' ? 'shared' : 'private',
+      rememberPassword: type === 'sqlite' || type === 'duckdb',
       options: {},
     };
     drv.fields.forEach((f) => {
@@ -274,6 +282,7 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
         }
       });
     }
+    const hasReusableSecret = Boolean(editing && (editing.hasPassword || editing.hasUri || editing.unlocked));
     return {
       id: editing?.id,
       name: vals.name,
@@ -287,7 +296,8 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
       filePath: vals.filePath || '',
       uri: vals.uri || '',
       options: normOptions,
-      keepExistingSecret: Boolean(editing),
+      keepExistingSecret: hasReusableSecret,
+      rememberPassword: isCredentialedDriver ? Boolean(vals.rememberPassword) : true,
       visibility: isDesktop ? 'shared' : role === 'admin' ? vals.visibility || 'shared' : 'private',
     };
   };
@@ -335,6 +345,8 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
     }
   };
 
+  const hasReusableSecret = Boolean(editing && (editing.hasPassword || editing.hasUri || editing.unlocked));
+
   return (
     <Modal
       open={open}
@@ -345,13 +357,23 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
       onCancel={onClose}
       destroyOnClose
       footer={
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-          <Button icon={<ThunderboltOutlined />} loading={testing} onClick={handleTest}>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: isMobile ? 6 : 8,
+          }}
+        >
+          <Button size={isMobile ? 'small' : 'middle'} icon={<ThunderboltOutlined />} loading={testing} onClick={handleTest}>
             {t('Test Connection')}
           </Button>
-          <Space>
-            <Button onClick={onClose}>{t('Cancel')}</Button>
-            <Button type="primary" loading={saving} onClick={handleSave}>
+          <Space size={isMobile ? 6 : 8}>
+            <Button size={isMobile ? 'small' : 'middle'} onClick={onClose}>
+              {t('Cancel')}
+            </Button>
+            <Button size={isMobile ? 'small' : 'middle'} type="primary" loading={saving} onClick={handleSave}>
               {t('Save Connection')}
             </Button>
           </Space>
@@ -590,9 +612,18 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
                   ) : field.type === 'password' ? (
                     <Input.Password
                       placeholder={
-                        editing && ((field.key === 'password' && editing.hasPassword) || (field.key === 'uri' && editing.hasUri))
-                          ? t('Encrypted (leave blank to keep existing secret)')
-                          : field.placeholder
+                        hasReusableSecret &&
+                        editing &&
+                        ((field.key === 'password' && editing.hasPassword) || (field.key === 'uri' && editing.hasUri))
+                          ? !rememberPasswordVal
+                            ? t('Saved password will be cleared from disk (leave blank to keep for current session)')
+                            : t('Encrypted (leave blank to keep existing secret)')
+                          : hasReusableSecret &&
+                              editing &&
+                              (field.key === 'password' || field.key === 'uri') &&
+                              editing.unlocked
+                            ? t('Unlocked in current session (leave blank to keep session password)')
+                            : field.placeholder
                       }
                     />
                   ) : field.type === 'select' ? (
@@ -605,6 +636,32 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
             );
           })}
         </Row>
+
+        {isCredentialedDriver && (
+          <div
+            style={{
+              marginBottom: 12,
+              padding: '8px 12px',
+              borderRadius: 8,
+              border: '1px solid rgba(128,128,128,0.2)',
+              background: 'rgba(128,128,128,0.04)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+            }}
+          >
+            <Form.Item name="rememberPassword" valuePropName="checked" style={{ marginBottom: 0 }}>
+              <Checkbox>{t('Remember password')}</Checkbox>
+            </Form.Item>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {rememberPasswordVal
+                ? t('Password is encrypted with AES-256-GCM on disk for automatic reconnection.')
+                : editing && (editing.rememberPassword !== false || editing.hasPassword)
+                  ? t('Turning this off clears the saved password from disk upon saving; next login will prompt for credentials.')
+                  : t('Password is kept only for this sign-in session and will not be saved to disk; you will be prompted on next login.')}
+            </Typography.Text>
+          </div>
+        )}
       </Form>
 
       {pingResult && (
@@ -740,35 +797,62 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
           <div
             style={{
               display: 'flex',
+              flexDirection: isMobile ? 'column' : 'row',
               justifyContent: 'space-between',
-              alignItems: 'center',
+              alignItems: isMobile ? 'stretch' : 'center',
               flexWrap: 'wrap',
               gap: 8,
               paddingTop: 8,
               borderTop: '1px dashed rgba(128,128,128,0.2)',
             }}
           >
-            <Space.Compact style={{ flex: 1, minWidth: 220 }}>
-              <Input
-                size="small"
-                value={newDbFileName}
-                onChange={(e) => setNewDbFileName(e.target.value)}
-                placeholder={selectedType === 'duckdb' ? 'analytics.duckdb' : 'app.sqlite'}
-              />
-              <Button
-                size="small"
-                type="primary"
-                onClick={() => {
-                  const baseDir = (fsData?.currentDir || fsDirInput || '.').replace(/[\\/]+$/, '');
-                  const sep = baseDir.includes('\\') ? '\\' : '/';
-                  const cleanName = newDbFileName.trim() || (selectedType === 'duckdb' ? 'analytics.duckdb' : 'app.sqlite');
-                  form.setFieldValue('filePath', `${baseDir}${sep}${cleanName}`);
-                  setFsModalOpen(false);
-                }}
-              >
-                {t('Create / Use File Here')}
-              </Button>
-            </Space.Compact>
+            {isMobile ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
+                <Input
+                  size="small"
+                  style={{ width: '100%' }}
+                  value={newDbFileName}
+                  onChange={(e) => setNewDbFileName(e.target.value)}
+                  placeholder={selectedType === 'duckdb' ? 'analytics.duckdb' : 'app.sqlite'}
+                />
+                <Button
+                  size="small"
+                  type="primary"
+                  block
+                  onClick={() => {
+                    const baseDir = (fsData?.currentDir || fsDirInput || '.').replace(/[\\/]+$/, '');
+                    const sep = baseDir.includes('\\') ? '\\' : '/';
+                    const cleanName = newDbFileName.trim() || (selectedType === 'duckdb' ? 'analytics.duckdb' : 'app.sqlite');
+                    form.setFieldValue('filePath', `${baseDir}${sep}${cleanName}`);
+                    setFsModalOpen(false);
+                  }}
+                >
+                  {t('Create / Use File Here')}
+                </Button>
+              </div>
+            ) : (
+              <Space.Compact style={{ flex: 1, minWidth: 220 }}>
+                <Input
+                  size="small"
+                  value={newDbFileName}
+                  onChange={(e) => setNewDbFileName(e.target.value)}
+                  placeholder={selectedType === 'duckdb' ? 'analytics.duckdb' : 'app.sqlite'}
+                />
+                <Button
+                  size="small"
+                  type="primary"
+                  onClick={() => {
+                    const baseDir = (fsData?.currentDir || fsDirInput || '.').replace(/[\\/]+$/, '');
+                    const sep = baseDir.includes('\\') ? '\\' : '/';
+                    const cleanName = newDbFileName.trim() || (selectedType === 'duckdb' ? 'analytics.duckdb' : 'app.sqlite');
+                    form.setFieldValue('filePath', `${baseDir}${sep}${cleanName}`);
+                    setFsModalOpen(false);
+                  }}
+                >
+                  {t('Create / Use File Here')}
+                </Button>
+              </Space.Compact>
+            )}
 
             {!isDesktop && (
               <Upload
@@ -776,7 +860,7 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
                 accept=".db,.sqlite,.sqlite3,.db3,.s3db,.duckdb,.ddb"
                 beforeUpload={handleUploadDBFile}
               >
-                <Button size="small" icon={<UploadOutlined />} loading={uploadingDB}>
+                <Button size="small" block={isMobile} icon={<UploadOutlined />} loading={uploadingDB}>
                   {t('Upload Local DB File')}
                 </Button>
               </Upload>

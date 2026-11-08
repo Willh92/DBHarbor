@@ -21,7 +21,7 @@ import {
   PlayCircleOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
-import { api } from '../../api/client';
+import { api, isAuthPromptCancelledError } from '../../api/client';
 import { useI18n } from '../../i18n/useI18n';
 import type { TransferModalMode } from './ContextNavBar';
 
@@ -134,7 +134,9 @@ export const ImportExportModal: React.FC<Props> = ({
       }
       onClose();
     } catch (err: any) {
-      message.error(err.message || t('Failed to start export'));
+      if (!isAuthPromptCancelledError(err)) {
+        message.error(err.message || t('Failed to start export'));
+      }
     } finally {
       setExporting(false);
     }
@@ -178,7 +180,9 @@ export const ImportExportModal: React.FC<Props> = ({
       onImported?.();
       onClose();
     } catch (err: any) {
-      message.error(err.message);
+      if (!isAuthPromptCancelledError(err)) {
+        message.error(err.message);
+      }
     } finally {
       setImporting(false);
     }
@@ -216,7 +220,9 @@ export const ImportExportModal: React.FC<Props> = ({
       onImported?.();
       onClose();
     } catch (err: any) {
-      message.error(err.message);
+      if (!isAuthPromptCancelledError(err)) {
+        message.error(err.message);
+      }
     } finally {
       setSqlRunning(false);
     }

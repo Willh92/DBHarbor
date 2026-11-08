@@ -18,6 +18,7 @@ import (
 
 	"dbharbor/backend/internal/crypto"
 	"dbharbor/backend/internal/driver"
+	"dbharbor/backend/internal/driver/sqlite"
 	"dbharbor/backend/internal/store"
 )
 
@@ -441,7 +442,7 @@ func (s *Server) handleExportDatabaseFile(c *Context) {
 
 	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 
@@ -527,6 +528,9 @@ func (s *Server) handleExportDatabaseFile(c *Context) {
 func (s *Server) cleanupEphemeralWorkspace(cfg driver.ConnectionConfig) {
 	if !store.IsEphemeralConnection(cfg.Options) {
 		return
+	}
+	if cfg.FilePath != "" {
+		sqlite.ReleaseDuckDBFileLock(cfg.FilePath)
 	}
 	ownerID := strings.TrimSpace(cfg.Options["__ephemeral_owner"])
 	if ownerID == "" || !isStrictUUIDToken(cfg.ID) {
@@ -619,6 +623,9 @@ func (s *Server) sweepEphemeralWorkspaces(idleTTL time.Duration) {
 			s.invalidateConnCache(c.ID)
 			_ = s.store.DeleteConnection(c.ID)
 			_ = s.store.ClearHistoryForUser("", c.ID)
+			if c.FilePath != "" {
+				sqlite.ReleaseDuckDBFileLock(c.FilePath)
+			}
 			_ = os.RemoveAll(connDir)
 			continue
 		}

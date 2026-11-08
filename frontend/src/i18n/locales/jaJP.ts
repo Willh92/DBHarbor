@@ -1536,4 +1536,29 @@ export const JA_JP_DICT: Record<string, string> = {
   'Failed to read image file': '画像ファイルの読み込みに失敗しました',
   'Embedded file engines do not use server-level accounts.':
     '組み込みファイル型エンジンはサーバーレベルのアカウントを使用しません。',
+  'Remember password': 'パスワードを保存',
+  'Password is encrypted with AES-256-GCM on disk for automatic reconnection.':
+    'パスワードは AES-256-GCM で暗号化してディスクに保存され、次回から自動再接続します。',
+  'Turning this off clears the saved password from disk upon saving; next login will prompt for credentials.':
+    'オフにして保存するとディスク上の保存済みパスワードを消去し、次回ログイン時に認証情報の入力を求めます。',
+  'Password is kept only for this sign-in session and will not be saved to disk; you will be prompted on next login.':
+    'パスワードは現在のログインセッション内でのみ保持され、ディスクには保存されません。次回ログイン時に入力を求めます。',
+  'Saved password will be cleared from disk (leave blank to keep for current session)':
+    '保存するとディスク上のパスワードを消去します（空欄のままでも現在のセッションでは有効）',
+  'Unlocked in current session (leave blank to keep session password)':
+    '現在のセッションでロック解除済み（空欄のままにすると現在のパスワードを維持）',
+  'Password not remembered — session credentials required':
+    'パスワード未保存 — セッション認証情報の入力が必要です',
+  'Database Authentication Failed': 'データベース認証に失敗しました',
+  'Enter Database Credentials': 'データベース認証情報の入力',
+  'Connect': '接続',
+  'Connected to {name}': '{name} に接続しました',
+  'Authentication failed': '認証に失敗しました',
+  'Database username or password was rejected. Please re-enter credentials.':
+    'データベースのユーザー名またはパスワードが拒否されました。認証情報を再入力してください。',
+  'Password is not saved for this connection. Please enter credentials for the current session.':
+    'この接続にはパスワードが保存されていません。現在のセッション用の認証情報を入力してください。',
+  'Optional (Redis 6+ ACL user)': '任意（Redis 6+ ACL ユーザー名）',
+  'Enter database password': 'データベースのパスワードを入力',
+  'Connection URI (Optional Override)': '接続 URI（任意で上書き）',
 };

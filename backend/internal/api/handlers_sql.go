@@ -40,7 +40,7 @@ func (s *Server) getSQLDriverAccess(c *Context, requireWrite bool) (driver.SQLDr
 	}
 	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return nil, cfg, false
 	}
 	sqlDrv, ok := drv.(driver.SQLDriver)
@@ -56,14 +56,14 @@ func (s *Server) handleListDatabases(c *Context) {
 	if !s.authorizeConn(c, connID, false) {
 		return
 	}
-	drv, _, err := s.acquireConnDriver(c, connID)
+	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	dbs, err := drv.ListDatabases(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	if dbs == nil {
@@ -79,7 +79,7 @@ func (s *Server) handleCreateDatabase(c *Context) {
 	}
 	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	var req struct {
@@ -93,7 +93,7 @@ func (s *Server) handleCreateDatabase(c *Context) {
 	dbName := strings.TrimSpace(req.Name)
 	start := time.Now()
 	if err := drv.CreateDatabase(c.Request.Context(), dbName, req.Charset); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	s.invalidateConnCache(connID)
@@ -112,7 +112,7 @@ func (s *Server) handleDropDatabase(c *Context) {
 	}
 	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	name := strings.TrimSpace(c.Query("name"))
@@ -138,7 +138,7 @@ func (s *Server) handleDropDatabase(c *Context) {
 	}
 	start := time.Now()
 	if err := dropper.DropDatabase(c.Request.Context(), name); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	s.invalidateConnCache(connID)
@@ -151,13 +151,13 @@ func (s *Server) handleDropDatabase(c *Context) {
 }
 
 func (s *Server) handleListSchemas(c *Context) {
-	sqlDrv, _, ok := s.getSQLDriverAccess(c, false)
+	sqlDrv, cfg, ok := s.getSQLDriverAccess(c, false)
 	if !ok {
 		return
 	}
 	schemas, err := sqlDrv.ListSchemas(c.Request.Context(), c.Query("database"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"schemas": schemas})
@@ -170,7 +170,7 @@ func (s *Server) handleCreateSchema(c *Context) {
 	}
 	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	sm, ok := drv.(driver.SchemaManager)
@@ -189,7 +189,7 @@ func (s *Server) handleCreateSchema(c *Context) {
 	schemaName := strings.TrimSpace(req.Schema)
 	start := time.Now()
 	if err := sm.CreateSchema(c.Request.Context(), strings.TrimSpace(req.Database), schemaName); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	s.invalidateConnCache(connID)
@@ -208,7 +208,7 @@ func (s *Server) handleDropSchema(c *Context) {
 	}
 	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	sm, ok := drv.(driver.SchemaManager)
@@ -241,7 +241,7 @@ func (s *Server) handleDropSchema(c *Context) {
 	}
 	start := time.Now()
 	if err := sm.DropSchema(c.Request.Context(), database, schemaName, cascade); err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	s.invalidateConnCache(connID)
@@ -260,7 +260,7 @@ func (s *Server) handleListObjects(c *Context) {
 	}
 	objs, err := sqlDrv.ListObjects(c.Request.Context(), c.Query("database"), c.Query("schema"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	sqlmeta.EnrichSchemaObjects(c.Request.Context(), cfg.Type, sqlDrv, &objs)
@@ -268,13 +268,13 @@ func (s *Server) handleListObjects(c *Context) {
 }
 
 func (s *Server) handleGetTableStructure(c *Context) {
-	sqlDrv, _, ok := s.getSQLDriver(c)
+	sqlDrv, cfg, ok := s.getSQLDriver(c)
 	if !ok {
 		return
 	}
 	st, err := sqlDrv.GetTableStructure(c.Request.Context(), c.Query("database"), c.Query("schema"), c.Query("table"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, st)
@@ -299,7 +299,7 @@ func (s *Server) handleCreateTable(c *Context) {
 	start := time.Now()
 	ddl, err := sqlDrv.CreateTable(c.Request.Context(), req)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error(), "ddl": ddl})
+		s.respondConnErrorWithFields(c, cfg.ID, cfg.Type, err, H{"ddl": ddl})
 		return
 	}
 	if !req.PreviewOnly && ddl != "" {
@@ -335,7 +335,7 @@ func (s *Server) handleAlterTable(c *Context) {
 	start := time.Now()
 	stmts, err := sqlDrv.AlterTable(c.Request.Context(), req)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error(), "sqls": stmts})
+		s.respondConnErrorWithFields(c, cfg.ID, cfg.Type, err, H{"sqls": stmts})
 		return
 	}
 	if !req.PreviewOnly && len(stmts) > 0 {
@@ -366,7 +366,7 @@ func (s *Server) handleObjectAction(c *Context) {
 	start := time.Now()
 	sqls, err := sqlmeta.ExecuteObjectAction(c.Request.Context(), cfg.Type, sqlDrv, req)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error(), "sqls": sqls})
+		s.respondConnErrorWithFields(c, cfg.ID, cfg.Type, err, H{"sqls": sqls})
 		return
 	}
 	if !req.PreviewOnly {
@@ -385,7 +385,7 @@ func (s *Server) handleObjectAction(c *Context) {
 }
 
 func (s *Server) handleBrowseData(c *Context) {
-	sqlDrv, _, ok := s.getSQLDriverAccess(c, false)
+	sqlDrv, cfg, ok := s.getSQLDriverAccess(c, false)
 	if !ok {
 		return
 	}
@@ -410,14 +410,14 @@ func (s *Server) handleBrowseData(c *Context) {
 	}
 	res, err := sqlDrv.BrowseData(c.Request.Context(), req)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, res)
 }
 
 func (s *Server) handlePreviewMutation(c *Context) {
-	sqlDrv, _, ok := s.getSQLDriverAccess(c, true)
+	sqlDrv, cfg, ok := s.getSQLDriverAccess(c, true)
 	if !ok {
 		return
 	}
@@ -428,7 +428,7 @@ func (s *Server) handlePreviewMutation(c *Context) {
 	}
 	sqls, err := sqlDrv.BuildMutationPreviewSQL(req)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, cfg.ID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"sqls": sqls})
@@ -447,7 +447,7 @@ func (s *Server) handleApplyMutation(c *Context) {
 	start := time.Now()
 	res, err := sqlDrv.ApplyRowMutations(c.Request.Context(), req)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error(), "executedSql": res.ExecutedSQL})
+		s.respondConnErrorWithFields(c, cfg.ID, cfg.Type, err, H{"executedSql": res.ExecutedSQL})
 		return
 	}
 	if len(res.ExecutedSQL) > 0 {
@@ -470,9 +470,9 @@ func (s *Server) handleListPartitions(c *Context) {
 	if !s.authorizeConn(c, connID, false) {
 		return
 	}
-	drv, _, err := s.acquireConnDriver(c, connID)
+	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	pm, ok := drv.(driver.PartitionManager)
@@ -482,7 +482,7 @@ func (s *Server) handleListPartitions(c *Context) {
 	}
 	parts, err := pm.ListPartitions(c.Request.Context(), c.Query("database"), c.Query("schema"), c.Query("table"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"partitions": parts})
@@ -500,7 +500,7 @@ func (s *Server) handleManagePartition(c *Context) {
 	}
 	drv, cfg, err := s.acquireConnDriver(c, connID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error()})
+		s.respondConnError(c, connID, cfg.Type, err)
 		return
 	}
 	pm, ok := drv.(driver.PartitionManager)
@@ -511,7 +511,7 @@ func (s *Server) handleManagePartition(c *Context) {
 	start := time.Now()
 	stmt, err := pm.ManagePartition(c.Request.Context(), req)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error(), "sql": stmt})
+		s.respondConnErrorWithFields(c, connID, cfg.Type, err, H{"sql": stmt})
 		return
 	}
 	if !req.PreviewOnly && stmt != "" {
@@ -585,7 +585,7 @@ func (s *Server) handleExecuteQuery(c *Context) {
 	})
 
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error(), "partialResults": results})
+		s.respondConnErrorWithFields(c, cfg.ID, cfg.Type, err, H{"partialResults": results})
 		return
 	}
 	c.JSON(http.StatusOK, H{"results": results, "totalElapsedMs": elapsed})
@@ -612,6 +612,9 @@ func (s *Server) handleAutocomplete(c *Context) {
 
 	meta, err := sqlDrv.GetAutocompleteMeta(c.Request.Context(), dbName)
 	if err != nil {
+		if sqlbase.IsAuthError(cfg.Type, err) {
+			s.evictCallerConnPool(c, cfg.ID)
+		}
 		c.JSON(http.StatusOK, driver.AutocompleteMeta{Tables: map[string][]string{}})
 		return
 	}
@@ -722,11 +725,25 @@ func (s *Server) handleExport(c *Context) {
 	}
 	filename := fmt.Sprintf("%s_%s.%s", sanitizeExportName(baseName), time.Now().Format("20060102_150405"), ext)
 
-	c.Header("Content-Type", contentType)
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
-	if err := sqlDrv.StreamExport(c.Request.Context(), req, c.Writer); err != nil {
-		_, _ = fmt.Fprintf(c.Writer, "\n/* Export Error: %s */\n", err.Error())
+	dw := &delayedAttachmentWriter{
+		w:           c.Writer,
+		contentType: contentType,
+		disposition: fmt.Sprintf("attachment; filename=%q", filename),
 	}
+	if err := sqlDrv.StreamExport(c.Request.Context(), req, dw); err != nil {
+		if !dw.wroteHeader {
+			s.respondConnError(c, cfg.ID, cfg.Type, err)
+			return
+		}
+		if sqlbase.IsAuthError(cfg.Type, err) {
+			s.evictCallerConnPool(c, cfg.ID)
+		}
+		if format == "sql" {
+			_, _ = fmt.Fprintf(dw, "\n/* Export Error: %s */\n", err.Error())
+		}
+		return
+	}
+	dw.commitHeaders()
 }
 
 func (s *Server) handleImport(c *Context) {
@@ -788,7 +805,7 @@ func (s *Server) handleImport(c *Context) {
 		ElapsedMs: res.ElapsedMs, Status: status, ErrorMsg: errMsg,
 	})
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error(), "importedRows": res.ImportedRows, "warnings": res.Warnings})
+		s.respondConnErrorWithFields(c, cfg.ID, cfg.Type, err, H{"importedRows": res.ImportedRows, "warnings": res.Warnings})
 		return
 	}
 	c.JSON(http.StatusOK, res)
@@ -835,7 +852,7 @@ func (s *Server) handleImportSQLText(c *Context) {
 		Database: req.Database, Query: req.SQL, ElapsedMs: res.ElapsedMs, Status: status, ErrorMsg: errMsg,
 	})
 	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": err.Error(), "importedRows": res.ImportedRows, "warnings": res.Warnings})
+		s.respondConnErrorWithFields(c, cfg.ID, cfg.Type, err, H{"importedRows": res.ImportedRows, "warnings": res.Warnings})
 		return
 	}
 	c.JSON(http.StatusOK, res)

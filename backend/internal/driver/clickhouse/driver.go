@@ -116,11 +116,12 @@ func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
 			return restricted(ctx, "tcp", addr)
 		}
 	}
-	switch cfg.Option("tls", "false") {
-	case "true":
-		opts.TLS = &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
-	case "skip-verify":
-		opts.TLS = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
+	if tlsMode := cfg.Option("tls", "false"); tlsMode == "true" || tlsMode == "skip-verify" {
+		skipVerify := tlsMode == "skip-verify"
+		if skipVerify && cfg.Option("__restrict_internal_ip", "") == "1" {
+			return nil, errors.New("TLS skip-verify is not permitted for restricted non-admin connections")
+		}
+		opts.TLS = &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12, InsecureSkipVerify: skipVerify} // #nosec G402
 	}
 
 	db := ch.OpenDB(opts)
@@ -877,12 +878,17 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 		for _, item := range dbs {
 			meta.Databases = append(meta.Databases, item.Name)
 		}
+	} else if sqlbase.IsAuthError("clickhouse", err) {
+		return meta, err
 	}
 	if database == "" {
 		database = "default"
 	}
 	rows, err := d.db.QueryContext(ctx, `SELECT table, name FROM system.columns WHERE database = ? ORDER BY table, position`, database)
 	if err != nil {
+		if sqlbase.IsAuthError("clickhouse", err) {
+			return meta, err
+		}
 		return meta, nil
 	}
 	defer rows.Close()
@@ -1015,17 +1021,25 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 		Sessions:       []driver.SessionItem{},
 		CanKillSession: true,
 	}
-	_ = d.db.QueryRowContext(ctx, "SELECT version()").Scan(&snap.Version)
+	if err := d.db.QueryRowContext(ctx, "SELECT version()").Scan(&snap.Version); err != nil && sqlbase.IsAuthError("clickhouse", err) {
+		return snap, err
+	}
 	var uptime uint32
-	if d.db.QueryRowContext(ctx, "SELECT uptime()").Scan(&uptime) == nil {
+	if err := d.db.QueryRowContext(ctx, "SELECT uptime()").Scan(&uptime); err == nil {
 		snap.UptimeSec = int64(uptime)
+	} else if sqlbase.IsAuthError("clickhouse", err) {
+		return snap, err
 	}
 
 	mRows, err := d.db.QueryContext(ctx, `
 		SELECT metric, value FROM system.metrics
 		WHERE metric IN ('Query', 'TCPConnection', 'HTTPConnection', 'MemoryTracking', 'BackgroundPoolTask')
 	`)
-	if err == nil {
+	if err != nil {
+		if sqlbase.IsAuthError("clickhouse", err) {
+			return snap, err
+		}
+	} else {
 		defer mRows.Close()
 		for mRows.Next() {
 			var k string

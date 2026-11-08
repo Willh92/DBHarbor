@@ -4,6 +4,22 @@
 
 DBHarbor の主な変更履歴は本ファイルに記録され、GitHub リポジトリ [Willh92/DBHarbor](https://github.com/Willh92/DBHarbor.git) と同期されます。
 
+## [v1.0.3] - 2026-11-08
+
+### DB 接続パスワードのデフォルト非保存化（任意保存・編集時オフ消去）・CodeQL & 多層セキュリティ強化・ダークモード & モバイル最適化
+- **DB 接続パスワードのデフォルト非保存化・編集時の保存解除消去・認証エラー時の対話型再入力 (`ConnectionModal` + `ConnectionAuthModal`)**：
+  - **デフォルトでパスワードを保存しない（セッションメモリ限定）**：新規のネットワークおよび URI DB 接続（`MySQL`、`MariaDB`、`TiDB`、`OceanBase`、`PostgreSQL`、`KingbaseES`、`ClickHouse`、`SQL Server`、`Oracle`、`Dameng DM8`、`Redis`、`MongoDB`）で **「パスワードを記憶する」がデフォルトでオフ**（`RememberPassword = false`）になりました。パスワードや URI 認証情報はディスクに書き込まれず、上限付きのセッションメモリ（`POST /api/connections/{id}/unlock`）にのみ保持され、ログアウト・セッション期限切れ・接続ロック/削除・プロセス終了時に自動消去されます。
+  - **任意の暗号化保存 & 編集からのワンクリック保存解除**：接続ごとに **「パスワードを記憶する」** をオンにして AES-256-GCM 暗号化ボールト（`conns.enc`）へ保存できるほか、保存済み接続の編集画面でチェックを外して保存するだけでディスク上の保存済みパスワードおよび URI 内蔵シークレットを即座に完全消去できます。
+  - **未ロック解除接続および認証失敗時の自動再入力モーダル**：パスワード非保存の接続先を開く際（`DB_AUTH_REQUIRED`）や、DB 側のパスワード変更・アカウントロック等で認証エラーが発生した際（`DB_AUTH_FAILED`：全 12 認証ドライバの `ORA-01017` / `ORA-28000` / `ORA-28001`、PostgreSQL `28P01` / `28000`、MySQL `1045`、SQL Server `18456`、ClickHouse `516` / `401`、Redis `WRONGPASS` / `NOAUTH`、MongoDB `code 18` 等に対応）に **`ConnectionAuthModal`** を自動表示し、ユーザー名/パスワードの修正・記憶設定の切り替え・中断された操作（ストリーミングエクスポート事前確認や複数タブの自動再読込を含む）のシームレスな再試行を行えます。
+- **セキュリティポリシー (`SECURITY.md`)・GitHub CodeQL 対応 & バックエンドメモリ/並行処理の強化**：
+  - 公式の脆弱性報告ポリシー **`SECURITY.md`** を公開し、全 GitHub Actions ワークフロー（`ci.yml`、`release.yml`、`preview.yml`）をトップレベル最小権限 `contents: read` およびジョブ単位の書き込み権限へ厳格化しました。
+  - Go / TypeScript の静的解析・セキュリティ監査項目を全面対応：接続編集/テスト時の保存済みシークレット再利用に対するホスト/URI 変更および TLS ダウングレード（`UseSSL` 無効化 / `SSLSkipVerify` 有効化）防止チェック（`sameEndpointAndSecurity`）、Web 版での他ユーザー所有シークレット複製防止、共有の非保存パスワード接続に対する一般権限ユーザーのセッション単位ロック解除対応、ClickHouse / Redis の共通 TLS 設定（SNI `ServerName` 補完および非管理者の `skipVerify` 制限）、カスタムブランド Favicon のラスター画像 `data:image/...;base64` 厳格検証、API パスの `encodeURIComponent` 徹底、`int32`/`uint32` 整数境界チェックを実装しました。
+  - メモリ・ファイルロック安全性の向上：`sessionCreds` の上限設定（`4096` スコープ / 各 `256` 接続）と終了時ゼロクリア、ドライバプール退避の `(connID + sessionKey)` 複合キー化（`maxPools = 128`）、ストリーミング SQL/ドキュメントエクスポートにおけるクエリ開始成功後の `Content-Disposition: attachment` 遅延送出、DuckDB CLI の `32 MiB` 超出力パイプデッドロック防止および接続削除/更新時のファイルロック解放を実装しました。
+- **ダークモード外観改善・起動時タブ復元ゲート & モバイル (`360px`) 互換性向上**：
+  - ダークモード時のテーブルやモーダルに残っていた明るい灰色のスクロールバートラックを `transparent` に統一し、Monaco SQL/JSON エディタ初回マウント前の白背景フラッシュを解消、ライト（`#ffffff`）/ ダーク（`#141414`）テーマに応じた `<meta name="theme-color">` 動的同期を追加しました。
+  - `/api/system/bootstrap` 完了を待つ起動ハイドレーションゲート（`bootstrapped`）を導入してリロード時の早期リクエスト競合やエラーバナーのちらつきを解消し、全 8 種類のワークスペースタブでロック解除成功後の自動データ再読込に対応しました。
+  - `360x800` モバイル画面の操作性を改善：`ServerMonitorTab` ツールバーの折り返し対応による横スクロール溢れ解消、モバイル版 `ConnectionSidebar`（共有/個人）および `SchemaObjectModal` のコンパクトセレクタ化、モバイル `<Drawer>` 余白の最適化（`12px`）、ローカル単一ファイル DB 作成欄の縦積みレイアウト化、タッチ端末でのモーダル表示時における意図しないソフトウェアキーボード自動ポップアップ抑止を実装しました。
+
 ## [v1.0.2] - 2026-11-07
 
 > **エディション適用範囲の注意**：**デスクトップ GUI 版 (`dbharbor-desktop-*` / `DBHarbor.app`)** は引き続き**ユーザーアカウント機能を持たないログイン不要の純粋なローカルモード**で動作し、ホスト上のローカルファイルへフルアクセスできます。ブラウザからの一時ローカル単一ファイル DB ワークスペース（`<DataDir>/ephemeral_workspaces/`）およびユーザー別 `<DataDir>/local_databases/u_<hash>/` サンドボックス制限は **Web サーバー版 (`dbharbor-*`) 専用**です。

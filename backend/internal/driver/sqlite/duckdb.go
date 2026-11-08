@@ -55,10 +55,10 @@ const maxDuckDBJSONBytes = 32 << 20 // 32 MiB stdout safety ceiling for interact
 var verifiedDuckDBBinaries sync.Map // map[string]bool
 var duckFileLocks sync.Map          // map[string]*sync.Mutex
 
-func duckFileLock(filePath string) *sync.Mutex {
+func canonicalDuckDBLockKey(filePath string) string {
 	fp := strings.TrimSpace(filePath)
 	if fp == "" || fp == ":memory:" {
-		return nil
+		return ""
 	}
 	abs, err := filepath.Abs(fp)
 	if err != nil {
@@ -72,12 +72,28 @@ func duckFileLock(filePath string) *sync.Mutex {
 	if runtime.GOOS == "windows" {
 		abs = strings.ToLower(abs)
 	}
-	if v, ok := duckFileLocks.Load(abs); ok {
+	return abs
+}
+
+func duckFileLock(filePath string) *sync.Mutex {
+	key := canonicalDuckDBLockKey(filePath)
+	if key == "" {
+		return nil
+	}
+	if v, ok := duckFileLocks.Load(key); ok {
 		return v.(*sync.Mutex)
 	}
 	mu := &sync.Mutex{}
-	actual, _ := duckFileLocks.LoadOrStore(abs, mu)
+	actual, _ := duckFileLocks.LoadOrStore(key, mu)
 	return actual.(*sync.Mutex)
+}
+
+// ReleaseDuckDBFileLock removes the per-file mutex entry from duckFileLocks when an ephemeral file is cleaned up.
+func ReleaseDuckDBFileLock(filePath string) {
+	key := canonicalDuckDBLockKey(filePath)
+	if key != "" {
+		duckFileLocks.Delete(key)
+	}
 }
 
 func resolveDuckDBBinary(explicit string) (string, error) {
@@ -474,13 +490,18 @@ func (d *DuckDBDriver) runJSONUnlocked(ctx context.Context, sqlStmt string) ([]m
 		return nil, err
 	}
 	raw, readErr := io.ReadAll(io.LimitReader(stdoutPipe, maxDuckDBJSONBytes+1))
-	waitErr := cmd.Wait()
-	if readErr != nil {
-		return nil, readErr
-	}
-	if len(raw) > maxDuckDBJSONBytes {
+	if readErr != nil || len(raw) > maxDuckDBJSONBytes {
+		_ = stdoutPipe.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+		if readErr != nil {
+			return nil, readErr
+		}
 		return nil, fmt.Errorf("DuckDB query output exceeded %d MB memory safety limit; please add a LIMIT clause or use streaming export", maxDuckDBJSONBytes>>20)
 	}
+	waitErr := cmd.Wait()
 	if waitErr != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {

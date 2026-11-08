@@ -16,7 +16,7 @@ import (
 
 // LatestSchemaVersion is the target internal SQLite schema version for this DBHarbor release.
 // Increment this constant and append a new migration step whenever a future version alters internal tables.
-const LatestSchemaVersion = 2
+const LatestSchemaVersion = 3
 
 const maxRetainedMigrationBackups = 5
 
@@ -184,6 +184,13 @@ CREATE INDEX IF NOT EXISTS idx_connections_owner_vis ON connections(owner_id, vi
 `
 			_, err := tx.Exec(ddl)
 			return err
+		},
+	},
+	{
+		Version: 3,
+		Name:    "v1_0_3_connection_remember_password",
+		Up: func(tx *sql.Tx) error {
+			return ensureColumnExists(tx, "connections", "remember_password", "INTEGER NOT NULL DEFAULT 1")
 		},
 	},
 }

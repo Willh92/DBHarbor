@@ -10,6 +10,7 @@ import type {
   ConnectionFormPayload,
   DatabaseSummary,
   DbAccountInfo,
+  DbAuthPromptReason,
   DbGrantEntry,
   DbPrivilegeActionPayload,
   DbPrivilegeCapabilities,
@@ -43,6 +44,8 @@ import type {
   ServerInfo,
   SystemStats,
   TableStructure,
+  UnlockConnectionPayload,
+  UnlockConnectionResponse,
   UpdateChannel,
   UpdateCheckResult,
   UserRole,
@@ -93,19 +96,126 @@ export function setAuthToken(token: string) {
     localStorage.setItem(TOKEN_KEY, token);
   } else {
     localStorage.removeItem(TOKEN_KEY);
+    clearAllConnectionAuthPrompts();
   }
 }
 
 export class ApiError extends Error {
   status: number;
   data: Record<string, any>;
+  code?: string;
+  connectionId?: string;
+  authPromptCancelled?: boolean;
 
-  constructor(message: string, status: number, data: Record<string, any> = {}) {
+  constructor(message: string, status: number, data: Record<string, any> = {}, authPromptCancelled = false) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.data = data;
+    this.code = typeof data?.code === 'string' ? data.code : undefined;
+    this.connectionId = typeof data?.connectionId === 'string' ? data.connectionId : undefined;
+    this.authPromptCancelled = authPromptCancelled;
   }
+}
+
+export function isAuthPromptCancelledError(err: unknown): boolean {
+  return Boolean(err && typeof err === 'object' && (err as any).authPromptCancelled === true);
+}
+
+export interface PendingConnectionAuthPrompt {
+  connectionId: string;
+  reason: DbAuthPromptReason;
+  errorMessage: string;
+}
+
+type AuthPromptListener = (prompt: PendingConnectionAuthPrompt | null) => void;
+
+interface PendingAuthGate {
+  prompt: PendingConnectionAuthPrompt;
+  promise: Promise<boolean>;
+  resolve: (unlocked: boolean) => void;
+}
+
+const pendingAuthGates = new Map<string, PendingAuthGate>();
+const authPromptQueue: string[] = [];
+const authPromptListeners = new Set<AuthPromptListener>();
+
+function getActiveAuthPrompt(): PendingConnectionAuthPrompt | null {
+  for (const connId of authPromptQueue) {
+    const gate = pendingAuthGates.get(connId);
+    if (gate) return gate.prompt;
+  }
+  return null;
+}
+
+function notifyAuthPromptListeners() {
+  const current = getActiveAuthPrompt();
+  authPromptListeners.forEach((fn) => {
+    try {
+      fn(current);
+    } catch {
+      // ignore listener errors
+    }
+  });
+}
+
+export function subscribeConnectionAuthPrompt(fn: AuthPromptListener): () => void {
+  authPromptListeners.add(fn);
+  fn(getActiveAuthPrompt());
+  return () => {
+    authPromptListeners.delete(fn);
+  };
+}
+
+export function requestConnectionAuthPrompt(
+  connectionId: string,
+  reason: DbAuthPromptReason,
+  errorMessage: string
+): Promise<boolean> {
+  const existing = pendingAuthGates.get(connectionId);
+  if (existing) {
+    if (reason === 'DB_AUTH_FAILED' && existing.prompt.reason !== 'DB_AUTH_FAILED') {
+      existing.prompt = { connectionId, reason, errorMessage };
+      notifyAuthPromptListeners();
+    }
+    return existing.promise;
+  }
+  let resolveFn!: (unlocked: boolean) => void;
+  const promise = new Promise<boolean>((resolve) => {
+    resolveFn = resolve;
+  });
+  const gate: PendingAuthGate = {
+    prompt: { connectionId, reason, errorMessage },
+    promise,
+    resolve: resolveFn,
+  };
+  pendingAuthGates.set(connectionId, gate);
+  if (!authPromptQueue.includes(connectionId)) {
+    authPromptQueue.push(connectionId);
+  }
+  notifyAuthPromptListeners();
+  return promise;
+}
+
+export function settleConnectionAuthPrompt(connectionId: string, unlocked: boolean) {
+  const gate = pendingAuthGates.get(connectionId);
+  pendingAuthGates.delete(connectionId);
+  const idx = authPromptQueue.indexOf(connectionId);
+  if (idx >= 0) {
+    authPromptQueue.splice(idx, 1);
+  }
+  if (gate) {
+    gate.resolve(unlocked);
+  }
+  notifyAuthPromptListeners();
+}
+
+export function clearAllConnectionAuthPrompts(): void {
+  const gates = Array.from(pendingAuthGates.values());
+  pendingAuthGates.clear();
+  authPromptQueue.length = 0;
+  gates.forEach((g) => g.resolve(false));
+  notifyAuthPromptListeners();
 }
 
 interface RequestOptions {
@@ -114,6 +224,8 @@ interface RequestOptions {
   body?: unknown;
   signal?: AbortSignal;
   skipAuthRedirect?: boolean;
+  skipDbAuthPrompt?: boolean;
+  _retriedDbAuth?: boolean;
 }
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
@@ -183,6 +295,22 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
       window.dispatchEvent(new Event('dbharbor:unauthorized'));
     }
     const msg = data?.error || `Request failed (HTTP ${res.status})`;
+    const errCode = typeof data?.code === 'string' ? data.code : '';
+    const errConnId = typeof data?.connectionId === 'string' ? data.connectionId : '';
+    if (
+      (errCode === 'DB_AUTH_REQUIRED' || errCode === 'DB_AUTH_FAILED') &&
+      errConnId &&
+      !opts._retriedDbAuth &&
+      !opts.skipDbAuthPrompt &&
+      path !== '/connections/test' &&
+      !path.endsWith('/unlock')
+    ) {
+      const unlocked = await requestConnectionAuthPrompt(errConnId, errCode, msg);
+      if (unlocked) {
+        return request<T>(path, { ...opts, _retriedDbAuth: true });
+      }
+      throw new ApiError(msg, res.status, data || {}, true);
+    }
     throw new ApiError(msg, res.status, data || {});
   }
 
@@ -464,6 +592,12 @@ export const api = {
     request<ServerInfo>('/connections/test', { method: 'POST', body: payload }),
   pingConnection: (id: string) =>
     request<ServerInfo>(`/connections/${id}/ping`, { method: 'POST' }),
+  unlockConnection: (id: string, payload: UnlockConnectionPayload) =>
+    request<UnlockConnectionResponse>(`/connections/${id}/unlock`, {
+      method: 'POST',
+      body: payload,
+      skipDbAuthPrompt: true,
+    }),
   disconnectConnection: (id: string) =>
     request<{ message: string }>(`/connections/${id}/disconnect`, { method: 'POST' }),
   createConnection: (payload: ConnectionFormPayload) =>
@@ -718,12 +852,13 @@ export const api = {
     }
   ): Promise<DesktopExportResult> => {
     if (isDesktopRuntime()) {
-      return request<DesktopExportResult>(`/conn/${connId}/export/desktop-save`, {
+      return request<DesktopExportResult>(`/conn/${encodeURIComponent(connId)}/export/desktop-save`, {
         method: 'POST',
         body: params,
       });
     }
 
+    await api.pingConnection(connId);
     const { ticket } = await request<{ ticket: string }>('/auth/ticket', { method: 'POST' });
     const qs = new URLSearchParams();
     qs.set('database', params.database || '');
@@ -738,7 +873,7 @@ export const api = {
     qs.set('ticket', ticket);
 
     const a = document.createElement('a');
-    a.href = `/api/conn/${connId}/export?${qs.toString()}`;
+    a.href = `/api/conn/${encodeURIComponent(connId)}/export?${qs.toString()}`;
     a.rel = 'noopener';
     document.body.appendChild(a);
     a.click();
@@ -930,11 +1065,12 @@ export const api = {
     }
   ): Promise<DesktopExportResult> => {
     if (isDesktopRuntime()) {
-      return request<DesktopExportResult>(`/conn/${connId}/doc/export/desktop-save`, {
+      return request<DesktopExportResult>(`/conn/${encodeURIComponent(connId)}/doc/export/desktop-save`, {
         method: 'POST',
         body: params,
       });
     }
+    await api.pingConnection(connId);
     const { ticket } = await request<{ ticket: string }>('/auth/ticket', { method: 'POST' });
     const qs = new URLSearchParams();
     qs.set('database', params.database);
@@ -946,7 +1082,7 @@ export const api = {
     qs.set('ticket', ticket);
 
     const a = document.createElement('a');
-    a.href = `/api/conn/${connId}/doc/export?${qs.toString()}`;
+    a.href = `/api/conn/${encodeURIComponent(connId)}/doc/export?${qs.toString()}`;
     a.rel = 'noopener';
     document.body.appendChild(a);
     a.click();

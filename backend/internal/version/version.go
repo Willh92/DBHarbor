@@ -16,7 +16,7 @@ import (
 
 // Build-time overridable metadata via -ldflags.
 var (
-	Version   = "1.0.2"
+	Version   = "1.0.3"
 	Edition   = "server"  // "server" or "desktop"
 	Channel   = "release" // "release" or "preview"
 	GitCommit = "HEAD"

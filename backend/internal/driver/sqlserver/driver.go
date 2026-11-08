@@ -190,6 +190,9 @@ func (d *Driver) ListSchemas(ctx context.Context, database string) ([]string, er
 	}
 	rows, err := d.db.QueryContext(ctx, fmt.Sprintf("SELECT name FROM %ssys.schemas WHERE principal_id = 1 OR name = 'dbo' ORDER BY CASE WHEN name='dbo' THEN 0 ELSE 1 END, name", prefix))
 	if err != nil {
+		if sqlbase.IsAuthError("sqlserver", err) {
+			return nil, err
+		}
 		return []string{"dbo"}, nil
 	}
 	defer rows.Close()
@@ -725,6 +728,8 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 		for _, item := range dbs {
 			meta.Databases = append(meta.Databases, item.Name)
 		}
+	} else if sqlbase.IsAuthError("sqlserver", err) {
+		return meta, err
 	}
 	prefix := ""
 	if strings.TrimSpace(database) != "" {
@@ -735,7 +740,11 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 		FROM %sINFORMATION_SCHEMA.COLUMNS
 		ORDER BY TABLE_NAME, ORDINAL_POSITION
 	`, prefix))
-	if err == nil {
+	if err != nil {
+		if sqlbase.IsAuthError("sqlserver", err) {
+			return meta, err
+		}
+	} else {
 		defer rows.Close()
 		for rows.Next() {
 			var tName, cName string
@@ -824,6 +833,8 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 	snap := driver.MonitorSnapshot{Timestamp: time.Now().Format(time.RFC3339), Metrics: []driver.MonitorMetric{}, Storage: []driver.StorageItem{}, Sessions: []driver.SessionItem{}, CanKillSession: true}
 	if info, err := d.Ping(ctx); err == nil {
 		snap.Version = info.Version
+	} else if sqlbase.IsAuthError("sqlserver", err) {
+		return snap, err
 	}
 	rows, err := d.db.QueryContext(ctx, `
 		SELECT s.session_id, COALESCE(s.login_name,''), COALESCE(s.host_name,''), COALESCE(DB_NAME(r.database_id),''),
@@ -833,7 +844,11 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 		OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) t
 		WHERE s.is_user_process = 1
 	`)
-	if err == nil {
+	if err != nil {
+		if sqlbase.IsAuthError("sqlserver", err) {
+			return snap, err
+		}
+	} else {
 		defer rows.Close()
 		for rows.Next() {
 			var sid, dur int64

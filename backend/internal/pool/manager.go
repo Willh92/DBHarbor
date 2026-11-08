@@ -2,6 +2,7 @@ package pool
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 )
 
 const (
-	defaultMaxPools = 32
+	defaultMaxPools = 128
 	defaultIdleTTL  = 15 * time.Minute
 )
 
@@ -93,19 +94,27 @@ func (m *Manager) SetConnectionPreparer(fn ConnectionPreparer) {
 // Acquire checks out a pooled driver with an active lease callback so LRU/idle eviction
 // never closes a driver mid-export or mid-query.
 func (m *Manager) Acquire(connID string) (driver.Driver, driver.ConnectionConfig, func(), error) {
-	for attempt := 0; attempt < 2; attempt++ {
+	return m.AcquireWithConfig(connID, func() (driver.ConnectionConfig, error) {
+		return m.store.GetDecryptedConnection(connID)
+	})
+}
+
+// AcquireWithConfig checks out a pooled driver keyed by poolKey (e.g. connID or connID+"::"+sessionScope)
+// using loader to resolve ConnectionConfig on cache miss.
+func (m *Manager) AcquireWithConfig(poolKey string, loader func() (driver.ConnectionConfig, error)) (driver.Driver, driver.ConnectionConfig, func(), error) {
+	for attempt := 0; attempt < 5; attempt++ {
 		m.mu.Lock()
-		if existing, ok := m.conns[connID]; ok && !existing.evicted {
+		if existing, ok := m.conns[poolKey]; ok && !existing.evicted {
 			existing.lastUsed = time.Now()
 			existing.inUse++
 			drv, cfg := existing.drv, existing.cfg
 			m.mu.Unlock()
 			return drv, cfg, m.makeReleaseFunc(existing), nil
 		}
-		if dial, ok := m.inflight[connID]; ok {
+		if dial, ok := m.inflight[poolKey]; ok {
 			m.mu.Unlock()
 			<-dial.done
-			if dial.cancelled && attempt == 0 {
+			if dial.cancelled && attempt+1 < 5 {
 				continue
 			}
 			if dial.err != nil {
@@ -114,11 +123,11 @@ func (m *Manager) Acquire(connID string) (driver.Driver, driver.ConnectionConfig
 			continue
 		}
 		dial := &inflightDial{done: make(chan struct{})}
-		m.inflight[connID] = dial
+		m.inflight[poolKey] = dial
 		prep := m.preparer
 		m.mu.Unlock()
 
-		cfg, err := m.store.GetDecryptedConnection(connID)
+		cfg, err := loader()
 		var drv driver.Driver
 		if err == nil {
 			if prep != nil {
@@ -131,8 +140,8 @@ func (m *Manager) Acquire(connID string) (driver.Driver, driver.ConnectionConfig
 		var leased *pooledDriver
 
 		m.mu.Lock()
-		if cur, ok := m.inflight[connID]; ok && cur == dial {
-			delete(m.inflight, connID)
+		if cur, ok := m.inflight[poolKey]; ok && cur == dial {
+			delete(m.inflight, poolKey)
 		}
 		if dial.cancelled {
 			if err == nil {
@@ -144,7 +153,7 @@ func (m *Manager) Acquire(connID string) (driver.Driver, driver.ConnectionConfig
 				_ = drv.Close()
 			}
 			close(dial.done)
-			if attempt == 0 {
+			if attempt+1 < 5 {
 				continue
 			}
 			return nil, driver.ConnectionConfig{}, func() {}, err
@@ -178,7 +187,7 @@ func (m *Manager) Acquire(connID string) (driver.Driver, driver.ConnectionConfig
 				inUse:    1,
 				closedCh: make(chan struct{}),
 			}
-			m.conns[connID] = leased
+			m.conns[poolKey] = leased
 		}
 		dial.drv, dial.cfg, dial.err = drv, cfg, err
 		close(dial.done)
@@ -255,76 +264,150 @@ func (m *Manager) Evict(connID string) {
 	}
 }
 
-// EvictAndWait removes connID from the pool and, if an active lease or in-flight dial
-// is currently holding the driver, waits up to maxWait for its Close() call to complete
-// so single-file OS locks (SQLite WAL/SHM, DuckDB) are released before disk deletion or overwrite.
+// EvictConnectionAll evicts both the shared connection pool (connID) and all session-scoped pools (connID+"::*").
+func (m *Manager) EvictConnectionAll(connID string) {
+	prefix := connID + "::"
+	var closeNow []*pooledDriver
+	m.mu.Lock()
+	for k, dial := range m.inflight {
+		if k == connID || strings.HasPrefix(k, prefix) {
+			dial.cancelled = true
+			delete(m.inflight, k)
+		}
+	}
+	for k, item := range m.conns {
+		if k == connID || strings.HasPrefix(k, prefix) {
+			delete(m.conns, k)
+			item.evicted = true
+			if item.inUse <= 0 {
+				closeNow = append(closeNow, item)
+			}
+		}
+	}
+	m.mu.Unlock()
+	for _, it := range closeNow {
+		it.closeDriver()
+	}
+}
+
+// EvictBySessionScope evicts all session-scoped connection pools belonging to sessionScope (keys ending in "::"+sessionScope).
+func (m *Manager) EvictBySessionScope(sessionScope string) {
+	if sessionScope == "" {
+		return
+	}
+	suffix := "::" + sessionScope
+	var closeNow []*pooledDriver
+	m.mu.Lock()
+	for k, dial := range m.inflight {
+		if strings.HasSuffix(k, suffix) {
+			dial.cancelled = true
+			delete(m.inflight, k)
+		}
+	}
+	for k, item := range m.conns {
+		if strings.HasSuffix(k, suffix) {
+			delete(m.conns, k)
+			item.evicted = true
+			if item.inUse <= 0 {
+				closeNow = append(closeNow, item)
+			}
+		}
+	}
+	m.mu.Unlock()
+	for _, it := range closeNow {
+		it.closeDriver()
+	}
+}
+
+// EvictAndWait removes connID (and any session-scoped pools for connID) from the pool and,
+// if an active lease or in-flight dial is currently holding the driver, waits up to maxWait
+// for its Close() call to complete so single-file OS locks (SQLite WAL/SHM, DuckDB) are released.
 func (m *Manager) EvictAndWait(connID string, maxWait time.Duration) {
-	var closeNow *pooledDriver
-	var waitItem *pooledDriver
-	var waitDial *inflightDial
+	prefix := connID + "::"
+	matchKey := func(k string) bool {
+		if strings.Contains(connID, "::") {
+			return k == connID
+		}
+		return k == connID || strings.HasPrefix(k, prefix)
+	}
+
+	var closeNow []*pooledDriver
+	var waitItems []*pooledDriver
+	var waitDials []*inflightDial
 
 	m.mu.Lock()
-	if dial, ok := m.inflight[connID]; ok {
-		dial.cancelled = true
-		delete(m.inflight, connID)
-		waitDial = dial
+	for k, dial := range m.inflight {
+		if matchKey(k) {
+			dial.cancelled = true
+			delete(m.inflight, k)
+			waitDials = append(waitDials, dial)
+		}
 	}
-	if item, ok := m.conns[connID]; ok {
-		delete(m.conns, connID)
-		item.evicted = true
-		if item.inUse <= 0 {
-			closeNow = item
-		} else {
-			waitItem = item
+	for k, item := range m.conns {
+		if matchKey(k) {
+			delete(m.conns, k)
+			item.evicted = true
+			if item.inUse <= 0 {
+				closeNow = append(closeNow, item)
+			} else {
+				waitItems = append(waitItems, item)
+			}
 		}
 	}
 	m.mu.Unlock()
 
-	if closeNow != nil {
-		closeNow.closeDriver()
+	for _, it := range closeNow {
+		it.closeDriver()
 	}
 	if maxWait <= 0 {
 		return
 	}
 	deadline := time.Now().Add(maxWait)
-	if waitDial != nil && waitDial.done != nil {
-		if rem := time.Until(deadline); rem > 0 {
-			timer := time.NewTimer(rem)
-			select {
-			case <-waitDial.done:
-			case <-timer.C:
+	for _, waitDial := range waitDials {
+		if waitDial != nil && waitDial.done != nil {
+			if rem := time.Until(deadline); rem > 0 {
+				timer := time.NewTimer(rem)
+				select {
+				case <-waitDial.done:
+				case <-timer.C:
+				}
+				timer.Stop()
 			}
-			timer.Stop()
 		}
 	}
-	if waitItem != nil && waitItem.closedCh != nil {
-		if rem := time.Until(deadline); rem > 0 {
-			timer := time.NewTimer(rem)
-			select {
-			case <-waitItem.closedCh:
-			case <-timer.C:
+	for _, waitItem := range waitItems {
+		if waitItem != nil && waitItem.closedCh != nil {
+			if rem := time.Until(deadline); rem > 0 {
+				timer := time.NewTimer(rem)
+				select {
+				case <-waitItem.closedCh:
+				case <-timer.C:
+				}
+				timer.Stop()
 			}
-			timer.Stop()
 		}
 	}
 }
 
-// IsConnectionActiveWithin reports whether the connection currently has an active lease
-// or has been used in the connection pool within the given duration window.
+// IsConnectionActiveWithin reports whether the connection (or any of its session-scoped pools)
+// currently has an active lease or has been used in the connection pool within the given duration window.
 func (m *Manager) IsConnectionActiveWithin(connID string, window time.Duration) bool {
+	prefix := connID + "::"
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, dialing := m.inflight[connID]; dialing {
-		return true
+	for k := range m.inflight {
+		if k == connID || strings.HasPrefix(k, prefix) {
+			return true
+		}
 	}
-	item, ok := m.conns[connID]
-	if !ok {
-		return false
+	for k, item := range m.conns {
+		if k == connID || strings.HasPrefix(k, prefix) {
+			if item.inUse > 0 || time.Since(item.lastUsed) < window {
+				return true
+			}
+		}
 	}
-	if item.inUse > 0 {
-		return true
-	}
-	return time.Since(item.lastUsed) < window
+	return false
 }
 
 func (m *Manager) ReleaseIdle() int {

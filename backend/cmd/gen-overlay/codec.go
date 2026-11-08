@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"regexp"
 	"sort"
@@ -244,11 +245,11 @@ func packConverterSpecs(specs []*converterSpec) ([]byte, error) {
 
 	var raw bytes.Buffer
 	var hdr [20]byte
-	binary.LittleEndian.PutUint32(hdr[0:4], uint32(len(specs)))
-	binary.LittleEndian.PutUint32(hdr[4:8], uint32(len(colMeta)))
-	binary.LittleEndian.PutUint32(hdr[8:12], uint32(len(colSlices)))
-	binary.LittleEndian.PutUint32(hdr[12:16], uint32(len(colKeys)))
-	binary.LittleEndian.PutUint32(hdr[16:20], uint32(len(colVals)))
+	binary.LittleEndian.PutUint32(hdr[0:4], mustUint32(len(specs)))
+	binary.LittleEndian.PutUint32(hdr[4:8], mustUint32(len(colMeta)))
+	binary.LittleEndian.PutUint32(hdr[8:12], mustUint32(len(colSlices)))
+	binary.LittleEndian.PutUint32(hdr[12:16], mustUint32(len(colKeys)))
+	binary.LittleEndian.PutUint32(hdr[16:20], mustUint32(len(colVals)))
 	raw.Write(hdr[:])
 	raw.Write(colMeta)
 	raw.Write(colSlices)
@@ -267,6 +268,13 @@ func packConverterSpecs(specs []*converterSpec) ([]byte, error) {
 		return nil, err
 	}
 	return gzBuf.Bytes(), nil
+}
+
+func mustUint32(n int) uint32 {
+	if n < 0 || int64(n) > math.MaxUint32 {
+		panic("integer out of uint32 range")
+	}
+	return uint32(n)
 }
 
 func readSvarint(b []byte, off *int) int {

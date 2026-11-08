@@ -132,6 +132,11 @@ func main() {
 		Handler:           router,
 		ReadHeaderTimeout: 15 * time.Second,
 	}
+	defer func() {
+		router.ClearAllSessionCreds()
+		pm.CloseAll()
+		_ = st.Close()
+	}()
 
 	go func() {
 		_ = srv.Serve(ln)

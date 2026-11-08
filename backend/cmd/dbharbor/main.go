@@ -105,6 +105,7 @@ func main() {
 		AllowPrivateNetForNonAdmin: cfg.Security.AllowPrivateNetworkForNonAdmin,
 		DuckDBCliPath:              cfg.Security.DuckDBCliPath,
 	})
+	defer router.ClearAllSessionCreds()
 
 	ln, cleanupListener, endpointDisplay, err := config.PrepareListener(cfg)
 	if err != nil {
@@ -143,6 +144,7 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
+	router.ClearAllSessionCreds()
 }
 
 func openBrowserCrossPlatform(url string) {
