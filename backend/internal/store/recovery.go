@@ -23,14 +23,14 @@ type AdminRecoveryRequest struct {
 }
 
 type AdminRecoveryResult struct {
-	UserID            string
-	Username          string
-	CreatedNew        bool
-	PasswordReset     bool
-	GeneratedPassword string
-	Reset2FA          bool
-	RevokedSessions   int
-	BackupPath        string
+	UserID              string
+	Username            string
+	CreatedNew          bool
+	PasswordReset       bool
+	IssuedBootstrapCode string
+	Reset2FA            bool
+	RevokedSessions     int
+	BackupPath          string
 }
 
 const recoveryAutoPasswordAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*"
@@ -94,7 +94,7 @@ func (s *Store) ExecuteAdminRecovery(req AdminRecoveryRequest) (AdminRecoveryRes
 			return res, fmt.Errorf("failed to generate recovery password: %w", err)
 		}
 		effectivePass = gen
-		res.GeneratedPassword = gen
+		res.IssuedBootstrapCode = gen
 	} else if effectivePass != "" && len(effectivePass) < 8 {
 		return res, errors.New("emergency recovery password must be at least 8 characters")
 	}

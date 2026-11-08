@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"golang.org/x/crypto/pbkdf2"
 )
 
 // Vault provides AES-256-GCM authenticated encryption for database credentials.
@@ -22,16 +24,15 @@ type Vault struct {
 }
 
 // NewVaultFromDataDir loads or generates a 32-byte master key in dataDir/.master.key,
-// or derives one if explicitSecret is provided.
-func NewVaultFromDataDir(dataDir, explicitSecret string) (*Vault, error) {
+// or derives one via PBKDF2-HMAC-SHA256 if non-hex rawKeyMaterial is provided.
+func NewVaultFromDataDir(dataDir, rawKeyMaterial string) (*Vault, error) {
 	var key []byte
-	if strings.TrimSpace(explicitSecret) != "" {
-		decoded, err := hex.DecodeString(strings.TrimSpace(explicitSecret))
+	if trimmed := strings.TrimSpace(rawKeyMaterial); trimmed != "" {
+		decoded, err := hex.DecodeString(trimmed)
 		if err == nil && len(decoded) == 32 {
 			key = decoded
 		} else {
-			sum := sha256.Sum256([]byte(explicitSecret))
-			key = sum[:]
+			key = pbkdf2.Key([]byte(trimmed), []byte("dbharbor-vault-master-kdf-v1"), 100_000, 32, sha256.New)
 		}
 		return NewVault(key)
 	}

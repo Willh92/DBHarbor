@@ -102,7 +102,7 @@ function formatResultForClipboard(
   if (mode === 'md') {
     const header = `| ${cols.join(' | ')} |`;
     const sep = `| ${cols.map(() => '---').join(' | ')} |`;
-    const body = r.rows.map((row) => `| ${row.map((v) => (v === null ? 'NULL' : String(v).replace(/\|/g, '\\|'))).join(' | ')} |`);
+    const body = r.rows.map((row) => `| ${row.map((v) => (v === null ? 'NULL' : String(v).replace(/\\/g, '\\\\').replace(/\|/g, '\\|'))).join(' | ')} |`);
     return [header, sep, ...body].join('\n');
   }
   if (mode === 'sql') {

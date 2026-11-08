@@ -955,7 +955,7 @@ func (s *Store) ListAuditLogsFiltered(filter AuditLogFilter) ([]AuditLogEntry, e
 		return nil, err
 	}
 	defer rows.Close()
-	list := make([]AuditLogEntry, 0, limit)
+	list := make([]AuditLogEntry, 0, 64)
 	for rows.Next() {
 		var e AuditLogEntry
 		if err := rows.Scan(&e.ID, &e.Event, &e.Username, &e.IP, &e.UserAgent, &e.Detail, &e.CreatedAt); err == nil {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"sort"
 	"strconv"
@@ -146,9 +147,18 @@ func (d *Driver) ListDatabases(ctx context.Context) ([]driver.DatabaseSummary, e
 	}
 	out := make([]driver.DatabaseSummary, 16)
 	for i := 0; i < 16; i++ {
+		cnt := dbMap[i]
+		tblCount := 0
+		if cnt > 0 {
+			if cnt > math.MaxInt32 {
+				tblCount = math.MaxInt32
+			} else {
+				tblCount = int(cnt)
+			}
+		}
 		out[i] = driver.DatabaseSummary{
 			Name:        fmt.Sprintf("db%d", i),
-			TablesCount: int(dbMap[i]),
+			TablesCount: tblCount,
 		}
 	}
 	return out, nil
@@ -187,8 +197,10 @@ func (d *Driver) keyspaceCounts(ctx context.Context) (map[int]int64, error) {
 		}
 		for _, kv := range strings.Split(parts[1], ",") {
 			if strings.HasPrefix(kv, "keys=") {
-				cnt, _ := strconv.ParseInt(strings.TrimPrefix(kv, "keys="), 10, 64)
-				res[idx] = cnt
+				cnt, parseErr := strconv.ParseInt(strings.TrimPrefix(kv, "keys="), 10, 64)
+				if parseErr == nil && cnt >= 0 {
+					res[idx] = cnt
+				}
 			}
 		}
 	}

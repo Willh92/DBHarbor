@@ -399,12 +399,18 @@ func StreamMultiTableExport(ctx context.Context, db *sql.DB, d Dialect, req driv
 		return bw.Flush()
 
 	case "json":
-		_, _ = bw.WriteString("{\n  \"database\": " + mustJSONString(req.Database) + ",\n  \"tables\": {\n")
+		dbJSON, _ := json.Marshal(req.Database)
+		_, _ = bw.WriteString("{\n  \"database\": ")
+		_, _ = bw.Write(dbJSON)
+		_, _ = bw.WriteString(",\n  \"tables\": {\n")
 		for idx, item := range items {
 			if idx > 0 {
 				_, _ = bw.WriteString(",\n")
 			}
-			_, _ = bw.WriteString("    " + mustJSONString(item.Table) + ": ")
+			tblJSON, _ := json.Marshal(item.Table)
+			_, _ = bw.WriteString("    ")
+			_, _ = bw.Write(tblJSON)
+			_, _ = bw.WriteString(": ")
 			subReq := req
 			subReq.Table = item.Table
 			subReq.Format = "json"
@@ -1226,13 +1232,9 @@ func normalizeJSONNumber(v any) any {
 func escapeMarkdownCell(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", " ")
 	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, "|", `\|`)
 	return s
-}
-
-func mustJSONString(s string) string {
-	b, _ := json.Marshal(s)
-	return string(b)
 }
 
 func truncateStr(s string, n int) string {

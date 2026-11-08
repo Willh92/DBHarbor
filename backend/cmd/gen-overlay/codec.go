@@ -40,8 +40,8 @@ func extractAllLangIDs(src string) ([]int, error) {
 			if tok == "" {
 				continue
 			}
-			v, err := strconv.ParseInt(tok, 0, 64)
-			if err != nil {
+			v, err := strconv.ParseInt(tok, 0, 32)
+			if err != nil || v < 0 || v > math.MaxInt32 {
 				return nil, fmt.Errorf("parse case %q: %w", tok, err)
 			}
 			id := int(v)

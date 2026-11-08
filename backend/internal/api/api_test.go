@@ -716,7 +716,7 @@ func TestV101ConfigPrecedenceAndAdminRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExecuteAdminRecovery failed: %v", err)
 	}
-	if !recRes.PasswordReset || len(recRes.GeneratedPassword) < 16 || !recRes.Reset2FA || recRes.RevokedSessions < 1 || recRes.BackupPath == "" {
+	if !recRes.PasswordReset || len(recRes.IssuedBootstrapCode) < 16 || !recRes.Reset2FA || recRes.RevokedSessions < 1 || recRes.BackupPath == "" {
 		t.Fatalf("unexpected recovery result: %+v", recRes)
 	}
 	if _, err := os.Stat(recRes.BackupPath); err != nil {
@@ -725,7 +725,7 @@ func TestV101ConfigPrecedenceAndAdminRecovery(t *testing.T) {
 	if st.IsSessionActive(sess.ID) {
 		t.Fatal("expected pre-recovery session to be revoked")
 	}
-	recoveredUser, err := st.Authenticate("admin", recRes.GeneratedPassword)
+	recoveredUser, err := st.Authenticate("admin", recRes.IssuedBootstrapCode)
 	if err != nil {
 		t.Fatalf("authenticate with generated recovery password failed: %v", err)
 	}

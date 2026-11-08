@@ -30,6 +30,7 @@ func (s *Server) handleDesktopBoot(c *Context) {
 	}
 
 	const cookieMaxAge = 30 * 24 * 3600
+	isSecure := c.Request.TLS != nil || strings.EqualFold(c.Request.Header.Get("X-Forwarded-Proto"), "https")
 	if portCookie := s.desktop.portScopedCookieName(); portCookie != desktopSessionCookieName {
 		http.SetCookie(c.Writer, &http.Cookie{
 			Name:     portCookie,
@@ -37,6 +38,7 @@ func (s *Server) handleDesktopBoot(c *Context) {
 			Path:     "/",
 			MaxAge:   cookieMaxAge,
 			HttpOnly: true,
+			Secure:   isSecure,
 			SameSite: http.SameSiteStrictMode,
 		})
 	}
@@ -46,6 +48,7 @@ func (s *Server) handleDesktopBoot(c *Context) {
 		Path:     "/",
 		MaxAge:   cookieMaxAge,
 		HttpOnly: true,
+		Secure:   isSecure,
 		SameSite: http.SameSiteStrictMode,
 	})
 	http.Redirect(c.Writer, c.Request, "/", http.StatusFound)
@@ -857,6 +860,10 @@ func (s *Server) handleBrowseLocalFS(c *Context) {
 		c.JSON(http.StatusForbidden, H{"error": "Access denied: browsing internal protected directories is prohibited"})
 		return
 	}
+	if strings.Contains(targetDir, "..") {
+		c.JSON(http.StatusBadRequest, H{"error": "Invalid directory path"})
+		return
+	}
 	if st, err := os.Stat(targetDir); err != nil {
 		targetDir = defaultDir
 	} else if !st.IsDir() {
@@ -870,6 +877,10 @@ func (s *Server) handleBrowseLocalFS(c *Context) {
 		if s.isProtectedInternalPath(targetDir) {
 			targetDir = defaultDir
 		}
+	}
+	if strings.Contains(targetDir, "..") {
+		c.JSON(http.StatusBadRequest, H{"error": "Invalid directory path"})
+		return
 	}
 
 	dirEntries, err := os.ReadDir(targetDir)

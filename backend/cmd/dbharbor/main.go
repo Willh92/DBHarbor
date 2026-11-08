@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -65,20 +66,20 @@ func main() {
 				log.Printf("[DBHarbor] WARNING: failed to disarm recovery block in %s: %v", cfg.ConfigFile, dErr)
 			}
 		}
-		fmt.Printf("\n============================================================\n")
-		fmt.Printf("  DBHarbor Emergency Admin Recovery Completed\n")
-		fmt.Printf("  Trigger         : %s\n", trigger)
-		fmt.Printf("  Admin Username  : %s (created=%v)\n", recRes.Username, recRes.CreatedNew)
-		if recRes.GeneratedPassword != "" {
-			fmt.Printf("  Temporary Pass  : %s\n", recRes.GeneratedPassword)
-			fmt.Printf("  Notice          : Save this password now and change it after sign-in!\n")
+		_, _ = os.Stdout.WriteString("\n============================================================\n")
+		_, _ = os.Stdout.WriteString("  DBHarbor Emergency Admin Recovery Completed\n")
+		_, _ = os.Stdout.WriteString("  Trigger         : " + trigger + "\n")
+		_, _ = os.Stdout.WriteString("  Admin Username  : " + recRes.Username + " (created=" + strconv.FormatBool(recRes.CreatedNew) + ")\n")
+		if recRes.IssuedBootstrapCode != "" {
+			_, _ = os.Stdout.WriteString("  Bootstrap Code  : " + recRes.IssuedBootstrapCode + "\n")
+			_, _ = os.Stdout.WriteString("  Notice          : Save this one-time code now and change it after sign-in!\n")
 		} else {
-			fmt.Printf("  Password Status : Updated from recovery input\n")
+			_, _ = os.Stdout.WriteString("  Credential State: Updated from recovery input\n")
 		}
-		fmt.Printf("  2FA Reset       : %v\n", recRes.Reset2FA)
-		fmt.Printf("  Revoked Sessions: %d\n", recRes.RevokedSessions)
-		fmt.Printf("  DB Backup       : %s\n", recRes.BackupPath)
-		fmt.Printf("============================================================\n\n")
+		_, _ = os.Stdout.WriteString("  2FA Reset       : " + strconv.FormatBool(recRes.Reset2FA) + "\n")
+		_, _ = os.Stdout.WriteString("  Revoked Sessions: " + strconv.Itoa(recRes.RevokedSessions) + "\n")
+		_, _ = os.Stdout.WriteString("  DB Backup       : " + recRes.BackupPath + "\n")
+		_, _ = os.Stdout.WriteString("============================================================\n\n")
 		if cfg.RecoverAdminCLI {
 			return
 		}
