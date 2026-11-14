@@ -3,7 +3,7 @@
 **语言切换**: [English](./README.md) | **简体中文** | [繁體中文](./README.zh-TW.md) | [日本語](./README.ja.md)
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.3-1677ff.svg)](./CHANGELOG.zh-CN.md)
+[![Version](https://img.shields.io/badge/Version-v1.0.4-1677ff.svg)](./CHANGELOG.zh-CN.md)
 [![CGO_ENABLED=0](https://img.shields.io/badge/Go-CGO__ENABLED%3D0-00ADD8.svg)](https://github.com/Willh92/DBHarbor.git)
 
 一款融合 **phpMyAdmin 经典高效可视化操作体验** 与 **现代多引擎 IDE 能力** 的零外部依赖单文件跨平台 Web 数据库管理平台。

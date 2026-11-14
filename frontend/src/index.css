@@ -38,15 +38,29 @@ body,
   touch-action: manipulation;
 }
 
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme]),
+  html:not([data-theme]) body,
+  html:not([data-theme]) #root {
+    background-color: #0d1017;
+    color-scheme: dark;
+  }
+}
+
 html[data-theme='dark'] {
   color-scheme: dark;
   background: #0d1017;
   --dbharbor-autofill-bg: #141414;
   --dbharbor-autofill-fg: rgba(255, 255, 255, 0.85);
-  --dbharbor-autofill-disabled-bg: #262626;
+  --dbharbor-autofill-disabled-bg: #242424;
   --dbharbor-autofill-disabled-fg: rgba(255, 255, 255, 0.25);
-  --dbharbor-autofill-focus-ring: rgba(22, 119, 255, 0.2);
+  --dbharbor-autofill-focus-ring: rgba(23, 117, 249, 0.31);
   --dbharbor-autofill-error-ring: rgba(255, 38, 5, 0.12);
+}
+
+html[data-theme='dark'] :is(.ant-modal-content, .ant-drawer-content, .ant-popover-inner) {
+  --dbharbor-autofill-bg: #1f1f1f;
+  --dbharbor-autofill-disabled-bg: #2f2f2f;
 }
 
 :root,
@@ -89,7 +103,7 @@ select:-webkit-autofill:active {
 .ant-input-affix-wrapper input.ant-input:-webkit-autofill:hover,
 .ant-input-affix-wrapper input.ant-input:-webkit-autofill:focus,
 .ant-input-affix-wrapper input.ant-input:-webkit-autofill:active {
-  border-radius: 4px;
+  border-radius: inherit;
   -webkit-box-shadow: 0 0 0 1000px var(--dbharbor-autofill-bg) inset !important;
   box-shadow: 0 0 0 1000px var(--dbharbor-autofill-bg) inset !important;
 }
@@ -134,6 +148,16 @@ select:autofill {
   color: var(--dbharbor-autofill-fg) !important;
   caret-color: var(--dbharbor-autofill-fg) !important;
   filter: none !important;
+}
+
+input.ant-select-selection-search-input:-webkit-autofill,
+input.ant-select-selection-search-input:-webkit-autofill:hover,
+input.ant-select-selection-search-input:-webkit-autofill:focus,
+input.ant-select-selection-search-input:-webkit-autofill:active,
+input.ant-select-selection-search-input:autofill {
+  -webkit-box-shadow: none !important;
+  box-shadow: none !important;
+  background-color: transparent !important;
 }
 
 /* Hide duplicate native password-reveal eye & clear buttons on Windows Edge / WebView2 and search inputs */
@@ -224,6 +248,7 @@ input[type='search']::-webkit-search-results-decoration {
 
 .ant-modal-content {
   max-height: calc(100vh - 24px);
+  max-height: calc(100dvh - 24px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -322,8 +347,8 @@ input[type='search']::-webkit-search-results-decoration {
   }
 
   .workbench-bottom-footer {
-    height: 22px !important;
-    padding: 0 10px !important;
+    height: calc(22px + env(safe-area-inset-bottom, 0px)) !important;
+    padding-inline: 10px !important;
   }
 
   .workbench-main-tabs > .ant-tabs-nav {
@@ -827,7 +852,27 @@ html[data-theme='light'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr > td.
 
 html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr > td.ant-table-cell-fix-left,
 html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr > td.ant-table-cell-fix-right {
-  background: #14161c !important;
+  background: #141414 !important;
+}
+
+html[data-theme='dark'] :is(.ant-modal-content, .ant-drawer-content) .dbharbor-touch-sticky-grid .ant-table-tbody > tr > td.ant-table-cell-fix-left,
+html[data-theme='dark'] :is(.ant-modal-content, .ant-drawer-content) .dbharbor-touch-sticky-grid .ant-table-tbody > tr > td.ant-table-cell-fix-right {
+  background: #1f1f1f !important;
+}
+
+html[data-theme='light'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr:not(.ant-table-row-selected):not(.dbharbor-staged-new-row):not(.dbharbor-filler-row):hover > td.ant-table-cell-fix-left,
+html[data-theme='light'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr:not(.ant-table-row-selected):not(.dbharbor-staged-new-row):not(.dbharbor-filler-row):hover > td.ant-table-cell-fix-right {
+  background: #fafafa !important;
+}
+
+html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr:not(.ant-table-row-selected):not(.dbharbor-staged-new-row):not(.dbharbor-filler-row):hover > td.ant-table-cell-fix-left,
+html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr:not(.ant-table-row-selected):not(.dbharbor-staged-new-row):not(.dbharbor-filler-row):hover > td.ant-table-cell-fix-right {
+  background: #1d1d1d !important;
+}
+
+html[data-theme='dark'] :is(.ant-modal-content, .ant-drawer-content) .dbharbor-touch-sticky-grid .ant-table-tbody > tr:not(.ant-table-row-selected):not(.dbharbor-staged-new-row):not(.dbharbor-filler-row):hover > td.ant-table-cell-fix-left,
+html[data-theme='dark'] :is(.ant-modal-content, .ant-drawer-content) .dbharbor-touch-sticky-grid .ant-table-tbody > tr:not(.ant-table-row-selected):not(.dbharbor-staged-new-row):not(.dbharbor-filler-row):hover > td.ant-table-cell-fix-right {
+  background: #262626 !important;
 }
 
 html[data-theme='light'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.ant-table-row-selected > td.ant-table-cell-fix-left,
@@ -853,6 +898,18 @@ html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.dbharb
   background: #11241b !important;
 }
 
+html[data-theme='light'] .ant-table-tbody > tr.dbharbor-staged-new-row.ant-table-row-selected > td.ant-table-cell,
+html[data-theme='light'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.dbharbor-staged-new-row.ant-table-row-selected > td.ant-table-cell-fix-left,
+html[data-theme='light'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.dbharbor-staged-new-row.ant-table-row-selected > td.ant-table-cell-fix-right {
+  background: #dcfce7 !important;
+}
+
+html[data-theme='dark'] .ant-table-tbody > tr.dbharbor-staged-new-row.ant-table-row-selected > td.ant-table-cell,
+html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.dbharbor-staged-new-row.ant-table-row-selected > td.ant-table-cell-fix-left,
+html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.dbharbor-staged-new-row.ant-table-row-selected > td.ant-table-cell-fix-right {
+  background: #133829 !important;
+}
+
 .dbharbor-filler-row > td.ant-table-cell {
   height: 31px;
   padding-top: 2px !important;
@@ -864,8 +921,16 @@ html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.dbharb
   cursor: cell;
 }
 
-.dbharbor-filler-row-writable:hover > td.ant-table-cell {
+.dbharbor-filler-row-writable:hover > td.ant-table-cell:not(.ant-table-cell-fix-left):not(.ant-table-cell-fix-right) {
   background: rgba(22, 119, 255, 0.045) !important;
+}
+
+html[data-theme='light'] .dbharbor-filler-row-writable:hover > td.ant-table-cell:is(.ant-table-cell-fix-left, .ant-table-cell-fix-right) {
+  background: #f4f9ff !important;
+}
+
+html[data-theme='dark'] .dbharbor-filler-row-writable:hover > td.ant-table-cell:is(.ant-table-cell-fix-left, .ant-table-cell-fix-right) {
+  background: #151b26 !important;
 }
 
 .dbharbor-filler-row .ant-table-selection-column .ant-checkbox-wrapper {
@@ -1020,9 +1085,12 @@ html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.dbharb
   }
 
   .ant-drawer-header,
-  .ant-drawer-body,
-  .ant-drawer-footer {
+  .ant-drawer-body {
     padding: 12px 14px !important;
+  }
+
+  .ant-drawer-footer {
+    padding: 12px 14px calc(12px + env(safe-area-inset-bottom, 0px)) 14px !important;
   }
 
   .ant-drawer-bottom > .ant-drawer-content-wrapper {
@@ -1067,8 +1135,8 @@ html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.dbharb
 
 /* Prevent iOS/iPadOS Safari automatic viewport zoom when focusing or autofilling inputs with < 16px font-size */
 @supports (-webkit-touch-callout: none) {
-  input,
-  textarea,
+  input:not(.ime-input),
+  textarea:not(.ime-input),
   select,
   [contenteditable='true'],
   [contenteditable=''],
@@ -1080,12 +1148,22 @@ html[data-theme='dark'] .dbharbor-touch-sticky-grid .ant-table-tbody > tr.dbharb
   .ant-picker-input > input,
   .ant-mentions > textarea,
   .ant-pagination-options-quick-jumper input,
-  .monaco-editor .inputarea,
-  .monaco-editor .ime-input,
-  .monaco-editor textarea,
-  .monaco-editor input {
+  .monaco-editor .inputarea:not(.ime-input),
+  .monaco-editor textarea:not(.ime-input),
+  .monaco-editor input:not(.ime-input) {
     font-size: 16px !important;
     font-size: max(16px, 1em) !important;
+  }
+
+  .monaco-editor .inputarea:not(.ime-input) {
+    line-height: 1 !important;
+  }
+
+  .dbharbor-full-height-grid .ant-table-tbody > tr > td input.ant-input-sm,
+  .ant-pagination-options-quick-jumper input {
+    line-height: 20px !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
   }
 
   input:-webkit-autofill,

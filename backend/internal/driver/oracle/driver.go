@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"net"
+	"regexp"
 	"strings"
 	"time"
 
@@ -13,6 +15,16 @@ import (
 
 	go_ora "github.com/sijms/go-ora/v2"
 )
+
+var reOracleSessionID = regexp.MustCompile(`^\d+,\d+(,@\d+)?$`)
+
+type restrictedOraDialer struct {
+	fn func(ctx context.Context, network, address string) (net.Conn, error)
+}
+
+func (r restrictedOraDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return r.fn(ctx, network, address)
+}
 
 func init() {
 	fields := []driver.ConnFieldSchema{
@@ -84,9 +96,18 @@ func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
 		svc = ""
 	}
 	connStr := go_ora.BuildUrl(strings.Trim(connectHost, "[]"), port, svc, cfg.Username, cfg.Password, urlOpts)
-	db, err := sql.Open("oracle", connStr)
-	if err != nil {
-		return nil, err
+	var db *sql.DB
+	if restrictIP {
+		connector := go_ora.NewConnector(connStr)
+		if oraConn, ok := connector.(*go_ora.OracleConnector); ok {
+			oraConn.Dialer(restrictedOraDialer{fn: sqlbase.NewRestrictedDialContext(8 * time.Second)})
+		}
+		db = sql.OpenDB(connector)
+	} else {
+		db, err = sql.Open("oracle", connStr)
+		if err != nil {
+			return nil, err
+		}
 	}
 	db.SetMaxOpenConns(8)
 	db.SetMaxIdleConns(2)
@@ -653,6 +674,10 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 }
 
 func (d *Driver) KillSession(ctx context.Context, sessionID string) error {
-	_, err := d.db.ExecContext(ctx, fmt.Sprintf("ALTER SYSTEM KILL SESSION %s IMMEDIATE", sqlbase.FormatLiteral(sessionID)))
+	sid := strings.TrimSpace(sessionID)
+	if !reOracleSessionID.MatchString(sid) {
+		return fmt.Errorf("invalid Oracle session ID format %q (expected sid,serial# or sid,serial#,@inst_id)", sessionID)
+	}
+	_, err := d.db.ExecContext(ctx, "ALTER SYSTEM KILL SESSION '"+sid+"' IMMEDIATE")
 	return err
 }

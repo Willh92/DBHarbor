@@ -857,8 +857,8 @@ func (s *Store) CanEditConnection(p UserPrincipal, connID string) bool {
 	if connID == "" {
 		return false
 	}
-	var ownerID, optJSON string
-	if err := s.db.QueryRow(`SELECT owner_id, options_json FROM connections WHERE id = ?`, connID).Scan(&ownerID, &optJSON); err != nil {
+	var ownerID, vis, optJSON string
+	if err := s.db.QueryRow(`SELECT owner_id, visibility, options_json FROM connections WHERE id = ?`, connID).Scan(&ownerID, &vis, &optJSON); err != nil {
 		return false
 	}
 	if p.ID == "local" {
@@ -873,7 +873,7 @@ func (s *Store) CanEditConnection(p UserPrincipal, connID string) bool {
 	if p.Role == RoleAdmin {
 		return true
 	}
-	if p.Role == RoleReadOnly {
+	if p.Role == RoleReadOnly || vis == "shared" {
 		return false
 	}
 	return ownerID != "" && ownerID == p.ID
@@ -923,6 +923,7 @@ type ExportedConnectionProfile struct {
 	Username   string            `json:"username,omitempty"`
 	Database   string            `json:"database,omitempty"`
 	FilePath   string            `json:"filePath,omitempty"`
+	URI        string            `json:"uri,omitempty"`
 	Options    map[string]string `json:"options,omitempty"`
 	Visibility string            `json:"visibility,omitempty"`
 }
@@ -953,10 +954,31 @@ func (s *Store) ExportConnectionsForPrincipal(p UserPrincipal) ([]ExportedConnec
 	return out, nil
 }
 
+const MaxImportConnectionProfiles = 500
+
 func (s *Store) ImportConnections(profiles []ExportedConnectionProfile, p UserPrincipal) (int, error) {
 	if len(profiles) == 0 {
 		return 0, errors.New("no connection profiles found in import payload")
 	}
+	if len(profiles) > MaxImportConnectionProfiles {
+		return 0, fmt.Errorf("cannot import more than %d connection profiles at once", MaxImportConnectionProfiles)
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO connections (id, name, type, color, host, port, username, password_enc, database_name, file_path, uri_enc, options_json, owner_id, visibility, remember_password, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+
+	now := time.Now().Unix()
 	imported := 0
 	for _, item := range profiles {
 		name := strings.TrimSpace(item.Name)
@@ -979,22 +1001,33 @@ func (s *Store) ImportConnections(profiles []ExportedConnectionProfile, p UserPr
 				vis = "shared"
 			}
 		}
-		rememberImported := !driver.IsCredentialedDriver(tp)
-		_, err := s.SaveConnectionWithMeta(driver.ConnectionConfig{
-			Name:             name,
-			Type:             tp,
-			Color:            item.Color,
-			Host:             item.Host,
-			Port:             item.Port,
-			Username:         item.Username,
-			Database:         item.Database,
-			FilePath:         item.FilePath,
-			Options:          StripReservedConnectionOptions(item.Options),
-			RememberPassword: driver.BoolPtr(rememberImported),
-		}, false, ownerID, vis)
-		if err == nil {
+		rememberInt := 0
+		if !driver.IsCredentialedDriver(tp) {
+			rememberInt = 1
+		}
+		cleanOpts := StripReservedConnectionOptions(item.Options)
+		if cleanOpts == nil {
+			cleanOpts = map[string]string{}
+		}
+		optBytes, _ := json.Marshal(cleanOpts)
+		uriEnc := ""
+		if cleanURI := StripPasswordFromURI(strings.TrimSpace(item.URI)); cleanURI != "" {
+			if enc, encErr := s.vault.Encrypt(cleanURI); encErr == nil {
+				uriEnc = enc
+			}
+		}
+		connID := crypto.NewUUID()
+		if _, execErr := stmt.Exec(
+			connID, name, tp, strings.TrimSpace(item.Color),
+			strings.TrimSpace(item.Host), item.Port, strings.TrimSpace(item.Username),
+			strings.TrimSpace(item.Database), strings.TrimSpace(item.FilePath),
+			uriEnc, string(optBytes), ownerID, vis, rememberInt, now, now,
+		); execErr == nil {
 			imported++
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
 	}
 	return imported, nil
 }

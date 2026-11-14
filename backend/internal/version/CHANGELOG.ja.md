@@ -4,6 +4,24 @@
 
 DBHarbor の主な変更履歴は本ファイルに記録され、GitHub リポジトリ [Willh92/DBHarbor](https://github.com/Willh92/DBHarbor.git) と同期されます。
 
+## [v1.0.4] - 2026-11-14
+
+### CodeQL ゼロアラート＆サプライチェーン強化・14 ドライバ並行/方言修正・ダークモード白フラッシュ防止・モバイル/Safari 互換性改善
+- **サプライチェーン保護・ローカル CodeQL 全件解消 & デプロイ強化**：
+  - **GitHub Actions & ビルドスクリプト**：`release.yml` と `preview.yml` の全サードパーティ Action を不変の 40 文字コミット SHA に固定し、`scripts/setup-toolchain.mjs` に Go 公式アーカイブの SHA-256 検証およびログ注入サニタイズを追加、`scripts/build.mjs` のファイルシステム TOCTOU 競合を解消しました。
+  - **コンテナ & サービスインストーラ**：`Dockerfile` の `/app` とバイナリを `root:root`（`0755`）読み取り専用とし、書き込み権限を `/app/data`（`dbharbor:dbharbor` `0700`）のみに限定。`scripts/install-service.ps1` / `scripts/install-service.sh` の ACL とエスケープ処理を強化し、`deploy/*` テンプレートに `DBHARBOR_TRUSTED_PROXIES` の設定案内を追加しました。
+- **バックエンド認証・権限境界・暗号ボールト & デスクトップ版ローカル保護の強化**：
+  - **マスターキー保護・ブルートフォース対策 & 原子的 2FA リプレイ防止**：`.master.key` を `os.ErrNotExist` 時のみ `O_CREATE|O_EXCL` で新規作成し破損キーの上書きを防止。`LoginProtector.RecordSuccess` の IP 失敗回数減算を `(ip, username)` 単位に限定し、別アカウントへのログインによる同一 IP ロック解除バイパスを防止。`Store.Verify2FA` に単一 SQL 文による原子的 CAS 更新を導入し、並行リクエスト下での TOTP コードおよびリカバリコードの二重使用を完全に防止しました。
+  - **全ドライバ TLS ダウングレード防止 & インポート SSRF 対策**：`sameEndpointAndSecurity`（`tlsSecurityLevel`）を `PostgreSQL`、`KingbaseES`、`MySQL`、`MariaDB`、`TiDB`、`OceanBase`、`ClickHouse`、`SQL Server`、`Redis`、`MongoDB`（URI パラメータ含む）へ拡張し、TLS セキュリティ低下時の保存済みパスワード流用をブロック。接続インポート時の `URI` SSRF 検証・`2 MiB` / `500` 件トランザクション制限・管理者共有可視性の維持、非保存共有接続のセッション別 `autocomplete` キャッシュ分離、Gzip 圧縮時の `Vary: Origin` ヘッダー保持を実装しました。
+  - **デスクトップ版のポート境界保護 & 子プロセス回収**：ブートチケットまたは有効なローカルセッション Cookie なしでの `/` アクセスに `401` を返却（`desktopToken` 漏洩を防止）し、Cookie 認証による更新リクエストにポート一致 `Origin`・`Sec-Fetch-Site`・JSON `Content-Type` 検証を強制。ネイティブ保存エクスポートで `MaxRows <= 0`（無制限）が切り詰められる不具合を修正し、macOS `osascript` の `argv` 渡し化、Linux 子プロセスの `Wait()` 回収、`0700`/`0600` ディレクトリ権限強化を実施しました。
+- **14 DB ドライバの並行処理・メモリ・SQL/NoSQL サンドボックス修正**：
+  - **SQL 共通層・ClickHouse・Oracle・Dameng・SQL Server・MySQL**：識別子・リテラル整形時の NULL バイト除去、単一セッション `*sql.Conn` を維持する `ApplyMutationsConn` / `StreamExportConn` / `StreamMultiTableExportConn` / `BatchImportConn` の導入、`SQL Server` `BrowseData` の早期接続解放によるデッドロック防止と `req.Database` バインド、`Oracle` / `Dameng` の制限付き Dialer 適用（TNS `REDIRECT` SSRF 防止）および `Oracle.KillSession` の厳格検証、`ClickHouse` の全実行経路における `ValidateClickHouseRestrictedWebSQL` サンドボックス検証、制限付き Web モードでの `skip-verify` / `TrustServerCertificate=true` 拒否を実装しました。
+  - **DuckDB・SQLite & MongoDB**：`--` および複数行 `/* ... */` コメント対応のドットコマンド字句解析修正、`:memory:` DuckDB の一時ファイル永続化（`Close()` 自動削除）と単一プロセス複数文実行によるトランザクション維持、DuckDB の `jsonl` / `markdown` ストリーミングエクスポート追加、`MongoDB` `resolveDBName` の統一と `bson.D` によるスカラー `_id` 保持、シャーディング環境での `shard:opid` `KillSession` 対応を実装しました。
+- **ダークモード白フラッシュ防止・固定列スタイル・モバイル/Safari 互換性・省メモリ & 4 言語翻訳**：
+  - **初回描画ダークモード同期 & 固定列の視認性向上**：描画前の同期テーマ判定（`main.tsx` + `prefers-color-scheme` CSS フォールバック + `<meta name="color-scheme" content="light dark" />`）、ダークモードでのワークスペース（`#141414`）/ モーダル・ドロワー（`#1f1f1f`）固定列の不透明背景とホバー色、余白行の透け防止、新規追加行の選択ハイライト、`<Select>` 検索入力欄のオートフィル表示改善を行いました。
+  - **モバイル (`360px`)・セーフエリア & iOS Safari 入力修正**：小画面やソフトウェアキーボード表示時に `LoginPage` 上部が切れてスクロールできなくなる問題を修正（`100dvh` + `margin: auto`）。下部ステータスバーとモバイル `<Drawer>` フッターを `env(safe-area-inset-bottom)` に対応させ、モバイルドロワーと DB/スキーマ作成モーダルを CSS レスポンシブ幅へ移行、iOS Safari ルールから Monaco の `.ime-input` を除外し `24px` コンパクト入力欄の行高切れを解消しました。
+  - **バックグラウンドポーリング抑制・キャッシュ連動 & 4 言語翻訳補完**：ブラウザタブ非表示中の `ServerMonitorTab` 自動ポーリング一時停止、コールドスタート時の未ロック解除 `RememberPassword = false` タブ自動接続スキップ、接続編集/ロック時のサイドバーキャッシュ自動破棄、i18n `{var}` 置換における `$` 記号の安全化、および 4 言語（`en-US`、`zh-CN`、`zh-TW`、`ja-JP`）の未翻訳キー 19 件の追加を完了しました。
+
 ## [v1.0.3] - 2026-11-08
 
 ### DB 接続パスワードのデフォルト非保存化（任意保存・編集時オフ消去）・CodeQL & 多層セキュリティ強化・ダークモード & モバイル最適化

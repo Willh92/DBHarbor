@@ -23,6 +23,12 @@ type Queryer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
+// TxQueryer abstracts *sql.DB and *sql.Conn when transaction initiation is needed on a bound session.
+type TxQueryer interface {
+	Queryer
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
+
 var exportBufPool = sync.Pool{
 	New: func() any {
 		return bufio.NewWriterSize(io.Discard, 64*1024)
@@ -293,6 +299,10 @@ func ExecuteMultiSQLConn(ctx context.Context, q Queryer, script string, maxRows 
 }
 
 func ApplyMutations(ctx context.Context, db *sql.DB, d Dialect, req driver.RowMutationRequest) (driver.MutationResult, error) {
+	return ApplyMutationsConn(ctx, db, d, req)
+}
+
+func ApplyMutationsConn(ctx context.Context, q TxQueryer, d Dialect, req driver.RowMutationRequest) (driver.MutationResult, error) {
 	sqls, err := BuildMutationSQLs(d, req)
 	if err != nil {
 		return driver.MutationResult{}, err
@@ -306,8 +316,8 @@ func ApplyMutations(ctx context.Context, db *sql.DB, d Dialect, req driver.RowMu
 
 	// ClickHouse ALTER TABLE mutations are non-transactional
 	if d == DialectClickHouse {
-		for _, q := range sqls {
-			if _, err := db.ExecContext(ctx, q); err != nil {
+		for _, stmt := range sqls {
+			if _, err := q.ExecContext(ctx, stmt); err != nil {
 				return out, err
 			}
 		}
@@ -317,14 +327,14 @@ func ApplyMutations(ctx context.Context, db *sql.DB, d Dialect, req driver.RowMu
 		return out, nil
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := q.BeginTx(ctx, nil)
 	if err != nil {
 		return out, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	for _, q := range sqls {
-		if _, err := tx.ExecContext(ctx, q); err != nil {
+	for _, stmt := range sqls {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return out, err
 		}
 	}
@@ -346,6 +356,11 @@ type TableExportItem struct {
 
 // StreamMultiTableExport streams a full database or multi-table export (SQL dump, JSON, or JSONL).
 func StreamMultiTableExport(ctx context.Context, db *sql.DB, d Dialect, req driver.ExportRequest, items []TableExportItem, w io.Writer) error {
+	return StreamMultiTableExportConn(ctx, db, d, req, items, w)
+}
+
+// StreamMultiTableExportConn streams a full database or multi-table export over a bound Queryer (*sql.DB or *sql.Conn).
+func StreamMultiTableExportConn(ctx context.Context, q Queryer, d Dialect, req driver.ExportRequest, items []TableExportItem, w io.Writer) error {
 	bw := acquireBufWriter(w)
 	defer releaseBufWriter(bw)
 
@@ -391,7 +406,7 @@ func StreamMultiTableExport(ctx context.Context, db *sql.DB, d Dialect, req driv
 			if req.MaxRows > 0 && d != DialectSQLServer && d != DialectOracle {
 				query += fmt.Sprintf(" LIMIT %d", req.MaxRows)
 			}
-			if err := streamTableSQLInserts(ctx, db, d, tbl, query, req.MaxRows, bw); err != nil {
+			if err := streamTableSQLInserts(ctx, q, d, tbl, query, req.MaxRows, bw); err != nil {
 				return fmt.Errorf("failed to export table %s: %w", item.Table, err)
 			}
 			_, _ = bw.WriteString("\n")
@@ -414,7 +429,7 @@ func StreamMultiTableExport(ctx context.Context, db *sql.DB, d Dialect, req driv
 			subReq := req
 			subReq.Table = item.Table
 			subReq.Format = "json"
-			if err := StreamExport(ctx, db, d, subReq, "", bw); err != nil {
+			if err := StreamExportConn(ctx, q, d, subReq, "", bw); err != nil {
 				return err
 			}
 		}
@@ -426,7 +441,7 @@ func StreamMultiTableExport(ctx context.Context, db *sql.DB, d Dialect, req driv
 			subReq := req
 			subReq.Table = item.Table
 			subReq.Format = "jsonl"
-			if err := StreamExport(ctx, db, d, subReq, "", bw); err != nil {
+			if err := StreamExportConn(ctx, q, d, subReq, "", bw); err != nil {
 				return err
 			}
 		}
@@ -438,6 +453,10 @@ func StreamMultiTableExport(ctx context.Context, db *sql.DB, d Dialect, req driv
 }
 
 func StreamExport(ctx context.Context, db *sql.DB, d Dialect, req driver.ExportRequest, ddlText string, w io.Writer) error {
+	return StreamExportConn(ctx, db, d, req, ddlText, w)
+}
+
+func StreamExportConn(ctx context.Context, q Queryer, d Dialect, req driver.ExportRequest, ddlText string, w io.Writer) error {
 	query := strings.TrimSpace(req.CustomSQL)
 	tbl := QualifyTable(d, req.Database, req.Schema, req.Table)
 	if query == "" {
@@ -474,13 +493,13 @@ func StreamExport(ctx context.Context, db *sql.DB, d Dialect, req driver.ExportR
 			cleanDDL := strings.TrimRight(strings.TrimSpace(ddlText), ";")
 			_, _ = bw.WriteString(cleanDDL + ";\n\n")
 		}
-		if err := streamTableSQLInserts(ctx, db, d, targetTbl, query, req.MaxRows, bw); err != nil {
+		if err := streamTableSQLInserts(ctx, q, d, targetTbl, query, req.MaxRows, bw); err != nil {
 			return err
 		}
 		return bw.Flush()
 	}
 
-	rows, err := db.QueryContext(ctx, query)
+	rows, err := q.QueryContext(ctx, query)
 	if err != nil {
 		return err
 	}
@@ -678,8 +697,8 @@ func StreamExport(ctx context.Context, db *sql.DB, d Dialect, req driver.ExportR
 	}
 }
 
-func streamTableSQLInserts(ctx context.Context, db *sql.DB, d Dialect, targetTbl, query string, maxRows int, bw *bufio.Writer) error {
-	rows, err := db.QueryContext(ctx, query)
+func streamTableSQLInserts(ctx context.Context, q Queryer, d Dialect, targetTbl, query string, maxRows int, bw *bufio.Writer) error {
+	rows, err := q.QueryContext(ctx, query)
 	if err != nil {
 		return err
 	}
@@ -801,6 +820,16 @@ func isAutoTxBatchable(d Dialect, kw string) bool {
 }
 
 func BatchImport(ctx context.Context, db *sql.DB, d Dialect, req driver.ImportRequest) (driver.ImportResult, error) {
+	return BatchImportConn(ctx, db, d, req, nil)
+}
+
+func BatchImportConn(
+	ctx context.Context,
+	q TxQueryer,
+	d Dialect,
+	req driver.ImportRequest,
+	validateStmt func(stmt string) error,
+) (driver.ImportResult, error) {
 	start := time.Now()
 	format := strings.ToLower(strings.TrimSpace(req.Format))
 	if format == "" {
@@ -810,11 +839,15 @@ func BatchImport(ctx context.Context, db *sql.DB, d Dialect, req driver.ImportRe
 	switch format {
 	case "sql":
 		res := driver.ImportResult{}
-		conn, connErr := db.Conn(ctx)
-		if connErr != nil {
-			return res, connErr
+		execConn := q
+		if sqlDB, ok := q.(*sql.DB); ok {
+			conn, connErr := sqlDB.Conn(ctx)
+			if connErr != nil {
+				return res, connErr
+			}
+			defer conn.Close()
+			execConn = conn
 		}
-		defer conn.Close()
 
 		canAutoBatch := !req.ContinueOnError && d != DialectClickHouse
 		userInTx := false
@@ -840,6 +873,16 @@ func BatchImport(ctx context.Context, db *sql.DB, d Dialect, req driver.ImportRe
 			if cErr := ctx.Err(); cErr != nil {
 				return cErr
 			}
+			if validateStmt != nil {
+				if vErr := validateStmt(stmt); vErr != nil {
+					if autoTx != nil {
+						_ = autoTx.Rollback()
+						autoTx = nil
+						autoTxCount = 0
+					}
+					return vErr
+				}
+			}
 			kw := leadingSQLKeyword(stmt)
 
 			if canAutoBatch {
@@ -858,7 +901,7 @@ func BatchImport(ctx context.Context, db *sql.DB, d Dialect, req driver.ImportRe
 
 				if !userInTx && isAutoTxBatchable(d, kw) {
 					if autoTx == nil {
-						tx, txErr := conn.BeginTx(ctx, nil)
+						tx, txErr := execConn.BeginTx(ctx, nil)
 						if txErr == nil {
 							autoTx = tx
 							autoTxCount = 0
@@ -887,7 +930,7 @@ func BatchImport(ctx context.Context, db *sql.DB, d Dialect, req driver.ImportRe
 				}
 			}
 
-			if _, execErr := conn.ExecContext(ctx, stmt); execErr != nil {
+			if _, execErr := execConn.ExecContext(ctx, stmt); execErr != nil {
 				if req.ContinueOnError {
 					res.FailedCount++
 					if len(res.Warnings) < 20 {
@@ -938,10 +981,10 @@ func BatchImport(ctx context.Context, db *sql.DB, d Dialect, req driver.ImportRe
 			batchCap = 1
 		}
 
-		var execTarget Queryer = db
+		var execTarget Queryer = q
 		var tx *sql.Tx
 		if d != DialectClickHouse && !req.ContinueOnError {
-			if t, txErr := db.BeginTx(ctx, nil); txErr == nil {
+			if t, txErr := q.BeginTx(ctx, nil); txErr == nil {
 				tx = t
 				execTarget = tx
 				defer func() { _ = tx.Rollback() }()
@@ -1051,7 +1094,7 @@ func BatchImport(ctx context.Context, db *sql.DB, d Dialect, req driver.ImportRe
 			return driver.ImportResult{}, errors.New("JSON import requires a top-level object array [...] or JSONL format")
 		}
 
-		res, err := batchInsertJSONRecords(ctx, db, d, req, func(next *map[string]any) (bool, error) {
+		res, err := batchInsertJSONRecords(ctx, q, d, req, func(next *map[string]any) (bool, error) {
 			if !dec.More() {
 				return false, nil
 			}
@@ -1069,7 +1112,7 @@ func BatchImport(ctx context.Context, db *sql.DB, d Dialect, req driver.ImportRe
 		}
 		scanner := bufio.NewScanner(req.Reader)
 		scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-		res, err := batchInsertJSONRecords(ctx, db, d, req, func(next *map[string]any) (bool, error) {
+		res, err := batchInsertJSONRecords(ctx, q, d, req, func(next *map[string]any) (bool, error) {
 			for scanner.Scan() {
 				line := strings.TrimSpace(scanner.Text())
 				if line == "" {
@@ -1099,15 +1142,15 @@ func del(m map[string]any, k string) {
 
 func batchInsertJSONRecords(
 	ctx context.Context,
-	db *sql.DB,
+	q TxQueryer,
 	d Dialect,
 	req driver.ImportRequest,
 	readNext func(out *map[string]any) (bool, error),
 ) (driver.ImportResult, error) {
-	var execTarget Queryer = db
+	var execTarget Queryer = q
 	var tx *sql.Tx
 	if d != DialectClickHouse && !req.ContinueOnError {
-		if t, txErr := db.BeginTx(ctx, nil); txErr == nil {
+		if t, txErr := q.BeginTx(ctx, nil); txErr == nil {
 			tx = t
 			execTarget = tx
 			defer func() { _ = tx.Rollback() }()

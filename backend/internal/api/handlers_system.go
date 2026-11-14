@@ -8,12 +8,14 @@ import (
 	"net/http"
 	"net/url"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"dbharbor/backend/internal/auth"
 	"dbharbor/backend/internal/driver"
+	"dbharbor/backend/internal/driver/sqlite"
 	"dbharbor/backend/internal/store"
 	"dbharbor/backend/internal/version"
 )
@@ -674,45 +676,91 @@ func (s *Server) handleListConnections(c *Context) {
 	c.JSON(http.StatusOK, H{"connections": list})
 }
 
-func isTLSEnabledOption(cfg driver.ConnectionConfig) bool {
-	switch strings.ToLower(strings.TrimSpace(cfg.Option("tls", ""))) {
-	case "true", "1", "skip-verify", "preferred", "custom":
-		return true
+// tlsSecurityLevel grades transport security from 0 (plaintext) -> 1 (opportunistic) ->
+// 2 (encrypted without strict certificate/hostname verification) -> 3 (strictly verified TLS),
+// ensuring any downgrade requires re-entering connection credentials.
+func tlsSecurityLevel(cfg driver.ConnectionConfig) int {
+	level := 0
+	promote := func(v int) {
+		if v > level {
+			level = v
+		}
 	}
-	if sslMode := strings.ToLower(strings.TrimSpace(cfg.Option("sslmode", ""))); sslMode != "" && sslMode != "disable" {
-		return true
+	switch strings.ToLower(strings.TrimSpace(cfg.Option("tls", ""))) {
+	case "true", "1", "custom", "verified":
+		promote(3)
+	case "skip-verify":
+		promote(2)
+	case "preferred":
+		promote(1)
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Option("sslmode", ""))) {
+	case "verify-full", "verify-ca":
+		promote(3)
+	case "require":
+		promote(2)
+	case "prefer", "allow":
+		promote(1)
 	}
 	switch strings.ToLower(strings.TrimSpace(cfg.Option("encrypt", ""))) {
-	case "true", "1", "mandatory", "strict":
-		return true
+	case "verified", "strict":
+		promote(3)
+	case "true", "1", "mandatory":
+		promote(2)
 	}
+
 	rawURI := strings.TrimSpace(cfg.URI)
 	if rawURI != "" {
 		lowURI := strings.ToLower(rawURI)
+		uriLevel := 0
 		if strings.HasPrefix(lowURI, "mongodb+srv://") || strings.HasPrefix(lowURI, "rediss://") {
-			if strings.Contains(lowURI, "tls=false") || strings.Contains(lowURI, "ssl=false") {
-				return false
+			if !strings.Contains(lowURI, "tls=false") && !strings.Contains(lowURI, "ssl=false") {
+				uriLevel = 3
 			}
-			return true
-		}
-		if strings.Contains(lowURI, "tls=true") || strings.Contains(lowURI, "ssl=true") ||
+		} else if strings.Contains(lowURI, "tls=true") || strings.Contains(lowURI, "ssl=true") ||
 			strings.Contains(lowURI, "tls=1") || strings.Contains(lowURI, "ssl=1") {
-			return true
+			uriLevel = 3
 		}
 		if u, err := url.Parse(store.StripPasswordFromURI(rawURI)); err == nil {
 			q := u.Query()
 			for _, k := range []string{"tls", "ssl"} {
 				switch strings.ToLower(strings.TrimSpace(q.Get(k))) {
 				case "true", "1":
-					return true
+					if uriLevel < 3 {
+						uriLevel = 3
+					}
+				case "false", "0":
+					uriLevel = 0
 				}
 			}
-			if sm := strings.ToLower(strings.TrimSpace(q.Get("sslmode"))); sm != "" && sm != "disable" {
-				return true
+			switch strings.ToLower(strings.TrimSpace(q.Get("sslmode"))) {
+			case "verify-full", "verify-ca":
+				if uriLevel < 3 {
+					uriLevel = 3
+				}
+			case "require":
+				if uriLevel < 2 {
+					uriLevel = 2
+				}
+			case "prefer", "allow":
+				if uriLevel < 1 {
+					uriLevel = 1
+				}
+			}
+			for _, k := range []string{"tlsinsecure", "tlsallowinvalidcertificates", "tlsallowinvalidhostnames", "insecure"} {
+				for qk, qvs := range q {
+					if strings.EqualFold(strings.TrimSpace(qk), k) && len(qvs) > 0 {
+						v := strings.ToLower(strings.TrimSpace(qvs[0]))
+						if (v == "true" || v == "1") && uriLevel > 2 {
+							uriLevel = 2
+						}
+					}
+				}
 			}
 		}
+		promote(uriLevel)
 	}
-	return false
+	return level
 }
 
 func sameEndpointAndSecurity(oldCfg, newCfg driver.ConnectionConfig) bool {
@@ -736,7 +784,7 @@ func sameEndpointAndSecurity(oldCfg, newCfg driver.ConnectionConfig) bool {
 	if strings.TrimSpace(effNew.URI) == "" && oldURI != "" {
 		effNew.URI = oldURI
 	}
-	if isTLSEnabledOption(oldCfg) && !isTLSEnabledOption(effNew) {
+	if tlsSecurityLevel(effNew) < tlsSecurityLevel(oldCfg) {
 		return false
 	}
 	return true
@@ -1027,16 +1075,20 @@ func (s *Server) handleUpdateConnection(c *Context) {
 
 	req.ConnectionConfig.ID = id
 	vis := ""
+	ownerOverride := ""
 	if s.desktop.Enabled {
 		vis = "shared"
 	} else if c.IsAdmin() {
 		if req.Visibility == "private" || req.Visibility == "shared" {
 			vis = req.Visibility
 		}
+		if vis == "shared" && !s.store.IsConnectionOwnedByAdmin(id) {
+			ownerOverride = c.UserID()
+		}
 	} else {
 		vis = "private"
 	}
-	saved, err := s.store.SaveConnectionWithMeta(req.ConnectionConfig, req.KeepExistingSecret, "", vis)
+	saved, err := s.store.SaveConnectionWithMeta(req.ConnectionConfig, req.KeepExistingSecret, ownerOverride, vis)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
 		return
@@ -1203,6 +1255,11 @@ func (s *Server) handleImportConnections(c *Context) {
 		c.JSON(http.StatusBadRequest, H{"error": "Unrecognized connection profile format"})
 		return
 	}
+	if len(profiles) > store.MaxImportConnectionProfiles {
+		c.JSON(http.StatusBadRequest, H{"error": fmt.Sprintf("Cannot import more than %d connection profiles in a single batch", store.MaxImportConnectionProfiles)})
+		return
+	}
+	validatedEndpoints := make(map[string]struct{}, len(profiles))
 	for i := range profiles {
 		profiles[i].Options = store.StripReservedConnectionOptions(profiles[i].Options)
 		profiles[i].FilePath = s.normalizeConnectionFilePathForWebUser(c, profiles[i].FilePath)
@@ -1210,14 +1267,35 @@ func (s *Server) handleImportConnections(c *Context) {
 			c.JSON(status, H{"error": errMsg})
 			return
 		}
-		if status, errMsg := s.validateRemoteEndpointForWebUser(c, driver.ConnectionConfig{
-			Type:    profiles[i].Type,
-			Host:    profiles[i].Host,
-			Port:    profiles[i].Port,
-			Options: store.StripReservedConnectionOptions(profiles[i].Options),
-		}); status != http.StatusOK {
-			c.JSON(status, H{"error": errMsg})
-			return
+		optKeys := make([]string, 0, len(profiles[i].Options))
+		for k := range profiles[i].Options {
+			optKeys = append(optKeys, k)
+		}
+		sort.Strings(optKeys)
+		var optSig strings.Builder
+		for _, k := range optKeys {
+			optSig.WriteString(k)
+			optSig.WriteByte('=')
+			optSig.WriteString(profiles[i].Options[k])
+			optSig.WriteByte('&')
+		}
+		epKey := strings.ToLower(strings.TrimSpace(profiles[i].Type)) + "|" +
+			strings.TrimSpace(profiles[i].Host) + "|" +
+			strconv.Itoa(profiles[i].Port) + "|" +
+			strings.TrimSpace(profiles[i].URI) + "|" +
+			optSig.String()
+		if _, alreadyOK := validatedEndpoints[epKey]; !alreadyOK {
+			if status, errMsg := s.validateRemoteEndpointForWebUser(c, driver.ConnectionConfig{
+				Type:    profiles[i].Type,
+				Host:    profiles[i].Host,
+				Port:    profiles[i].Port,
+				URI:     profiles[i].URI,
+				Options: profiles[i].Options,
+			}); status != http.StatusOK {
+				c.JSON(status, H{"error": errMsg})
+				return
+			}
+			validatedEndpoints[epKey] = struct{}{}
 		}
 		if !s.desktop.Enabled && profiles[i].Options != nil {
 			delete(profiles[i].Options, "cliPath")
@@ -1257,6 +1335,9 @@ func (s *Server) handleDeleteConnection(c *Context) {
 	if err := s.store.DeleteConnection(id); err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
 		return
+	}
+	if strings.EqualFold(existingCfg.Type, "duckdb") && strings.TrimSpace(existingCfg.FilePath) != "" {
+		sqlite.ReleaseDuckDBFileLock(existingCfg.FilePath)
 	}
 	if store.IsEphemeralConnection(existingCfg.Options) {
 		s.cleanupEphemeralWorkspace(existingCfg)

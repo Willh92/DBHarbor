@@ -23,7 +23,7 @@ const (
 )
 
 func QuoteIdent(d Dialect, ident string) string {
-	ident = strings.TrimSpace(ident)
+	ident = strings.TrimSpace(strings.ReplaceAll(ident, "\x00", ""))
 	if ident == "" {
 		return ""
 	}
@@ -89,10 +89,11 @@ func FormatLiteral(val any) string {
 	case float64:
 		return strconv.FormatFloat(v, 'f', -1, 64)
 	case string:
-		escaped := strings.ReplaceAll(v, "'", "''")
+		clean := strings.ReplaceAll(v, "\x00", "")
+		escaped := strings.ReplaceAll(clean, "'", "''")
 		return "'" + escaped + "'"
 	default:
-		s := fmt.Sprintf("%v", v)
+		s := strings.ReplaceAll(fmt.Sprintf("%v", v), "\x00", "")
 		escaped := strings.ReplaceAll(s, "'", "''")
 		return "'" + escaped + "'"
 	}

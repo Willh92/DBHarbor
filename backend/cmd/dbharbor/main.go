@@ -158,5 +158,7 @@ func openBrowserCrossPlatform(url string) {
 	default:
 		cmd = exec.Command("xdg-open", url)
 	}
-	_ = cmd.Start()
+	if err := cmd.Start(); err == nil {
+		go func() { _ = cmd.Wait() }()
+	}
 }

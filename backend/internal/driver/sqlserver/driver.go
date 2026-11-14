@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	stdsql_driver "database/sql/driver"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -90,16 +91,24 @@ func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
 	}
 	q := u.Query()
 	q.Set("database", dbName)
-	enc := cfg.Option("encrypt", "disable")
+	enc := strings.ToLower(strings.TrimSpace(cfg.Option("encrypt", "disable")))
+	if enc == "" {
+		enc = "disable"
+	}
 	switch enc {
 	case "verified":
 		q.Set("encrypt", "true")
 		q.Set("TrustServerCertificate", "false")
 	case "true":
+		if restrictIP {
+			return nil, errors.New("TLS TrustServerCertificate=true is not permitted for restricted non-admin connections; use strict verification or disable encryption")
+		}
 		q.Set("encrypt", "true")
 		q.Set("TrustServerCertificate", "true")
-	default:
+	case "disable", "false":
 		q.Set("encrypt", enc)
+	default:
+		return nil, fmt.Errorf("unsupported SQL Server encrypt option %q", enc)
 	}
 	u.RawQuery = q.Encode()
 
@@ -582,9 +591,9 @@ func (d *Driver) BrowseData(ctx context.Context, req driver.BrowseDataRequest) (
 		if cErr != nil {
 			return driver.QueryResult{}, cErr
 		}
-		defer cleanup()
 		res, err = sqlbase.ExecuteSingleQueryConn(ctx, conn, dataSQL, req.PageSize)
 		if err != nil {
+			cleanup()
 			return res, err
 		}
 		var total int64
@@ -592,6 +601,7 @@ func (d *Driver) BrowseData(ctx context.Context, req driver.BrowseDataRequest) (
 			res.Total = total
 			res.HasTotal = true
 		}
+		cleanup()
 		res.PrimaryKeys = d.getPrimaryKeys(ctx, req.Database, req.Schema, req.Table)
 		return res, nil
 	}
@@ -618,6 +628,14 @@ func (d *Driver) BuildMutationPreviewSQL(req driver.RowMutationRequest) ([]strin
 func (d *Driver) ApplyRowMutations(ctx context.Context, req driver.RowMutationRequest) (driver.MutationResult, error) {
 	if req.Schema == "" {
 		req.Schema = "dbo"
+	}
+	if strings.TrimSpace(req.Database) != "" {
+		conn, cleanup, err := d.acquireConnForDB(ctx, req.Database)
+		if err != nil {
+			return driver.MutationResult{}, err
+		}
+		defer cleanup()
+		return sqlbase.ApplyMutationsConn(ctx, conn, sqlbase.DialectSQLServer, req)
 	}
 	return sqlbase.ApplyMutations(ctx, d.db, sqlbase.DialectSQLServer, req)
 }
@@ -707,6 +725,14 @@ func (d *Driver) StreamExport(ctx context.Context, req driver.ExportRequest, w i
 			}
 			items = append(items, sqlbase.TableExportItem{Table: name, DDL: ddl})
 		}
+		if strings.TrimSpace(req.Database) != "" {
+			conn, cleanup, err := d.acquireConnForDB(ctx, req.Database)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			return sqlbase.StreamMultiTableExportConn(ctx, conn, sqlbase.DialectSQLServer, req, items, w)
+		}
 		return sqlbase.StreamMultiTableExport(ctx, d.db, sqlbase.DialectSQLServer, req, items, w)
 	}
 	ddl := ""
@@ -715,10 +741,29 @@ func (d *Driver) StreamExport(ctx context.Context, req driver.ExportRequest, w i
 			ddl = st.DDL
 		}
 	}
+	if strings.TrimSpace(req.Database) != "" {
+		conn, cleanup, err := d.acquireConnForDB(ctx, req.Database)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		return sqlbase.StreamExportConn(ctx, conn, sqlbase.DialectSQLServer, req, ddl, w)
+	}
 	return sqlbase.StreamExport(ctx, d.db, sqlbase.DialectSQLServer, req, ddl, w)
 }
 
 func (d *Driver) BatchImport(ctx context.Context, req driver.ImportRequest) (driver.ImportResult, error) {
+	if req.Schema == "" {
+		req.Schema = "dbo"
+	}
+	if strings.TrimSpace(req.Database) != "" {
+		conn, cleanup, err := d.acquireConnForDB(ctx, req.Database)
+		if err != nil {
+			return driver.ImportResult{}, err
+		}
+		defer cleanup()
+		return sqlbase.BatchImportConn(ctx, conn, sqlbase.DialectSQLServer, req, nil)
+	}
 	return sqlbase.BatchImport(ctx, d.db, sqlbase.DialectSQLServer, req)
 }
 

@@ -253,9 +253,10 @@ func Open(dataDir string, vault *crypto.Vault, adminUser, adminPass string) (*St
 
 // OpenLocal opens the metadata store in pure local desktop mode without creating any user accounts or bcrypt dummy hashes.
 func OpenLocal(dataDir string, vault *crypto.Vault) (*Store, error) {
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, err
 	}
+	_ = os.Chmod(dataDir, 0o700)
 	dbPath := filepath.Join(dataDir, "dbharbor.db")
 	dsn := filepath.ToSlash(dbPath) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=cache_size(-4000)"
 	db, err := sql.Open("sqlite", dsn)
@@ -277,6 +278,9 @@ func OpenLocal(dataDir string, vault *crypto.Vault) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	_ = os.Chmod(dbPath, 0o600)
+	_ = os.Chmod(dbPath+"-wal", 0o600)
+	_ = os.Chmod(dbPath+"-shm", 0o600)
 	s.initialized.Store(true)
 	s.hydrateLoginBranding()
 	_ = s.ensureSampleConnection(dataDir)
@@ -725,8 +729,13 @@ func (s *Store) Verify2FA(userID, inputCode string) (usedRecovery bool, err erro
 	// Try 6-digit TOTP first
 	if len(clean) == 6 {
 		if matchedStep, ok := auth.VerifyTOTP(secret, clean, time.Now(), lastStep); ok {
-			_, _ = s.db.Exec(`UPDATE users SET last_totp_step = ? WHERE id = ?`, matchedStep, userID)
-			return false, nil
+			res, uErr := s.db.Exec(`UPDATE users SET last_totp_step = ? WHERE id = ? AND last_totp_step < ?`, matchedStep, userID, matchedStep)
+			if uErr == nil {
+				if n, rErr := res.RowsAffected(); rErr == nil && n == 1 {
+					return false, nil
+				}
+			}
+			return false, errors.New("two-factor verification code was already used; please wait for the next code")
 		}
 	}
 
@@ -743,10 +752,17 @@ func (s *Store) Verify2FA(userID, inputCode string) (usedRecovery bool, err erro
 			}
 		}
 		if matchedIdx >= 0 {
-			remaining := append(hashes[:matchedIdx], hashes[matchedIdx+1:]...)
+			remaining := make([]string, 0, len(hashes)-1)
+			remaining = append(remaining, hashes[:matchedIdx]...)
+			remaining = append(remaining, hashes[matchedIdx+1:]...)
 			remBytes, _ := json.Marshal(remaining)
-			_, _ = s.db.Exec(`UPDATE users SET recovery_hashes_json = ? WHERE id = ?`, string(remBytes), userID)
-			return true, nil
+			res, uErr := s.db.Exec(`UPDATE users SET recovery_hashes_json = ? WHERE id = ? AND recovery_hashes_json = ?`, string(remBytes), userID, recJSON)
+			if uErr == nil {
+				if n, rErr := res.RowsAffected(); rErr == nil && n == 1 {
+					return true, nil
+				}
+			}
+			return false, errors.New("backup recovery code was already consumed")
 		}
 	}
 

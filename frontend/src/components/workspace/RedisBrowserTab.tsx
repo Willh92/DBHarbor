@@ -1094,6 +1094,7 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
         <Form
           form={newKeyForm}
           layout="vertical"
+          autoComplete="off"
           initialValues={{ type: 'string', ttl: -1, streamId: '*' }}
         >
           <Form.Item name="key" label={t('Key Name')} rules={[{ required: true }]}>

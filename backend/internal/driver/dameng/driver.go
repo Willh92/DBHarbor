@@ -9,13 +9,25 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"dbharbor/backend/internal/driver"
 	"dbharbor/backend/internal/driver/sqlbase"
 
-	_ "gitee.com/chunanyong/dm"
+	dm "gitee.com/chunanyong/dm"
 )
+
+var registerRestrictedDMDialerOnce sync.Once
+
+func ensureRestrictedDMDialer() {
+	registerRestrictedDMDialerOnce.Do(func() {
+		restricted := sqlbase.NewRestrictedDialContext(8 * time.Second)
+		dm.RegisterDialContext("dbharbor_restricted", func(ctx context.Context, addr string) (net.Conn, error) {
+			return restricted(ctx, "tcp", addr)
+		})
+	})
+}
 
 func init() {
 	fields := driver.StandardHostFields(5236, "Default Schema (optional)", false)
@@ -75,9 +87,15 @@ func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
 		User:   url.UserPassword(user, cfg.Password),
 		Host:   net.JoinHostPort(strings.Trim(connectHost, "[]"), strconv.Itoa(port)),
 	}
+	q := u.Query()
 	if cfg.Database != "" {
-		q := u.Query()
 		q.Set("schema", cfg.Database)
+	}
+	if restrictIP {
+		ensureRestrictedDMDialer()
+		q.Set("dialName", "dbharbor_restricted")
+	}
+	if len(q) > 0 {
 		u.RawQuery = q.Encode()
 	}
 	db, err := sql.Open("dm", u.String())

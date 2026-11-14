@@ -45,7 +45,7 @@ func SaveDarkPreference(dataDir string, dark bool) {
 	if dataDir == "" {
 		return
 	}
-	_ = os.MkdirAll(dataDir, 0o755)
+	_ = os.MkdirAll(dataDir, 0o700)
 	raw, err := json.Marshal(desktopUIPrefs{DarkMode: dark})
 	if err != nil {
 		return
@@ -166,12 +166,18 @@ func findChromiumExecutables() []string {
 }
 
 func openSystemDefaultURL(url string) error {
+	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	case "darwin":
-		return exec.Command("open", url).Start()
+		cmd = exec.Command("open", url)
 	default:
-		return exec.Command("xdg-open", url).Start()
+		cmd = exec.Command("xdg-open", url)
 	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
 }

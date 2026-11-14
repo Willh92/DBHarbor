@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import https from 'node:https';
 import os from 'node:os';
@@ -11,6 +12,20 @@ const TOOLCHAIN_DIR = path.join(ROOT_DIR, '.toolchain');
 const LOCAL_GO_ROOT = path.join(TOOLCHAIN_DIR, 'go');
 const TARGET_GO_VERSION = '1.23.6';
 const MIN_GO_MINOR = 22;
+
+const GO_ARCHIVE_SHA256 = Object.freeze({
+  'go1.23.6.darwin-amd64.tar.gz': '782da50ce8ec5e98fac2cd3cdc6a1d7130d093294fc310038f651444232a3fb0',
+  'go1.23.6.darwin-arm64.tar.gz': '5cae2450a1708aeb0333237a155640d5562abaf195defebc4306054565536221',
+  'go1.23.6.linux-amd64.tar.gz': '9379441ea310de000f33a4dc767bd966e72ab2826270e038e78b2c53c2e7802d',
+  'go1.23.6.linux-arm64.tar.gz': '561c780e8f4a8955d32bf72e46af0b5ee5e0debe1e4633df9a03781878219202',
+  'go1.23.6.windows-amd64.zip': '53fec1586850b2cf5ad6438341ff7adc5f6700dd3ec1cfa3f5e8b141df190243',
+  'go1.23.6.windows-arm64.zip': 'a2d2ec1b3759552bdd9cdf58858f91dfbfd6ab3a472f00b5255acbed30b1aa41',
+});
+
+function formatErrorCode(err) {
+  const code = err && typeof err.code === 'string' ? err.code : '';
+  return /^[A-Z0-9_-]{1,40}$/i.test(code) ? code : 'NETWORK_ERROR';
+}
 
 function getGoBinaryName() {
   return process.platform === 'win32' ? 'go.exe' : 'go';
@@ -97,11 +112,23 @@ function downloadFile(urls, destPath) {
         return;
       }
       const url = urls[idx];
-      console.log(`[toolchain] Downloading ${url} ...`);
+      console.log(`[toolchain] Downloading ${String(url).replace(/\n|\r/g, '')} ...`);
       const req = https.get(url, (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          const redirectUrl = new URL(res.headers.location, url).toString();
+          let redirectUrl = '';
+          try {
+            const parsed = new URL(res.headers.location, url);
+            if (parsed.protocol === 'https:') {
+              redirectUrl = parsed.toString();
+            }
+          } catch {
+            redirectUrl = '';
+          }
           res.resume();
+          if (!redirectUrl) {
+            tryUrl(idx + 1);
+            return;
+          }
           downloadFile([redirectUrl, ...urls.slice(idx + 1)], destPath).then(resolve).catch(reject);
           return;
         }
@@ -130,7 +157,7 @@ function downloadFile(urls, destPath) {
         res.on('error', (err) => {
           fileStream.destroy();
           fs.rmSync(destPath, { force: true });
-          console.warn(`[toolchain] Stream error (${err.message}), trying fallback...`);
+          console.warn(`[toolchain] Stream error (${formatErrorCode(err)}), trying fallback...`);
           tryUrl(idx + 1);
         });
 
@@ -153,12 +180,24 @@ function downloadFile(urls, destPath) {
       });
 
       req.on('error', (err) => {
-        console.warn(`[toolchain] Mirror error (${err.message}), trying fallback...`);
+        console.warn(`[toolchain] Mirror error (${formatErrorCode(err)}), trying fallback...`);
         tryUrl(idx + 1);
       });
     };
     tryUrl(0);
   });
+}
+
+function verifyArchiveSha256(archivePath, filename) {
+  const expected = GO_ARCHIVE_SHA256[filename];
+  if (!expected) {
+    throw new Error(`Missing pinned SHA-256 digest for Go SDK archive: ${filename}`);
+  }
+  const actual = crypto.createHash('sha256').update(fs.readFileSync(archivePath)).digest('hex');
+  if (actual.toLowerCase() !== expected.toLowerCase()) {
+    fs.rmSync(archivePath, { force: true });
+    throw new Error(`SHA-256 mismatch for ${filename}: expected ${expected}, got ${actual}`);
+  }
 }
 
 function extractArchive(archivePath, destDir, ext) {
@@ -198,6 +237,7 @@ export async function ensureGoToolchain() {
     `https://go.dev/dl/${filename}`,
   ];
   await downloadFile(urls, archivePath);
+  verifyArchiveSha256(archivePath, filename);
   extractArchive(archivePath, TOOLCHAIN_DIR, ext);
   fs.rmSync(archivePath, { force: true });
 

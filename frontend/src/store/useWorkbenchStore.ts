@@ -3,7 +3,7 @@ import { api, clearAllConnectionAuthPrompts, getAuthToken, setAuthToken } from '
 import { detectInitialLocale, ensureLocaleLoaded, persistLocale, translateWithLocale, type AppLocale } from '../i18n';
 import type { DriverMeta, LoginBrandingConfig, SavedConnection, UserRole, WorkspaceTab } from '../types';
 import { clearAllEphemeralFileHandles } from '../utils/ephemeralFileHandles';
-import { getRuntimeBootMeta, isDesktopRuntime } from '../utils/runtimeMode';
+import { isDesktopRuntime, resolveInitialDarkMode } from '../utils/runtimeMode';
 
 interface WorkbenchState {
   isDesktop: boolean;
@@ -141,13 +141,6 @@ function persistTabSession(tabs: WorkspaceTab[], activeTabKey: string, owner: st
 
 const initialIsDesktop = isDesktopRuntime();
 const initialUsername = localStorage.getItem('dbharbor_username') || '';
-const rawInitialSession = loadPersistedSession();
-const isInitialSessionValid = initialIsDesktop
-  ? !rawInitialSession.owner || rawInitialSession.owner === 'local'
-  : Boolean(initialUsername && rawInitialSession.owner && rawInitialSession.owner === initialUsername);
-const initialTabSession = isInitialSessionValid
-  ? { tabs: rawInitialSession.tabs, activeTabKey: rawInitialSession.activeTabKey }
-  : { tabs: [], activeTabKey: '' };
 
 export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   isDesktop: initialIsDesktop,
@@ -161,14 +154,12 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   passwordChanged: true,
   recoveryCodesRemaining: 0,
   loginBranding: null,
-  darkMode: localStorage.getItem('dbharbor_theme')
-    ? localStorage.getItem('dbharbor_theme') === 'dark'
-    : Boolean(getRuntimeBootMeta().darkMode),
+  darkMode: resolveInitialDarkMode(),
   locale: detectInitialLocale(),
   drivers: [],
   connections: [],
-  tabs: initialTabSession.tabs,
-  activeTabKey: initialTabSession.activeTabKey,
+  tabs: [],
+  activeTabKey: '',
   treeRefreshTick: 0,
   requestedConnId: '',
 
@@ -265,6 +256,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   },
 
   loadBootstrap: async () => {
+    const wasBootstrapped = get().bootstrapped;
     const bootToken = get().token;
     const prevUsername = get().username;
     let currentOwner = 'local';
@@ -326,7 +318,14 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         const curActive = get().activeTabKey || persisted.activeTabKey;
         if (curTabs.length > 0) {
           const validTabs = curTabs
-            .filter((t) => connMap.has(t.connectionId))
+            .filter((t) => {
+              const c = connMap.get(t.connectionId);
+              if (!c) return false;
+              if (!wasBootstrapped && c.rememberPassword === false && !c.unlocked) {
+                return false;
+              }
+              return true;
+            })
             .map((t) => {
               const c = connMap.get(t.connectionId)!;
               return c.name !== t.connName ? { ...t, connName: c.name } : t;

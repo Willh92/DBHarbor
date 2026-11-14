@@ -3,7 +3,6 @@
 package desktop
 
 import (
-	"fmt"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -240,9 +239,10 @@ func SetWindowDarkMode(dark bool) {
 
 // SaveFileDialog opens the native macOS Finder Save panel safely from any goroutine.
 func SaveFileDialog(defaultFilename string) (string, bool, error) {
-	escaped := strings.ReplaceAll(defaultFilename, `"`, `\"`)
-	script := fmt.Sprintf(`POSIX path of (choose file name with prompt "Export Database File - DBHarbor" default name "%s")`, escaped)
-	out, err := exec.Command("osascript", "-e", script).Output()
+	const script = `on run argv
+	return POSIX path of (choose file name with prompt "Export Database File - DBHarbor" default name (item 1 of argv))
+end run`
+	out, err := exec.Command("osascript", "-e", script, defaultFilename).Output()
 	if err != nil {
 		return "", true, nil
 	}
@@ -259,8 +259,10 @@ func OpenFileDialog(kind string, _ string) (string, bool, error) {
 	if strings.EqualFold(strings.TrimSpace(kind), "duckdb") {
 		prompt = "Select Local DuckDB Database File - DBHarbor"
 	}
-	script := fmt.Sprintf(`POSIX path of (choose file with prompt "%s")`, prompt)
-	out, err := exec.Command("osascript", "-e", script).Output()
+	const script = `on run argv
+	return POSIX path of (choose file with prompt (item 1 of argv))
+end run`
+	out, err := exec.Command("osascript", "-e", script, prompt).Output()
 	if err != nil {
 		return "", true, nil
 	}
@@ -273,7 +275,8 @@ func OpenFileDialog(kind string, _ string) (string, bool, error) {
 
 // ShowErrorDialog displays a native macOS alert box when startup fails.
 func ShowErrorDialog(title, message string) {
-	tEsc := strings.ReplaceAll(title, `"`, `\"`)
-	mEsc := strings.ReplaceAll(message, `"`, `\"`)
-	_ = exec.Command("osascript", "-e", fmt.Sprintf(`display alert "%s" message "%s" as critical`, tEsc, mEsc)).Run()
+	const script = `on run argv
+	display alert (item 1 of argv) message (item 2 of argv) as critical
+end run`
+	_ = exec.Command("osascript", "-e", script, title, message).Run()
 }

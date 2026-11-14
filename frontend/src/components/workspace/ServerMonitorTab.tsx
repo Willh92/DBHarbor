@@ -34,41 +34,71 @@ export const ServerMonitorTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
   const [pollSec, setPollSec] = useState<number>(0);
   const [sessionFilter, setSessionFilter] = useState('');
   const needsUnlockReloadRef = useRef(false);
+  const inFlightRef = useRef(false);
+  const abortCtrlRef = useRef<AbortController | null>(null);
 
-  const fetchMonitor = useCallback(async () => {
-    setLoading(true);
-    try {
-      const snap = await api.getMonitor(tab.connectionId);
-      needsUnlockReloadRef.current = false;
-      setSnapshot(snap);
-    } catch (err: any) {
-      if (isAuthPromptCancelledError(err)) {
-        needsUnlockReloadRef.current = true;
-        setPollSec(0);
-        return;
+  const fetchMonitor = useCallback(
+    async (silent = false) => {
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
+      const ctrl = new AbortController();
+      abortCtrlRef.current = ctrl;
+      if (!silent) {
+        setLoading(true);
       }
-      message.error(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }, [tab.connectionId]);
+      try {
+        const snap = await api.getMonitor(tab.connectionId, {
+          signal: ctrl.signal,
+          skipDbAuthPrompt: silent,
+        });
+        needsUnlockReloadRef.current = false;
+        setSnapshot(snap);
+      } catch (err: any) {
+        if (err?.name === 'AbortError') {
+          return;
+        }
+        if (isAuthPromptCancelledError(err) || err?.status === 428) {
+          needsUnlockReloadRef.current = true;
+          setPollSec(0);
+          return;
+        }
+        if (!silent) {
+          message.error(err.message);
+        } else {
+          setPollSec(0);
+        }
+      } finally {
+        if (abortCtrlRef.current === ctrl) {
+          abortCtrlRef.current = null;
+        }
+        inFlightRef.current = false;
+        if (!silent) {
+          setLoading(false);
+        }
+      }
+    },
+    [tab.connectionId]
+  );
 
   useEffect(() => {
-    fetchMonitor();
+    void fetchMonitor(false);
+    return () => {
+      abortCtrlRef.current?.abort();
+    };
   }, [fetchMonitor]);
 
   useEffect(() => {
     if (needsUnlockReloadRef.current && conn?.unlocked) {
       needsUnlockReloadRef.current = false;
-      void fetchMonitor();
+      void fetchMonitor(false);
     }
   }, [conn?.unlocked, treeRefreshTick, fetchMonitor]);
 
   useEffect(() => {
     if (pollSec <= 0 || activeTabKey !== tab.key) return;
     const timer = setInterval(() => {
-      if (!document.hidden) {
-        fetchMonitor();
+      if (!document.hidden && !inFlightRef.current) {
+        void fetchMonitor(true);
       }
     }, pollSec * 1000);
     return () => clearInterval(timer);
@@ -212,7 +242,7 @@ export const ServerMonitorTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
               { label: t('Refresh every 10s'), value: 10 },
             ]}
           />
-          <Button size="small" type="primary" icon={<ReloadOutlined />} loading={loading} onClick={fetchMonitor}>
+          <Button size="small" type="primary" icon={<ReloadOutlined />} loading={loading} onClick={() => void fetchMonitor(false)}>
             {t('Refresh Now')}
           </Button>
         </Space>

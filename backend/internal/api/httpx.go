@@ -80,6 +80,8 @@ func (c *Context) ShouldBindJSON(dst any) error {
 		p := c.Request.URL.Path
 		if strings.HasPrefix(p, "/api/auth/") {
 			maxBytes = 512 << 10
+		} else if p == "/api/connections/import" {
+			maxBytes = 2 << 20
 		} else if strings.Contains(p, "/import") {
 			maxBytes = 16 << 20
 		}
@@ -302,6 +304,22 @@ type gzipAPIResponseWriter struct {
 
 func (g *gzipAPIResponseWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }
 
+func appendVaryHeader(h http.Header, token string) {
+	existing := h.Values("Vary")
+	for _, line := range existing {
+		for _, part := range strings.Split(line, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), token) {
+				return
+			}
+		}
+	}
+	if len(existing) == 0 {
+		h.Set("Vary", token)
+	} else {
+		h.Set("Vary", strings.Join(existing, ", ")+", "+token)
+	}
+}
+
 func (g *gzipAPIResponseWriter) WriteHeader(code int) {
 	if g.wroteHeader {
 		return
@@ -313,7 +331,7 @@ func (g *gzipAPIResponseWriter) WriteHeader(code int) {
 	}
 	g.Header().Del("Content-Length")
 	g.Header().Set("Content-Encoding", "gzip")
-	g.Header().Set("Vary", "Accept-Encoding")
+	appendVaryHeader(g.Header(), "Accept-Encoding")
 	g.ResponseWriter.WriteHeader(code)
 }
 

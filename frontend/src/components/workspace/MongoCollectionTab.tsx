@@ -394,7 +394,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
   }, [docs, canMutateDocs, t]);
 
   return (
-    <div style={{ padding: isMobile ? 6 : 12, height: '100%', minWidth: 0, minHeight: 0, overflowY: 'auto' }}>
+    <div style={{ padding: isMobile ? 6 : 12, height: '100%', minWidth: 0, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}>
       {(isView || isTimeSeries || collMeta?.capped) && (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 }}>
           {isView && (
@@ -645,8 +645,14 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                             border: '1px solid rgba(128,128,128,0.22)',
                           }}
                         >
-                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, flexWrap: 'wrap', gap: 6 }}>
-                            <Tag color="green">_id: {idStr}</Tag>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, flexWrap: 'wrap', gap: 6, minWidth: 0 }}>
+                            <Tag
+                              color="green"
+                              title={idStr}
+                              style={{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                            >
+                              _id: {idStr}
+                            </Tag>
                             <Space size={4}>
                               <Button
                                 size="small"
@@ -1148,6 +1154,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
         <Form
           form={idxForm}
           layout="vertical"
+          autoComplete="off"
           initialValues={{ keysJson: '{"createdAt": -1}', unique: false, sparse: false }}
         >
           <Form.Item name="name" label={t('Index Name (Optional)')}>

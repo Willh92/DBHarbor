@@ -1069,7 +1069,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
     }
   };
 
-  const handleCommitChanges = async (includeDeletes = false) => {
+  const handleCommitChanges = async (includeDeletes = false): Promise<boolean> => {
     setSaving(true);
     try {
       const payload = buildMutationPayload();
@@ -1086,8 +1086,10 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
       );
       setPreviewModalOpen(false);
       await loadData(page, pageSize, appliedFilter, sortSpec);
+      return true;
     } catch (err: any) {
       message.error(err.message);
+      return false;
     } finally {
       setSaving(false);
     }
@@ -3013,8 +3015,10 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                   icon={<CheckOutlined />}
                   loading={saving}
                   onClick={async () => {
-                    await handleCommitChanges(false);
-                    setInspectRow(null);
+                    const ok = await handleCommitChanges(false);
+                    if (ok) {
+                      setInspectRow(null);
+                    }
                   }}
                 >
                   {t('Save Changes')}

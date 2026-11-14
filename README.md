@@ -3,7 +3,7 @@
 **Language**: **English** | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | [日本語](./README.ja.md)
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.3-1677ff.svg)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-v1.0.4-1677ff.svg)](./CHANGELOG.md)
 [![CGO_ENABLED=0](https://img.shields.io/badge/Go-CGO__ENABLED%3D0-00ADD8.svg)](https://github.com/Willh92/DBHarbor.git)
 
 A zero-dependency, single-binary cross-platform Web Database Workbench combining **phpMyAdmin's intuitive visual table & data operations** with **modern multi-engine IDE power**.

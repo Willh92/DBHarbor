@@ -41,7 +41,7 @@ import { useWorkbenchStore } from '../store/useWorkbenchStore';
 import type { LoginBrandingConfig, LoginIconMode } from '../types';
 
 function evalSetupPasswordStrength(pwd: string): { percent: number; label: string; color: string } {
-  if (!pwd) return { percent: 0, label: 'Empty', color: '#d9d9d9' };
+  if (!pwd) return { percent: 0, label: 'Empty', color: 'rgba(140, 140, 140, 0.85)' };
   let score = 0;
   if (pwd.length >= 8) score += 30;
   if (pwd.length >= 12) score += 20;
@@ -353,20 +353,32 @@ export const LoginPage: React.FC = () => {
   return (
     <div
       style={{
-        minHeight: '100dvh',
+        minHeight: '100vh',
+        height: '100dvh',
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        justifyContent: 'center',
-        padding: isMobile ? '60px 14px 24px' : '32px 24px',
+        paddingTop: isMobile ? 'calc(60px + env(safe-area-inset-top, 0px))' : '32px',
+        paddingRight: isMobile ? 'calc(14px + env(safe-area-inset-right, 0px))' : '24px',
+        paddingBottom: isMobile ? 'calc(24px + env(safe-area-inset-bottom, 0px))' : '32px',
+        paddingLeft: isMobile ? 'calc(14px + env(safe-area-inset-left, 0px))' : '24px',
         position: 'relative',
-        overflow: 'hidden',
+        overflowY: 'auto',
+        overflowX: 'hidden',
+        WebkitOverflowScrolling: 'touch',
         background: darkMode
           ? 'radial-gradient(900px circle at 15% 15%, rgba(37, 99, 235, 0.14) 0%, transparent 55%), radial-gradient(800px circle at 85% 85%, rgba(13, 148, 136, 0.10) 0%, transparent 55%), #090d16'
           : 'radial-gradient(900px circle at 15% 15%, rgba(37, 99, 235, 0.08) 0%, transparent 55%), radial-gradient(800px circle at 85% 85%, rgba(13, 148, 136, 0.06) 0%, transparent 55%), #f4f6fb',
       }}
     >
-      <div style={{ position: 'fixed', top: isMobile ? 12 : 20, right: isMobile ? 12 : 24, zIndex: 10 }}>
+      <div
+        style={{
+          position: 'fixed',
+          top: isMobile ? 'calc(12px + env(safe-area-inset-top, 0px))' : 20,
+          right: isMobile ? 'calc(12px + env(safe-area-inset-right, 0px))' : 24,
+          zIndex: 10,
+        }}
+      >
         <Space size={8}>
           <LanguageSwitcher size="middle" />
           <Button
@@ -383,6 +395,8 @@ export const LoginPage: React.FC = () => {
         style={{
           width: '100%',
           maxWidth: needsSetup ? 476 : 412,
+          margin: 'auto',
+          flexShrink: 0,
           borderRadius: 18,
           border: darkMode ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(15,23,42,0.07)',
           background: darkMode ? 'rgba(17, 24, 39, 0.88)' : 'rgba(255, 255, 255, 0.96)',

@@ -65,6 +65,14 @@ function resolveRelativeChangelogLang(href: string): AppLocale | null {
   return null;
 }
 
+function safeExternalHttpUrl(raw?: string | null, fallback = ''): string {
+  const trimmed = (raw || '').trim();
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+  return fallback;
+}
+
 /** Lightweight zero-dependency Markdown renderer tailored for CHANGELOG.md & GitHub Release Notes */
 const SimpleMarkdownView: React.FC<{
   markdown: string;
@@ -312,7 +320,12 @@ export const VersionUpdateModal: React.FC<Props> = ({
   }, [open, locale]);
 
   const srcBadge = SOURCE_LABELS[checkData?.changelogSource || 'embedded'] || SOURCE_LABELS.embedded;
-  const repoUrl = checkData?.repoUrl || buildInfo?.repoUrl || 'https://github.com/Willh92/DBHarbor';
+  const repoUrl = safeExternalHttpUrl(
+    checkData?.repoUrl || buildInfo?.repoUrl,
+    'https://github.com/Willh92/DBHarbor'
+  );
+  const safeMatchedAssetUrl = safeExternalHttpUrl(checkData?.matchedAssetUrl);
+  const safeReleaseUrl = safeExternalHttpUrl(checkData?.releaseUrl, `${repoUrl}/releases`);
   const activeMarkdown =
     (checkData?.changelogSource === 'embedded' &&
       (buildInfo?.embeddedChangelogs?.[changelogLang] || lazyChangelogs[changelogLang])) ||
@@ -355,7 +368,7 @@ export const VersionUpdateModal: React.FC<Props> = ({
                 {t('Current Version')}:
               </Typography.Text>
               <Tag color="geekblue" style={{ fontWeight: 700, margin: 0 }}>
-                {checkData?.currentVersion || buildInfo?.displayVersion || 'v1.0.3'}
+                {checkData?.currentVersion || buildInfo?.displayVersion || 'v1.0.4'}
               </Tag>
               {buildInfo?.edition === 'desktop' && (
                 <Tag color="purple" style={{ margin: 0 }}>
@@ -529,19 +542,19 @@ export const VersionUpdateModal: React.FC<Props> = ({
                       : t('Visit GitHub Releases to download the standalone binary for your OS.')}
                   </span>
                   <Space wrap>
-                    {checkData.matchedAssetUrl && (
+                    {safeMatchedAssetUrl && (
                       <Button
                         size="small"
                         type="primary"
                         icon={<CloudDownloadOutlined />}
-                        href={checkData.matchedAssetUrl}
+                        href={safeMatchedAssetUrl}
                         target="_blank"
                         rel="noreferrer"
                       >
                         {t('Download for Current OS ({name})', { name: checkData.matchedAssetName || '' })}
                       </Button>
                     )}
-                    <Button size="small" href={checkData.releaseUrl} target="_blank" rel="noreferrer">
+                    <Button size="small" href={safeReleaseUrl} target="_blank" rel="noreferrer">
                       {t('Release Details')}
                     </Button>
                     {skippedVer === checkData.latestVersion ? (
@@ -705,7 +718,11 @@ export const VersionUpdateModal: React.FC<Props> = ({
                           </Space>
                         }
                         extra={
-                          <Typography.Link href={rel.htmlUrl} target="_blank" rel="noreferrer">
+                          <Typography.Link
+                            href={safeExternalHttpUrl(rel.htmlUrl, `${repoUrl}/releases`)}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
                             {t('View on GitHub')}
                           </Typography.Link>
                         }
@@ -720,18 +737,20 @@ export const VersionUpdateModal: React.FC<Props> = ({
                             }}
                           >
                             <Space size={[6, 6]} wrap>
-                              {rel.assets.map((a) => (
-                                <Button
-                                  key={a.name}
-                                  size="small"
-                                  icon={<CloudDownloadOutlined />}
-                                  href={a.downloadUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                >
-                                  {a.name} ({formatBytes(a.size)})
-                                </Button>
-                              ))}
+                              {rel.assets
+                                .filter((a) => Boolean(safeExternalHttpUrl(a.downloadUrl)))
+                                .map((a) => (
+                                  <Button
+                                    key={a.name}
+                                    size="small"
+                                    icon={<CloudDownloadOutlined />}
+                                    href={safeExternalHttpUrl(a.downloadUrl)}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    {a.name} ({formatBytes(a.size)})
+                                  </Button>
+                                ))}
                             </Space>
                           </div>
                         )}

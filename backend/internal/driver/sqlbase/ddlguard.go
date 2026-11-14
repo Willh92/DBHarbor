@@ -1,10 +1,31 @@
 package sqlbase
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 )
+
+type restrictedWebCtxKey struct{}
+
+// WithRestrictedWebContext marks ctx as originating from a non-administrator user in restricted Web mode,
+// ensuring even admin-created shared connections enforce engine/filesystem/network SQL sandboxes.
+func WithRestrictedWebContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, restrictedWebCtxKey{}, true)
+}
+
+// IsRestrictedWebContext reports whether ctx carries the restricted Web sandbox marker.
+func IsRestrictedWebContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(restrictedWebCtxKey{}).(bool)
+	return v
+}
 
 var forbiddenClickHouseExternalEnginesAndFuncs = map[string]struct{}{
 	"URL":               {},
@@ -342,6 +363,12 @@ func ValidateDuckDBRestrictedWebSQL(script string) error {
 	return nil
 }
 
+// HasSQLDotCommandOutsideQuotes reports whether s contains a CLI dot-command (e.g. .shell, .read)
+// at the start of any line outside SQL single/double-quoted literals and SQL comments.
+func HasSQLDotCommandOutsideQuotes(s string) bool {
+	return hasSQLDotCommandOutsideQuotes(s)
+}
+
 func hasSQLDotCommandOutsideQuotes(s string) bool {
 	trimmed := strings.TrimLeft(s, " \t\r\n")
 	if strings.HasPrefix(trimmed, ".") {
@@ -366,8 +393,20 @@ func hasSQLDotCommandOutsideQuotes(s string) bool {
 			if c == '*' && i+1 < n && s[i+1] == '/' {
 				inBlockComment = false
 				i++
-			} else if c == '\n' {
+				continue
+			}
+			if c == '\n' || c == '\r' {
 				atLineStart = true
+				continue
+			}
+			if atLineStart {
+				if c == ' ' || c == '\t' {
+					continue
+				}
+				if c == '.' {
+					return true
+				}
+				atLineStart = false
 			}
 			continue
 		}

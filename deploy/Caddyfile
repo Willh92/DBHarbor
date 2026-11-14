@@ -13,7 +13,8 @@ db.example.com {
         header_up X-Real-IP {remote_host}
     }
 
-    # Option B: Reverse proxy via Local TCP (uncomment if using -host 127.0.0.1 -port 8787)
+    # Option B: Reverse proxy via Local TCP (uncomment if using -host 127.0.0.1 -port 8787;
+    # remember to set DBHARBOR_TRUSTED_PROXIES=127.0.0.1/32,::1/128 or security.trustedProxies in config.json)
     # reverse_proxy 127.0.0.1:8787 {
     #     flush_interval -1
     #     header_up X-Real-IP {remote_host}

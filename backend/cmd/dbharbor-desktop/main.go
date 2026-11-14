@@ -74,7 +74,7 @@ func main() {
 	if absDir, err := filepath.Abs(dataDir); err == nil {
 		dataDir = absDir
 	}
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		desktop.ShowErrorDialog("DBHarbor Data Directory Error", fmt.Sprintf("Failed to prepare application data directory (%s):\n%v", dataDir, err))
 		os.Exit(1)
 	}

@@ -4,6 +4,24 @@
 
 DBHarbor 的所有重要變更皆記錄於本檔案，並與 GitHub 專案 [Willh92/DBHarbor](https://github.com/Willh92/DBHarbor.git) 同步。
 
+## [v1.0.4] - 2026-11-14
+
+### 全量 CodeQL 零告警與供應鏈強化、14 引擎並行/方言深度修正、深色模式防閃白與手機/Safari 相容性打磨
+- **供應鏈安全、本機 CodeQL 全量清零與部署腳本強化**：
+  - **GitHub Actions 與建置工具鏈**：將 `release.yml` 與 `preview.yml` 中所有第三方 Action 鎖定為不可變 40 字元 Commit SHA；於 `scripts/setup-toolchain.mjs` 新增 Go 官方壓縮檔 SHA-256 完整性驗證與日誌注入清理；消除 `scripts/build.mjs` 中的檔案系統 TOCTOU 競爭條件告警。
+  - **容器與系統服務安裝腳本**：強化 `Dockerfile` 目錄權限（`/app` 與執行檔歸屬 `root:root` `0755` 唯讀，僅 `/app/data` 授權 `dbharbor:dbharbor` `0700`）；收緊 `scripts/install-service.ps1` 與 `scripts/install-service.sh` 的目錄 ACL 及 `systemd` / `launchd` / `OpenRC` 跳脫處理；於 `deploy/*` 反向代理範本補齊 `DBHARBOR_TRUSTED_PROXIES` 說明。
+- **後端驗證、權限邊界、金鑰庫與桌面版跨連接埠隔離強化**：
+  - **主金鑰保護、防暴力破解計數與原子級 2FA 防重送**：`.master.key` 僅於檔案不存在（`os.ErrNotExist`）時以 `O_CREATE|O_EXCL` 建立，防止損毀或異常金鑰檔遭靜默覆寫；`LoginProtector.RecordSuccess` 改為僅依目前 `(ip, username)` 扣減 IP 失敗次數，阻斷透過自建帳號登入歸零同 IP 暴力破解計數的繞過路徑；`Store.Verify2FA` 改採資料庫單一語句 CAS 原子條件更新，徹底阻斷高並行下同一組 TOTP 驗證碼或備援碼遭重複使用。
+  - **全驅動 TLS 降級阻斷與匯入 SSRF 防護**：擴充 `sameEndpointAndSecurity`（`tlsSecurityLevel`）涵蓋 `PostgreSQL`、`KingbaseES`、`MySQL`、`MariaDB`、`TiDB`、`OceanBase`、`ClickHouse`、`SQL Server`、`Redis` 與 `MongoDB`（含 URI 參數），任何 TLS 安全等級下調皆強制重新輸入密碼；連線設定匯入補齊 `URI` SSRF 檢查、`2 MiB` / `500` 筆交易上限與管理員共用連線歸屬保留；共用且不記住密碼連線的 `autocomplete` 快取依工作階段隔離；Gzip 中介層保留上游 `Vary: Origin` 標頭。
+  - **桌面版跨連接埠防護與子程序回收**：桌面版未攜帶啟動票券或有效本機工作階段 Cookie 存取首頁時回傳 `401`（絕不外洩 `desktopToken`），針對僅憑 Cookie 的寫入請求強制驗證精確本機連接埠 `Origin`、`Sec-Fetch-Site` 與 JSON `Content-Type`；修正桌面原生儲存匯出於 `MaxRows <= 0`（無上限）時誤截斷資料的問題；macOS `osascript` 改採 `argv` 傳遞參數，Linux 視窗啟動器補齊子程序 `Wait()` 回收，並統一收緊本機資料目錄 `0700`/`0600` 權限。
+- **14 類資料庫驅動並行、記憶體與沙箱方言深度修正**：
+  - **SQL 基礎層、ClickHouse、Oracle、達夢、SQL Server 與 MySQL**：識別字與字面值格式化自動剔除空位元組；新增綁定單一連線工作階段的 `ApplyMutationsConn`、`StreamExportConn`、`StreamMultiTableExportConn` 與 `BatchImportConn`；修正 `SQL Server` `BrowseData` 於單一連線池上限時與 `COUNT(*)` 死結問題，並將資料異動/匯入/匯出綁定至 `req.Database`；為 `Oracle` 與 `達夢 DM8` 接入受限網路撥號器（阻斷 TNS `REDIRECT` 內網探測）與 `Oracle.KillSession` 嚴格 `SID,SERIAL#` 驗證；全入口串接 `ValidateClickHouseRestrictedWebSQL` 逐句沙箱檢查；非管理員受限 Web 模式禁止 `skip-verify` 與 `TrustServerCertificate=true`。
+  - **DuckDB、SQLite 與 MongoDB**：修正 `--` 與多行 `/* ... */` 註解內的單引號/行首點命令掃描，將 `:memory:` DuckDB 工作階段映射至受管暫存檔（`Close()` 自動清理）並支援單一程序多語句執行以維持工作階段與交易狀態，補齊 DuckDB `jsonl` 與 `markdown` 串流匯出；統一 `MongoDB` `resolveDBName` 預設資料庫解析，以 `bson.D` 保留純量 `_id` 精確比對，並支援分片叢集 `shard:opid` 工作階段終止。
+- **深色模式防閃白、固定欄視覺、手機/Safari 相容性、記憶體與四語系國際化**：
+  - **深色首屏零閃爍與資料表固定欄精修**：新增渲染前同步主題判定（`main.tsx` + `prefers-color-scheme` CSS 備援 + `<meta name="color-scheme" content="light dark" />`），修正深色模式下工作台（`#141414`）與彈窗/抽屜（`#1f1f1f`）固定欄背景透字、Hover 強調、填補列透底、暫存新增列勾選高亮及 `<Select>` 搜尋框自動填入遮罩問題。
+  - **小螢幕手機 (`360px`)、瀏海螢幕安全區與 iOS Safari 輸入修正**：修正 `LoginPage` 於小螢幕或虛擬鍵盤彈出時頂部卡片遭裁切無法捲動的問題（`100dvh` + `margin: auto`）；工作台底部狀態列與行動版抽屜底欄完整支援 `env(safe-area-inset-bottom)`；行動版側邊抽屜與建立資料庫/Schema 視窗改為純 CSS 響應式寬度；iOS Safari 規則排除 Monaco `.ime-input` 並調整 `24px` 緊湊輸入框行高避免文字裁切。
+  - **背景輪詢節能、連線狀態連動與多語系補齊**：瀏覽器分頁隱藏時自動暫停 `ServerMonitorTab` 輪詢並於恢復可見時立即更新；冷啟動還原分頁時略過未解鎖的「不記住密碼」連線；連線編輯或鎖定後自動失效側邊欄物件樹快取；修正 i18n `{var}` 變數替換對 `$` 字元的副作用，並補齊四語系（`en-US`、`zh-CN`、`zh-TW`、`ja-JP`）共 19 項介面翻譯。
+
 ## [v1.0.3] - 2026-11-08
 
 ### 資料庫連線密碼預設不落盤（可選記住與隨時關閉）、CodeQL 與縱深安全強化、深色模式及行動裝置體驗最佳化

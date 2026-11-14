@@ -91,8 +91,8 @@ func (s *Server) handleDesktopSaveExport(c *Context) {
 	if format == "" {
 		format = "sql"
 	}
-	if body.MaxRows <= 0 {
-		body.MaxRows = 100000
+	if body.MaxRows < 0 {
+		body.MaxRows = 0
 	}
 
 	ext := "csv"
@@ -209,6 +209,9 @@ func (s *Server) handleDesktopSaveDocExport(c *Context) {
 	format := strings.ToLower(strings.TrimSpace(body.Format))
 	if format == "" {
 		format = "json"
+	}
+	if body.MaxRows < 0 {
+		body.MaxRows = 0
 	}
 	ext := "json"
 	switch format {

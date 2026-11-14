@@ -48,18 +48,42 @@ func NewVaultFromDataDir(dataDir, rawKeyMaterial string) (*Vault, error) {
 			_ = os.Chmod(keyPath, 0o600)
 		}
 		decoded, decErr := hex.DecodeString(strings.TrimSpace(string(raw)))
-		if decErr == nil && len(decoded) == 32 {
-			return NewVault(decoded)
+		if decErr != nil || len(decoded) != 32 {
+			return nil, fmt.Errorf("invalid or corrupted master key in %s (refusing to overwrite existing key)", keyPath)
 		}
+		return NewVault(decoded)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read master key %s: %w", keyPath, err)
 	}
 
 	key = make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return nil, fmt.Errorf("generate master key: %w", err)
 	}
-	encoded := hex.EncodeToString(key)
-	if err := os.WriteFile(keyPath, []byte(encoded+"\n"), 0o600); err != nil {
-		return nil, fmt.Errorf("write master key: %w", err)
+	encoded := hex.EncodeToString(key) + "\n"
+	f, openErr := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if openErr != nil {
+		if errors.Is(openErr, os.ErrExist) {
+			rawRetry, rErr := os.ReadFile(keyPath)
+			if rErr != nil {
+				return nil, fmt.Errorf("read master key %s: %w", keyPath, rErr)
+			}
+			decoded, decErr := hex.DecodeString(strings.TrimSpace(string(rawRetry)))
+			if decErr != nil || len(decoded) != 32 {
+				return nil, fmt.Errorf("invalid or corrupted master key in %s", keyPath)
+			}
+			return NewVault(decoded)
+		}
+		return nil, fmt.Errorf("create master key %s: %w", keyPath, openErr)
+	}
+	_, writeErr := f.WriteString(encoded)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return nil, fmt.Errorf("write master key: %w", writeErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close master key: %w", closeErr)
 	}
 	if runtime.GOOS != "windows" {
 		_ = os.Chmod(keyPath, 0o600)

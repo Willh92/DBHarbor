@@ -1,7 +1,6 @@
 package clickhouse
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"database/sql"
@@ -574,7 +573,10 @@ func (d *Driver) ApplyRowMutations(ctx context.Context, req driver.RowMutationRe
 	return sqlbase.ApplyMutations(ctx, d.db, sqlbase.DialectClickHouse, req)
 }
 
-func (d *Driver) isRestrictedWeb() bool {
+func (d *Driver) isRestrictedWeb(ctx context.Context) bool {
+	if sqlbase.IsRestrictedWebContext(ctx) {
+		return true
+	}
 	return d.cfg.Option("__web_mode", "") == "1" && d.cfg.Option("__restrict_internal_ip", "") == "1"
 }
 
@@ -607,7 +609,7 @@ func (d *Driver) acquireConnForDB(ctx context.Context, database string) (*sql.Co
 }
 
 func (d *Driver) CreateTable(ctx context.Context, req driver.CreateTableRequest) (string, error) {
-	if d.isRestrictedWeb() {
+	if d.isRestrictedWeb(ctx) {
 		if err := sqlbase.ValidateClickHouseWebEngineClause(req.Engine); err != nil {
 			return "", err
 		}
@@ -616,7 +618,7 @@ func (d *Driver) CreateTable(ctx context.Context, req driver.CreateTableRequest)
 	if err != nil {
 		return "", err
 	}
-	if d.isRestrictedWeb() {
+	if d.isRestrictedWeb(ctx) {
 		if err := sqlbase.ValidateClickHouseRestrictedWebSQL(ddl); err != nil {
 			return ddl, err
 		}
@@ -770,7 +772,7 @@ func (d *Driver) AlterTable(ctx context.Context, req driver.AlterTableRequest) (
 	if err != nil {
 		return nil, err
 	}
-	if d.isRestrictedWeb() {
+	if d.isRestrictedWeb(ctx) {
 		for _, s := range stmts {
 			if err := sqlbase.ValidateClickHouseRestrictedWebSQL(s); err != nil {
 				return stmts, err
@@ -793,7 +795,7 @@ func (d *Driver) ManageObject(ctx context.Context, req driver.ObjectActionReques
 	if err != nil {
 		return err
 	}
-	if d.isRestrictedWeb() {
+	if d.isRestrictedWeb(ctx) {
 		for _, s := range sqls {
 			if err := sqlbase.ValidateClickHouseRestrictedWebSQL(s); err != nil {
 				return err
@@ -809,7 +811,7 @@ func (d *Driver) ManageObject(ctx context.Context, req driver.ObjectActionReques
 }
 
 func (d *Driver) ExecuteSQL(ctx context.Context, database, query string, maxRows int) ([]driver.QueryResult, error) {
-	if d.isRestrictedWeb() {
+	if d.isRestrictedWeb(ctx) {
 		if err := sqlbase.ValidateClickHouseRestrictedWebSQL(query); err != nil {
 			return nil, err
 		}
@@ -826,6 +828,11 @@ func (d *Driver) ExecuteSQL(ctx context.Context, database, query string, maxRows
 }
 
 func (d *Driver) StreamExport(ctx context.Context, req driver.ExportRequest, w io.Writer) error {
+	if d.isRestrictedWeb(ctx) && strings.TrimSpace(req.CustomSQL) != "" {
+		if err := sqlbase.ValidateClickHouseRestrictedWebSQL(req.CustomSQL); err != nil {
+			return err
+		}
+	}
 	if strings.TrimSpace(req.CustomSQL) == "" && (strings.TrimSpace(req.Table) == "" || len(req.Tables) > 0) {
 		names := req.Tables
 		if len(names) == 0 {
@@ -855,21 +862,31 @@ func (d *Driver) StreamExport(ctx context.Context, req driver.ExportRequest, w i
 			ddl = st.DDL
 		}
 	}
+	if strings.TrimSpace(req.CustomSQL) != "" && strings.TrimSpace(req.Database) != "" {
+		conn, release, cErr := d.acquireConnForDB(ctx, req.Database)
+		if cErr != nil {
+			return cErr
+		}
+		defer release()
+		return sqlbase.StreamExportConn(ctx, conn, sqlbase.DialectClickHouse, req, ddl, w)
+	}
 	return sqlbase.StreamExport(ctx, d.db, sqlbase.DialectClickHouse, req, ddl, w)
 }
 
 func (d *Driver) BatchImport(ctx context.Context, req driver.ImportRequest) (driver.ImportResult, error) {
-	if d.isRestrictedWeb() && (strings.TrimSpace(req.Format) == "" || strings.EqualFold(strings.TrimSpace(req.Format), "sql")) && req.Reader != nil {
-		raw, err := io.ReadAll(req.Reader)
-		if err != nil {
-			return driver.ImportResult{}, err
-		}
-		if err := sqlbase.ValidateClickHouseRestrictedWebSQL(string(raw)); err != nil {
-			return driver.ImportResult{}, err
-		}
-		req.Reader = bytes.NewReader(raw)
+	var validator func(string) error
+	if d.isRestrictedWeb(ctx) {
+		validator = sqlbase.ValidateClickHouseRestrictedWebSQL
 	}
-	return sqlbase.BatchImport(ctx, d.db, sqlbase.DialectClickHouse, req)
+	if (strings.TrimSpace(req.Format) == "" || strings.EqualFold(strings.TrimSpace(req.Format), "sql")) && strings.TrimSpace(req.Database) != "" {
+		conn, release, cErr := d.acquireConnForDB(ctx, req.Database)
+		if cErr != nil {
+			return driver.ImportResult{}, cErr
+		}
+		defer release()
+		return sqlbase.BatchImportConn(ctx, conn, sqlbase.DialectClickHouse, req, validator)
+	}
+	return sqlbase.BatchImportConn(ctx, d.db, sqlbase.DialectClickHouse, req, validator)
 }
 
 func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driver.AutocompleteMeta, error) {

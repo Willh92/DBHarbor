@@ -16,7 +16,7 @@ import (
 
 // Build-time overridable metadata via -ldflags.
 var (
-	Version   = "1.0.3"
+	Version   = "1.0.4"
 	Edition   = "server"  // "server" or "desktop"
 	Channel   = "release" // "release" or "preview"
 	GitCommit = "HEAD"
@@ -243,6 +243,8 @@ func (c *Checker) CheckWithLocale(ctx context.Context, force bool, locale string
 	return c.CheckWithOptions(ctx, force, locale, "")
 }
 
+const failedCheckCacheTTL = 30 * time.Second
+
 // CheckWithOptions fetches or returns cached update & localized changelog metadata for the requested channel ("release" or "preview").
 func (c *Checker) CheckWithOptions(ctx context.Context, force bool, locale string, channel string) UpdateCheckResult {
 	localeKey := normalizeLocaleKey(locale)
@@ -251,16 +253,29 @@ func (c *Checker) CheckWithOptions(ctx context.Context, force bool, locale strin
 
 	c.mu.Lock()
 	if !force && c.cached != nil {
-		if entry, ok := c.cached[cacheKey]; ok && time.Since(entry.at) < c.CacheTTL {
-			cp := entry.result
-			cp.FromCache = true
-			c.mu.Unlock()
-			return cp
+		if entry, ok := c.cached[cacheKey]; ok {
+			ttl := c.CacheTTL
+			if !entry.result.OnlineCheckSuccess && ttl > failedCheckCacheTTL {
+				ttl = failedCheckCacheTTL
+			}
+			if time.Since(entry.at) < ttl {
+				cp := entry.result
+				cp.FromCache = true
+				c.mu.Unlock()
+				return cp
+			}
 		}
 	}
 	c.mu.Unlock()
 
-	res := c.fetchOnline(ctx, localeKey, channelKey)
+	baseCtx := context.Background()
+	if ctx != nil {
+		baseCtx = context.WithoutCancel(ctx)
+	}
+	fetchCtx, cancel := context.WithTimeout(baseCtx, 12*time.Second)
+	defer cancel()
+
+	res := c.fetchOnline(fetchCtx, localeKey, channelKey)
 
 	c.mu.Lock()
 	if c.cached == nil {
@@ -704,8 +719,13 @@ func parseFirstVersionHeading(md string) string {
 			continue
 		}
 		rest := strings.TrimSpace(strings.TrimPrefix(line, "## "))
-		rest = strings.TrimPrefix(rest, "[")
-		if idx := strings.IndexAny(rest, "] -"); idx > 0 {
+		if strings.HasPrefix(rest, "[") {
+			if closeIdx := strings.IndexByte(rest, ']'); closeIdx > 1 {
+				rest = rest[1:closeIdx]
+			} else {
+				rest = strings.TrimPrefix(rest, "[")
+			}
+		} else if idx := strings.IndexAny(rest, " \t"); idx > 0 {
 			rest = rest[:idx]
 		}
 		clean := NormalizeTag(rest)
@@ -751,10 +771,81 @@ func CompareSemver(a, b string) int {
 	if aPre != "" && bPre == "" {
 		return -1
 	}
-	if aPre < bPre {
+	if aPre == "" && bPre == "" {
+		return 0
+	}
+	return comparePrereleaseIdentifiers(aPre, bPre)
+}
+
+func isAllDigitsASCII(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func comparePrereleaseIdentifiers(aPre, bPre string) int {
+	aSegs := strings.Split(aPre, ".")
+	bSegs := strings.Split(bPre, ".")
+	minLen := len(aSegs)
+	if len(bSegs) < minLen {
+		minLen = len(bSegs)
+	}
+	for i := 0; i < minLen; i++ {
+		as := aSegs[i]
+		bs := bSegs[i]
+		if as == bs {
+			continue
+		}
+		aNum := isAllDigitsASCII(as)
+		bNum := isAllDigitsASCII(bs)
+		if aNum && bNum {
+			if len(as) != len(bs) {
+				ai, aErr := strconv.ParseUint(as, 10, 64)
+				bi, bErr := strconv.ParseUint(bs, 10, 64)
+				if aErr == nil && bErr == nil {
+					if ai < bi {
+						return -1
+					}
+					if ai > bi {
+						return 1
+					}
+					continue
+				}
+			}
+			ai, _ := strconv.ParseUint(as, 10, 64)
+			bi, _ := strconv.ParseUint(bs, 10, 64)
+			if ai < bi {
+				return -1
+			}
+			if ai > bi {
+				return 1
+			}
+			continue
+		}
+		// Per SemVer 2.0.0 §11.4.1.3: numeric identifiers always have lower precedence than non-numeric identifiers
+		if aNum && !bNum {
+			return -1
+		}
+		if !aNum && bNum {
+			return 1
+		}
+		if as < bs {
+			return -1
+		}
+		if as > bs {
+			return 1
+		}
+	}
+	if len(aSegs) < len(bSegs) {
 		return -1
 	}
-	if aPre > bPre {
+	if len(aSegs) > len(bSegs) {
 		return 1
 	}
 	return 0

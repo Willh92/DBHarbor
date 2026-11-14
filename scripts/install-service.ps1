@@ -64,23 +64,29 @@ if ($AdminUser -and ($AdminUser -notmatch '^[a-zA-Z0-9._@-]{2,64}$')) {
 if ($AdminPass -and ($AdminPass.Length -lt 8)) {
   throw "Invalid -AdminPass: initial admin password must be at least 8 characters."
 }
+if ($HostAddr -notmatch '^[a-zA-Z0-9.:_\-\[\]]+$') {
+  throw "Invalid -HostAddr '$HostAddr': contains disallowed characters."
+}
+if (($Port -lt 1) -or ($Port -gt 65535)) {
+  throw "Invalid -Port '$Port': must be between 1 and 65535."
+}
 
 $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
 $ScriptDir = if ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { (Get-Location).Path }
 
 if ($InstallDir) {
-  $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
+  $InstallDir = [System.IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
   if (-not $DataDir) {
     $DataDir = Join-Path $InstallDir "data"
   }
 } else {
-  $InstallDir = Join-Path $env:ProgramFiles "DBHarbor"
+  $InstallDir = (Join-Path $env:ProgramFiles "DBHarbor").TrimEnd('\')
   if (-not $DataDir) {
     $ProgramDataRoot = if ($env:ProgramData) { $env:ProgramData } else { "C:\ProgramData" }
     $DataDir = Join-Path $ProgramDataRoot "DBHarbor\data"
   }
 }
-$DataDir = [System.IO.Path]::GetFullPath($DataDir)
+$DataDir = [System.IO.Path]::GetFullPath($DataDir).TrimEnd('\')
 
 function Get-ReleaseBaseUrl {
   param([string]$Ref)
@@ -316,17 +322,13 @@ function Get-RegisteredTaskExecutable {
 function Set-DataDirPermissions {
   param(
     [string]$TargetDir,
-    [string]$Account,
-    [string]$Group
+    [string]$Account
   )
-  # Restrict C:\ProgramData\DBHarbor\data to SYSTEM, Administrators, ServiceAccount, and PermissionGroup
+  # Restrict data directory strictly to SYSTEM, Administrators, and ServiceAccount (protecting .master.key & dbharbor.db)
   & icacls $TargetDir /inheritance:r | Out-Null
   & icacls $TargetDir /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" | Out-Null
   if ($Account -and ($Account -ne "SYSTEM") -and ($Account -ne "NT AUTHORITY\SYSTEM")) {
     & icacls $TargetDir /grant:r "${Account}:(OI)(CI)M" | Out-Null
-  }
-  if ($Group -and ($Group -ne "Administrators") -and ($Group -ne "BUILTIN\Administrators")) {
-    & icacls $TargetDir /grant:r "${Group}:(OI)(CI)RX" | Out-Null
   }
 }
 
@@ -419,9 +421,13 @@ try {
       if ($ServiceAccount -and ($ServiceAccount -ne "SYSTEM") -and ($ServiceAccount -ne "NT AUTHORITY\SYSTEM")) {
         & icacls $InstallDir /grant "${ServiceAccount}:(OI)(CI)RX" | Out-Null
       }
-      Set-DataDirPermissions -TargetDir $DataDir -Account $ServiceAccount -Group $PermissionGroup
+      if ($PermissionGroup -and ($PermissionGroup -ne "Administrators") -and ($PermissionGroup -ne "BUILTIN\Administrators")) {
+        & icacls $InstallDir /grant "${PermissionGroup}:(OI)(CI)RX" | Out-Null
+      }
+      Set-DataDirPermissions -TargetDir $DataDir -Account $ServiceAccount
 
-      $ArgsStr = "-host $HostAddr -port $Port -data-dir `"$DataDir`""
+      $SafeDataDir = $DataDir.TrimEnd('\')
+      $ArgsStr = "-host `"$HostAddr`" -port $Port -data-dir `"$SafeDataDir`""
       $TaskAction = New-ScheduledTaskAction -Execute $DestBin -Argument $ArgsStr -WorkingDirectory $InstallDir
       $TaskTrigger = New-ScheduledTaskTrigger -AtStartup
       $TaskSettings = New-ScheduledTaskSettingsSet `

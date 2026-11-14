@@ -115,7 +115,10 @@ func New(cfg driver.ConnectionConfig, variantType, productName string, defaultPo
 	mc.MultiStatements = false
 	mc.InterpolateParams = true
 	mc.Params = map[string]string{"charset": "utf8mb4"}
-	if tlsMode := cfg.Option("tls", "false"); tlsMode != "false" && tlsMode != "" {
+	if tlsMode := strings.TrimSpace(cfg.Option("tls", "false")); tlsMode != "false" && tlsMode != "" {
+		if restrictIP && strings.EqualFold(tlsMode, "skip-verify") {
+			return nil, errors.New("TLS skip-verify is not permitted for restricted non-admin connections")
+		}
 		mc.TLSConfig = tlsMode
 	}
 
@@ -735,34 +738,25 @@ func (d *Driver) StreamExport(ctx context.Context, req driver.ExportRequest, w i
 			ddl = st.DDL
 		}
 	}
+	if strings.TrimSpace(req.CustomSQL) != "" && strings.TrimSpace(req.Database) != "" {
+		conn, cleanup, err := d.acquireConnForDB(ctx, req.Database)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		return sqlbase.StreamExportConn(ctx, conn, sqlbase.DialectMySQL, req, ddl, w)
+	}
 	return sqlbase.StreamExport(ctx, d.db, sqlbase.DialectMySQL, req, ddl, w)
 }
 
 func (d *Driver) BatchImport(ctx context.Context, req driver.ImportRequest) (driver.ImportResult, error) {
-	if strings.EqualFold(req.Format, "sql") && strings.TrimSpace(req.Database) != "" {
+	if (strings.TrimSpace(req.Format) == "" || strings.EqualFold(req.Format, "sql")) && strings.TrimSpace(req.Database) != "" {
 		conn, cleanup, err := d.acquireConnForDB(ctx, req.Database)
 		if err != nil {
 			return driver.ImportResult{}, err
 		}
 		defer cleanup()
-		start := time.Now()
-		res := driver.ImportResult{}
-		sErr := sqlbase.StreamStatements(req.Reader, func(stmt string) error {
-			if _, execErr := conn.ExecContext(ctx, stmt); execErr != nil {
-				if req.ContinueOnError {
-					res.FailedCount++
-					if len(res.Warnings) < 20 {
-						res.Warnings = append(res.Warnings, execErr.Error())
-					}
-					return nil
-				}
-				return execErr
-			}
-			res.ImportedRows++
-			return nil
-		})
-		res.ElapsedMs = time.Since(start).Milliseconds()
-		return res, sErr
+		return sqlbase.BatchImportConn(ctx, conn, sqlbase.DialectMySQL, req, nil)
 	}
 	return sqlbase.BatchImport(ctx, d.db, sqlbase.DialectMySQL, req)
 }

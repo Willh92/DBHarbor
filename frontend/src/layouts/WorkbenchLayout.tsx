@@ -1499,7 +1499,7 @@ export const WorkbenchLayout: React.FC = () => {
                   top: 0,
                   bottom: 0,
                   left: 0,
-                  width: Math.min(296, Math.max(232, window.innerWidth - 44)),
+                  width: 'min(296px, max(232px, calc(100vw - 44px)))',
                   zIndex: 55,
                   overflow: 'hidden',
                   background: darkMode ? '#111318' : '#fafafa',
@@ -2093,8 +2093,10 @@ export const WorkbenchLayout: React.FC = () => {
       <footer
         className="workbench-bottom-footer"
         style={{
-          height: isMobile ? 24 : 26,
-          padding: isMobile ? '0 10px' : '0 14px',
+          minHeight: isMobile ? 24 : 26,
+          height: `calc(${isMobile ? 24 : 26}px + env(safe-area-inset-bottom, 0px))`,
+          paddingInline: isMobile ? 10 : 14,
+          paddingBottom: 'env(safe-area-inset-bottom, 0px)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
@@ -2213,7 +2215,10 @@ export const WorkbenchLayout: React.FC = () => {
             open={connModalOpen}
             editing={editingConn}
             onClose={() => setConnModalOpen(false)}
-            onSaved={reloadConnections}
+            onSaved={async () => {
+              await reloadConnections();
+              bumpTreeRefresh();
+            }}
             onOpenEphemeral={canOpenEphemeralWeb ? handleTriggerOpenLocalDB : undefined}
           />
         )}

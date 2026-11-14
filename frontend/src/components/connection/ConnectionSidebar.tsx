@@ -338,6 +338,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
   }, [requestedConnId, connections, drivers.length]);
 
   const prevConnIdsRef = useRef<Set<string>>(new Set());
+  const prevConnSigsRef = useRef<Map<string, string>>(new Map());
   useEffect(() => {
     const currentIds = new Set(connections.map((c) => c.id));
     const removedIds: string[] = [];
@@ -348,9 +349,30 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
     });
     prevConnIdsRef.current = currentIds;
 
+    const nextSigs = new Map<string, string>();
+    for (const c of connections) {
+      const sig = `${c.type}|${c.host}|${c.port}|${c.username}|${c.database}|${c.filePath}|${c.hasUri ? '1' : '0'}|${c.rememberPassword ? '1' : '0'}|${c.unlocked ? '1' : '0'}|${c.updatedAt || ''}|${JSON.stringify(c.options || {})}`;
+      nextSigs.set(c.id, sig);
+      const prevSig = prevConnSigsRef.current.get(c.id);
+      if (prevSig !== undefined && prevSig !== sig) {
+        invalidateConnCache(c.id);
+        if (c.rememberPassword === false && !c.unlocked && activeConnId === c.id) {
+          setActiveConnId('');
+          setDatabases([]);
+          setSelectedDB('');
+          setSchemas([]);
+          setSelectedSchema('');
+          setSchemaObjects(EMPTY_SCHEMA_OBJECTS);
+          setCollections([]);
+        }
+      }
+    }
+    prevConnSigsRef.current = nextSigs;
+
     if (removedIds.length > 0) {
       for (const removedId of removedIds) {
         invalidateConnCache(removedId);
+        prevConnSigsRef.current.delete(removedId);
         void removeEphemeralFileHandle(removedId);
       }
       const hasRemovedPrefix = (key: string) => removedIds.some((id) => key.startsWith(`${id}::`));
@@ -705,14 +727,17 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
     try {
       await api.disconnectConnection(conn.id);
       invalidateConnCache(conn.id);
-      if (conn.rememberPassword === false && activeConnId === conn.id) {
-        setActiveConnId('');
-        setDatabases([]);
-        setSelectedDB('');
-        setSchemas([]);
-        setSelectedSchema('');
-        setSchemaObjects(EMPTY_SCHEMA_OBJECTS);
-        setCollections([]);
+      if (conn.rememberPassword === false) {
+        closeConnectionTabs(conn.id);
+        if (activeConnId === conn.id) {
+          setActiveConnId('');
+          setDatabases([]);
+          setSelectedDB('');
+          setSchemas([]);
+          setSelectedSchema('');
+          setSchemaObjects(EMPTY_SCHEMA_OBJECTS);
+          setCollections([]);
+        }
       }
       await reloadConnections();
       message.success(t('Connection pool released'));
@@ -2542,6 +2567,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
       <Modal
         open={newDBModalOpen}
         title={t('Create Database')}
+        width="min(480px, calc(100vw - 24px))"
         onCancel={() => setNewDBModalOpen(false)}
         onOk={handleCreateDB}
         okText={t('Create Now')}
@@ -2559,6 +2585,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
       <Modal
         open={dropDBModalOpen}
         title={t('Drop Database')}
+        width="min(480px, calc(100vw - 24px))"
         onCancel={() => setDropDBModalOpen(false)}
         onOk={handleDropDB}
         okText={t('Drop Database')}
@@ -2588,6 +2615,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
       <Modal
         open={newSchemaModalOpen}
         title={t('Create Schema')}
+        width="min(480px, calc(100vw - 24px))"
         onCancel={() => setNewSchemaModalOpen(false)}
         onOk={handleCreateSchema}
         okText={t('Create Now')}
@@ -2605,6 +2633,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
       <Modal
         open={dropSchemaModalOpen}
         title={t('Drop Schema')}
+        width="min(480px, calc(100vw - 24px))"
         onCancel={() => setDropSchemaModalOpen(false)}
         onOk={handleDropSchema}
         okText={t('Drop Schema')}

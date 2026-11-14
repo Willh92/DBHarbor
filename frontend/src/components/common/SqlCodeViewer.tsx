@@ -1,4 +1,5 @@
 import React, { useMemo } from 'react';
+import { useWorkbenchStore } from '../../store/useWorkbenchStore';
 
 interface SqlCodeViewerProps {
   code: string;
@@ -96,7 +97,9 @@ function highlightLine(line: string, darkMode: boolean): React.ReactNode[] {
   return nodes;
 }
 
-export const SqlCodeViewer: React.FC<SqlCodeViewerProps> = ({ code, darkMode = false, height = '100%' }) => {
+export const SqlCodeViewer: React.FC<SqlCodeViewerProps> = ({ code, darkMode: darkModeProp, height = '100%' }) => {
+  const storeDarkMode = useWorkbenchStore((s) => s.darkMode);
+  const darkMode = darkModeProp ?? storeDarkMode;
   const renderedLines = useMemo(() => {
     const lines = (code || '-- DDL').split('\n');
     return lines.map((ln, idx) => ({

@@ -6,7 +6,7 @@ Security updates are provided for the latest minor release series on the `releas
 
 | Version | Supported | Notes |
 | :--- | :---: | :--- |
-| `1.0.x` (Latest: `v1.0.3`) | ✅ | Active security patches and hardening updates |
+| `1.0.x` (Latest: `v1.0.4`) | ✅ | Active security patches and hardening updates |
 | `preview` channel | ✅ | Rolling pre-release builds tracking `main` / `preview` |
 | `< 1.0.0` | ❌ | Pre-GA versions; please upgrade to the latest `1.0.x` release |
 

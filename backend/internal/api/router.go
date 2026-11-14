@@ -443,6 +443,16 @@ func (srv *Server) buildHandler() http.Handler {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		if srv.desktop.Enabled && srv.desktop.SessionCookieSecret != "" && !srv.hasValidDesktopCookie(r) {
+			cleanPath := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+			if cleanPath != "" && cleanPath != "." && cleanPath != "index.html" {
+				if tryServeEmbeddedAsset(w, r, distFS, assetETags, cleanPath) {
+					return
+				}
+			}
+			(&Context{Writer: w, Request: r}).JSON(http.StatusUnauthorized, H{"error": "Unauthorized local desktop session"})
+			return
+		}
 		serveSPA(w, r, distFS, assetETags, desktopIndexHTML, desktopIndexETag)
 	})
 
@@ -476,6 +486,58 @@ func (s *Server) resolveWebPrincipal(ctx *Context, claims *auth.Claims) (store.U
 	return p, true
 }
 
+func (s *Server) hasValidDesktopCookie(r *http.Request) bool {
+	if s.desktop.SessionCookieSecret == "" {
+		return true
+	}
+	if portCookieName := s.desktop.portScopedCookieName(); portCookieName != desktopSessionCookieName {
+		if ck, err := r.Cookie(portCookieName); err == nil {
+			if subtle.ConstantTimeCompare([]byte(ck.Value), []byte(s.desktop.SessionCookieSecret)) == 1 {
+				return true
+			}
+		}
+	}
+	if ck, err := r.Cookie(desktopSessionCookieName); err == nil {
+		if subtle.ConstantTimeCompare([]byte(ck.Value), []byte(s.desktop.SessionCookieSecret)) == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) validateDesktopCookieStateChange(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
+		return false
+	}
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		allowed := false
+		if s.desktop.ListenPort > 0 {
+			o1 := fmt.Sprintf("http://127.0.0.1:%d", s.desktop.ListenPort)
+			o2 := fmt.Sprintf("http://localhost:%d", s.desktop.ListenPort)
+			allowed = strings.EqualFold(origin, o1) || strings.EqualFold(origin, o2)
+		} else if host := strings.TrimSpace(r.Host); host != "" {
+			lowHost := strings.ToLower(host)
+			if strings.HasPrefix(lowHost, "127.0.0.1") || strings.HasPrefix(lowHost, "localhost") {
+				allowed = strings.EqualFold(origin, "http://"+host)
+			}
+		}
+		if !allowed {
+			return false
+		}
+	}
+	if r.ContentLength != 0 && (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch) {
+		ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+		if strings.HasPrefix(ct, "text/plain") || strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) authenticateRequest(w http.ResponseWriter, r *http.Request) (*auth.Claims, store.UserPrincipal, bool) {
 	ctx := &Context{Writer: w, Request: r, TrustedProxies: s.trustedNets}
 
@@ -489,17 +551,12 @@ func (s *Server) authenticateRequest(w http.ResponseWriter, r *http.Request) (*a
 				return &auth.Claims{UserID: "local", Username: "local"}, localP, true
 			}
 		}
-		if portCookieName := s.desktop.portScopedCookieName(); portCookieName != desktopSessionCookieName {
-			if ck, err := r.Cookie(portCookieName); err == nil {
-				if subtle.ConstantTimeCompare([]byte(ck.Value), []byte(s.desktop.SessionCookieSecret)) == 1 {
-					return &auth.Claims{UserID: "local", Username: "local"}, localP, true
-				}
+		if s.hasValidDesktopCookie(r) {
+			if !s.validateDesktopCookieStateChange(r) {
+				ctx.JSON(http.StatusForbidden, H{"error": "Cross-origin or untrusted local desktop request blocked"})
+				return nil, store.UserPrincipal{}, false
 			}
-		}
-		if ck, err := r.Cookie(desktopSessionCookieName); err == nil {
-			if subtle.ConstantTimeCompare([]byte(ck.Value), []byte(s.desktop.SessionCookieSecret)) == 1 {
-				return &auth.Claims{UserID: "local", Username: "local"}, localP, true
-			}
+			return &auth.Claims{UserID: "local", Username: "local"}, localP, true
 		}
 		ctx.JSON(http.StatusUnauthorized, H{"error": "Unauthorized local desktop session"})
 		return nil, store.UserPrincipal{}, false

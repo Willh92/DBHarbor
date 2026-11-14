@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -12,6 +13,14 @@ import (
 	"dbharbor/backend/internal/driver/sqlmeta"
 	"dbharbor/backend/internal/store"
 )
+
+func (s *Server) requestExecContext(c *Context) context.Context {
+	ctx := c.Request.Context()
+	if !s.desktop.Enabled && !c.IsAdmin() && !s.opts.AllowPrivateNetForNonAdmin {
+		ctx = sqlbase.WithRestrictedWebContext(ctx)
+	}
+	return ctx
+}
 
 const autocompleteCacheTTL = 20 * time.Second
 
@@ -297,7 +306,7 @@ func (s *Server) handleCreateTable(c *Context) {
 		}
 	}
 	start := time.Now()
-	ddl, err := sqlDrv.CreateTable(c.Request.Context(), req)
+	ddl, err := sqlDrv.CreateTable(s.requestExecContext(c), req)
 	if err != nil {
 		s.respondConnErrorWithFields(c, cfg.ID, cfg.Type, err, H{"ddl": ddl})
 		return
@@ -333,7 +342,7 @@ func (s *Server) handleAlterTable(c *Context) {
 		}
 	}
 	start := time.Now()
-	stmts, err := sqlDrv.AlterTable(c.Request.Context(), req)
+	stmts, err := sqlDrv.AlterTable(s.requestExecContext(c), req)
 	if err != nil {
 		s.respondConnErrorWithFields(c, cfg.ID, cfg.Type, err, H{"sqls": stmts})
 		return
@@ -364,7 +373,7 @@ func (s *Server) handleObjectAction(c *Context) {
 	req.AllowPrivIP = s.desktop.Enabled || c.Principal.Role == store.RoleAdmin || s.opts.AllowPrivateNetForNonAdmin
 
 	start := time.Now()
-	sqls, err := sqlmeta.ExecuteObjectAction(c.Request.Context(), cfg.Type, sqlDrv, req)
+	sqls, err := sqlmeta.ExecuteObjectAction(s.requestExecContext(c), cfg.Type, sqlDrv, req)
 	if err != nil {
 		s.respondConnErrorWithFields(c, cfg.ID, cfg.Type, err, H{"sqls": sqls})
 		return
@@ -556,7 +565,7 @@ func (s *Server) handleExecuteQuery(c *Context) {
 		req.MaxRows = 5000
 	}
 	start := time.Now()
-	results, err := sqlDrv.ExecuteSQL(c.Request.Context(), req.Database, req.Query, req.MaxRows)
+	results, err := sqlDrv.ExecuteSQL(s.requestExecContext(c), req.Database, req.Query, req.MaxRows)
 	elapsed := time.Since(start).Milliseconds()
 
 	for _, r := range results {
@@ -599,6 +608,9 @@ func (s *Server) handleAutocomplete(c *Context) {
 	dbName := c.Query("database")
 	force := c.Query("force") == "true" || c.Query("force") == "1"
 	cacheKey := cfg.ID + "|" + dbName
+	if !s.desktop.Enabled && !cfg.ShouldRememberPassword() {
+		cacheKey = cfg.ID + "|" + s.credSessionKey(c) + "|" + dbName
+	}
 
 	if !force {
 		s.metaCacheMu.RLock()
@@ -730,7 +742,7 @@ func (s *Server) handleExport(c *Context) {
 		contentType: contentType,
 		disposition: fmt.Sprintf("attachment; filename=%q", filename),
 	}
-	if err := sqlDrv.StreamExport(c.Request.Context(), req, dw); err != nil {
+	if err := sqlDrv.StreamExport(s.requestExecContext(c), req, dw); err != nil {
 		if !dw.wroteHeader {
 			s.respondConnError(c, cfg.ID, cfg.Type, err)
 			return
@@ -783,7 +795,7 @@ func (s *Server) handleImport(c *Context) {
 
 	database := fieldOrQuery("database")
 	table := fieldOrQuery("table")
-	res, err := sqlDrv.BatchImport(c.Request.Context(), driver.ImportRequest{
+	res, err := sqlDrv.BatchImport(s.requestExecContext(c), driver.ImportRequest{
 		Database:        database,
 		Schema:          fieldOrQuery("schema"),
 		Table:           table,
@@ -833,7 +845,7 @@ func (s *Server) handleImportSQLText(c *Context) {
 		}
 	}
 
-	res, err := sqlDrv.BatchImport(c.Request.Context(), driver.ImportRequest{
+	res, err := sqlDrv.BatchImport(s.requestExecContext(c), driver.ImportRequest{
 		Database:        req.Database,
 		Schema:          req.Schema,
 		Format:          "sql",

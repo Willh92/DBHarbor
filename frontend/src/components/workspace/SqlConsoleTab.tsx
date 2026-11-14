@@ -627,32 +627,44 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
   const openHistory = async () => {
     setDrawerSearch('');
     setDrawerMode('history');
-    const list = await api.listHistory(tab.connectionId);
-    setHistoryList(list);
+    try {
+      const list = await api.listHistory(tab.connectionId);
+      setHistoryList(list);
+    } catch (err: any) {
+      message.error(err.message);
+    }
   };
 
   const openSnippets = async () => {
     setDrawerSearch('');
     setDrawerMode('snippets');
-    const list = await api.listSnippets();
-    setSnippets(list);
+    try {
+      const list = await api.listSnippets();
+      setSnippets(list);
+    } catch (err: any) {
+      message.error(err.message);
+    }
   };
 
   const handleSaveSnippet = async () => {
     if (!snippetTitle.trim()) return;
     const cur = editorRef.current ? editorRef.current.getValue() : sqlText;
-    await api.saveSnippet({
-      title: snippetTitle.trim(),
-      dbType: tab.dbType,
-      connectionId: tab.connectionId,
-      database: currentDB,
-      sql: cur,
-      isShared: !isDesktop && snippetShared,
-    });
-    message.success(t('Saved to SQL snippets'));
-    setSaveModalOpen(false);
-    setSnippetTitle('');
-    setSnippetShared(false);
+    try {
+      await api.saveSnippet({
+        title: snippetTitle.trim(),
+        dbType: tab.dbType,
+        connectionId: tab.connectionId,
+        database: currentDB,
+        sql: cur,
+        isShared: !isDesktop && snippetShared,
+      });
+      message.success(t('Saved to SQL snippets'));
+      setSaveModalOpen(false);
+      setSnippetTitle('');
+      setSnippetShared(false);
+    } catch (err: any) {
+      message.error(err.message);
+    }
   };
 
   const tbl = tab.table || firstTableHint || 'table_name';
@@ -1189,9 +1201,13 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
             <Popconfirm
               title={t('Clear execution history for this connection?')}
               onConfirm={async () => {
-                await api.clearHistory(tab.connectionId);
-                setHistoryList([]);
-                message.success(t('Execution history cleared'));
+                try {
+                  await api.clearHistory(tab.connectionId);
+                  setHistoryList([]);
+                  message.success(t('Execution history cleared'));
+                } catch (err: any) {
+                  message.error(err.message);
+                }
               }}
             >
               <Button size="small" danger icon={<ClearOutlined />}>
@@ -1294,8 +1310,12 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
                         icon={<DeleteOutlined />}
                         onClick={async () => {
                           if (sn.id) {
-                            await api.deleteSnippet(sn.id);
-                            openSnippets();
+                            try {
+                              await api.deleteSnippet(sn.id);
+                              await openSnippets();
+                            } catch (err: any) {
+                              message.error(err.message);
+                            }
                           }
                         }}
                       />

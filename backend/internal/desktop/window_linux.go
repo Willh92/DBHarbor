@@ -155,7 +155,22 @@ func SaveFileDialog(defaultFilename string) (string, bool, error) {
 		return chosen, false, nil
 	}
 
-	return defaultPath, false, nil
+	return uniqueFallbackSavePath(defaultPath), false, nil
+}
+
+func uniqueFallbackSavePath(candidate string) string {
+	if _, err := os.Stat(candidate); os.IsNotExist(err) {
+		return candidate
+	}
+	ext := filepath.Ext(candidate)
+	stem := strings.TrimSuffix(candidate, ext)
+	for i := 1; i <= 999; i++ {
+		next := fmt.Sprintf("%s (%d)%s", stem, i, ext)
+		if _, err := os.Stat(next); os.IsNotExist(err) {
+			return next
+		}
+	}
+	return candidate
 }
 
 // SetWindowDarkMode updates the GTK_THEME environment preference on Linux desktops.

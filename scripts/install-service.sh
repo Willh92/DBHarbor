@@ -695,9 +695,17 @@ systemd_escape_dq() {
   printf "%s" "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+systemd_escape_env_sq() {
+  printf "%s" "$1" | sed "s/\\\\/\\\\\\\\/g; s/'/\\\\'/g"
+}
+
+xml_escape() {
+  printf "%s" "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'
+}
+
 format_systemd_arg() {
   case "$1" in
-    *[[:space:]]*) printf '"%s"' "$(systemd_escape_dq "$1")" ;;
+    *[[:space:]\"\\]*) printf '"%s"' "$(systemd_escape_dq "$1")" ;;
     *) printf '%s' "$1" ;;
   esac
 }
@@ -721,8 +729,8 @@ prepare_systemd_bootstrap_env() {
   OLD_UMASK="$(umask)"
   umask 077
   {
-    [ -n "$ADMIN_USER" ] && printf 'DBHARBOR_ADMIN_USER="%s"\n' "$(systemd_escape_dq "$ADMIN_USER")"
-    [ -n "$ADMIN_PASS" ] && printf 'DBHARBOR_ADMIN_PASS="%s"\n' "$(systemd_escape_dq "$ADMIN_PASS")"
+    [ -n "$ADMIN_USER" ] && printf "DBHARBOR_ADMIN_USER='%s'\n" "$(systemd_escape_env_sq "$ADMIN_USER")"
+    [ -n "$ADMIN_PASS" ] && printf "DBHARBOR_ADMIN_PASS='%s'\n" "$(systemd_escape_env_sq "$ADMIN_PASS")"
   } > "$ENV_PATH"
   umask "$OLD_UMASK"
   chmod 0600 "$ENV_PATH"
@@ -907,9 +915,9 @@ After=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=-${INIT_ENV_FILE}
+EnvironmentFile=-$(format_systemd_arg "$INIT_ENV_FILE")
 ExecStart=$(format_systemd_arg "$INSTALL_BIN") ${LISTEN_ARGS} -data-dir $(format_systemd_arg "$DATA_DIR")
-WorkingDirectory=${DATA_DIR}
+WorkingDirectory=$(format_systemd_arg "$DATA_DIR")
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65535
@@ -1022,8 +1030,8 @@ Group=${SVC_GROUP}
 ${SUPP_LINE}
 RuntimeDirectory=${SERVICE_NAME}
 RuntimeDirectoryMode=0755
-WorkingDirectory=${DATA_DIR}
-EnvironmentFile=-${INIT_ENV_FILE}
+WorkingDirectory=$(format_systemd_arg "$DATA_DIR")
+EnvironmentFile=-$(format_systemd_arg "$INIT_ENV_FILE")
 ExecStart=$(format_systemd_arg "$INSTALL_BIN") ${LISTEN_ARGS} -data-dir $(format_systemd_arg "$DATA_DIR")
 Restart=on-failure
 RestartSec=5
@@ -1097,16 +1105,16 @@ EOF
 #!/sbin/openrc-run
 name="DBHarbor"
 description="DBHarbor Multi-Database Web Workbench"
-command="${INSTALL_BIN}"
-command_args="${LISTEN_ARGS} -data-dir ${DATA_DIR}"
-command_user="${SVC_USER}:${SVC_GROUP}"
+command='$(sh_escape_sq "$INSTALL_BIN")'
+command_args="${LISTEN_ARGS} -data-dir '$(sh_escape_sq "$DATA_DIR")'"
+command_user='$(sh_escape_sq "${SVC_USER}:${SVC_GROUP}")'
 command_background=true
-pidfile="/run/${SERVICE_NAME}.pid"
-output_log="${LOG_FILE}"
-error_log="${LOG_FILE}"
+pidfile='/run/$(sh_escape_sq "$SERVICE_NAME").pid'
+output_log='$(sh_escape_sq "$LOG_FILE")'
+error_log='$(sh_escape_sq "$LOG_FILE")'
 
-if [ -f "${INIT_ENV_FILE}" ]; then
-  . "${INIT_ENV_FILE}"
+if [ -f '$(sh_escape_sq "$INIT_ENV_FILE")' ]; then
+  . '$(sh_escape_sq "$INIT_ENV_FILE")'
 fi
 
 depend() {
@@ -1214,13 +1222,13 @@ run_macos() {
       if [ "$USER_MODE" = "0" ]; then
         if [ -n "$SVC_USER" ]; then
           ROLE_PLIST_KEYS="  <key>UserName</key>
-  <string>${SVC_USER}</string>"
+  <string>$(xml_escape "$SVC_USER")</string>"
           chown -R "$SVC_USER" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
         fi
         if [ -n "$SVC_GROUP" ]; then
           ROLE_PLIST_KEYS="${ROLE_PLIST_KEYS}
   <key>GroupName</key>
-  <string>${SVC_GROUP}</string>"
+  <string>$(xml_escape "$SVC_GROUP")</string>"
           chgrp -R "$SVC_GROUP" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
         fi
       fi
@@ -1228,20 +1236,20 @@ run_macos() {
       [ -n "$UNIX_SOCKET" ] && mkdir -p "$(dirname "$UNIX_SOCKET")"
       if [ -n "$UNIX_SOCKET" ]; then
         LISTEN_PLIST_ARGS="    <string>-unix-socket</string>
-    <string>${UNIX_SOCKET}</string>
+    <string>$(xml_escape "$UNIX_SOCKET")</string>
     <string>-unix-socket-perm</string>
-    <string>${UNIX_SOCKET_PERM}</string>"
+    <string>$(xml_escape "$UNIX_SOCKET_PERM")</string>"
         if [ -n "$SOCKET_GROUP" ]; then
           LISTEN_PLIST_ARGS="${LISTEN_PLIST_ARGS}
     <string>-unix-socket-group</string>
-    <string>${SOCKET_GROUP}</string>"
+    <string>$(xml_escape "$SOCKET_GROUP")</string>"
         fi
         MAC_LISTEN_DISPLAY="unix:${UNIX_SOCKET} (perm ${UNIX_SOCKET_PERM})"
       else
         LISTEN_PLIST_ARGS="    <string>-host</string>
-    <string>${HOST_ADDR}</string>
+    <string>$(xml_escape "$HOST_ADDR")</string>
     <string>-port</string>
-    <string>${PORT}</string>"
+    <string>$(xml_escape "$PORT")</string>"
         MAC_LISTEN_DISPLAY="http://${HOST_ADDR}:${PORT}"
       fi
 
@@ -1251,17 +1259,17 @@ run_macos() {
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>${MACOS_LABEL}</string>
+  <string>$(xml_escape "$MACOS_LABEL")</string>
 ${ROLE_PLIST_KEYS}
   <key>ProgramArguments</key>
   <array>
-    <string>${INSTALL_BIN}</string>
+    <string>$(xml_escape "$INSTALL_BIN")</string>
 ${LISTEN_PLIST_ARGS}
     <string>-data-dir</string>
-    <string>${DATA_DIR}</string>
+    <string>$(xml_escape "$DATA_DIR")</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>${DATA_DIR}</string>
+  <string>$(xml_escape "$DATA_DIR")</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -1275,9 +1283,9 @@ ${LISTEN_PLIST_ARGS}
     <integer>65535</integer>
   </dict>
   <key>StandardOutPath</key>
-  <string>${OUT_LOG}</string>
+  <string>$(xml_escape "$OUT_LOG")</string>
   <key>StandardErrorPath</key>
-  <string>${ERR_LOG}</string>
+  <string>$(xml_escape "$ERR_LOG")</string>
 </dict>
 </plist>
 EOF

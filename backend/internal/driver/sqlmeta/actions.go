@@ -767,6 +767,11 @@ func buildClickHouseUDFActionSQLs(d sqlbase.Dialect, req driver.ObjectActionRequ
 				if err := sqlbase.ValidateReadOnlyScript("SELECT " + req.Spec.MacroExpr); err != nil {
 					return nil, err
 				}
+				if !req.IsAdmin && !req.AllowPrivIP {
+					if err := sqlbase.ValidateClickHouseRestrictedWebSQL("SELECT " + req.Spec.MacroExpr); err != nil {
+						return nil, err
+					}
+				}
 			}
 			paramClause := "(" + strings.Join(params, ", ") + ")"
 			return []string{fmt.Sprintf("CREATE OR REPLACE FUNCTION %s AS %s -> %s", qFn, paramClause, strings.TrimSpace(req.Spec.MacroExpr))}, nil

@@ -46,6 +46,7 @@ var _ driver.FileExporter = (*DuckDBDriver)(nil)
 type DuckDBDriver struct {
 	cfg      driver.ConnectionConfig
 	filePath string
+	tempDir  string
 	cliBin   string
 	webMode  bool
 }
@@ -148,7 +149,15 @@ func NewDuckDB(cfg driver.ConnectionConfig) (driver.Driver, error) {
 			return nil, errors.New("invalid DuckDB file path syntax")
 		}
 	}
-	if fp != ":memory:" {
+	var tempDir string
+	if fp == ":memory:" {
+		td, err := os.MkdirTemp("", "dbharbor-duckdb-mem-*")
+		if err != nil {
+			return nil, fmt.Errorf("failed to allocate ephemeral DuckDB directory: %w", err)
+		}
+		tempDir = td
+		fp = filepath.Join(td, "memory.duckdb")
+	} else {
 		fp = filepath.Clean(fp)
 		if dir := filepath.Dir(fp); dir != "" && dir != "." {
 			_ = os.MkdirAll(dir, 0o755)
@@ -160,7 +169,7 @@ func NewDuckDB(cfg driver.ConnectionConfig) (driver.Driver, error) {
 		cliOption = cfg.Option("__server_duckdb_cli", "")
 	}
 	bin, _ := resolveDuckDBBinary(cliOption)
-	return &DuckDBDriver{cfg: cfg, filePath: fp, cliBin: bin, webMode: webMode}, nil
+	return &DuckDBDriver{cfg: cfg, filePath: fp, tempDir: tempDir, cliBin: bin, webMode: webMode}, nil
 }
 
 func (d *DuckDBDriver) buildDuckDBArgs() []string {
@@ -192,6 +201,58 @@ func hasDuckDBDotCommandOutsideStrings(s string) bool {
 	n := len(s)
 	for i := 0; i < n; i++ {
 		ch := s[i]
+		if ch == '-' && i+1 < n && s[i+1] == '-' {
+			i += 2
+			for i < n && s[i] != '\n' {
+				i++
+			}
+			atLineStart = true
+			continue
+		}
+		if ch == '/' && i+1 < n && s[i+1] == '*' {
+			wasAtLineStart := atLineStart
+			sawNewline := false
+			commentLineStart := false
+			depth := 1
+			i += 2
+			for i < n && depth > 0 {
+				if i+1 < n && s[i] == '/' && s[i+1] == '*' {
+					commentLineStart = false
+					depth++
+					i += 2
+					continue
+				}
+				if i+1 < n && s[i] == '*' && s[i+1] == '/' {
+					depth--
+					i += 2
+					continue
+				}
+				if s[i] == '\n' || s[i] == '\r' {
+					sawNewline = true
+					commentLineStart = true
+					i++
+					continue
+				}
+				if commentLineStart {
+					if s[i] == ' ' || s[i] == '\t' {
+						i++
+						continue
+					}
+					if s[i] == '.' {
+						return true
+					}
+					commentLineStart = false
+				}
+				i++
+			}
+			if sawNewline {
+				atLineStart = commentLineStart
+			} else {
+				atLineStart = wasAtLineStart
+			}
+			i--
+			continue
+		}
 		if ch == '\'' || ch == '"' || ch == '`' {
 			atLineStart = false
 			q := ch
@@ -459,15 +520,23 @@ func formatDuckDBStdinSQL(sqlStmt string) string {
 }
 
 func (d *DuckDBDriver) runJSON(ctx context.Context, sqlStmt string) ([]map[string]any, error) {
+	sets, err := d.runJSONMulti(ctx, sqlStmt)
+	if err != nil || len(sets) == 0 {
+		return []map[string]any{}, err
+	}
+	return sets[0], nil
+}
+
+func (d *DuckDBDriver) runJSONMulti(ctx context.Context, sqlStmt string) ([][]map[string]any, error) {
 	if mu := duckFileLock(d.filePath); mu != nil {
 		mu.Lock()
 		defer mu.Unlock()
 	}
-	return d.runJSONUnlocked(ctx, sqlStmt)
+	return d.runJSONMultiUnlocked(ctx, sqlStmt)
 }
 
-func (d *DuckDBDriver) runJSONUnlocked(ctx context.Context, sqlStmt string) ([]map[string]any, error) {
-	if d.webMode {
+func (d *DuckDBDriver) runJSONMultiUnlocked(ctx context.Context, sqlStmt string) ([][]map[string]any, error) {
+	if d.webMode || sqlbase.IsRestrictedWebContext(ctx) {
 		if err := verifyDuckDBExecutable(d.cliBin); err != nil {
 			return nil, err
 		}
@@ -511,15 +580,19 @@ func (d *DuckDBDriver) runJSONUnlocked(ctx context.Context, sqlStmt string) ([]m
 	}
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 {
-		return []map[string]any{}, nil
+		return [][]map[string]any{}, nil
 	}
-	var records []map[string]any
+	var sets [][]map[string]any
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
-	if err := dec.Decode(&records); err != nil {
-		return nil, err
+	for dec.More() {
+		var records []map[string]any
+		if err := dec.Decode(&records); err != nil {
+			return nil, err
+		}
+		sets = append(sets, records)
 	}
-	return records, nil
+	return sets, nil
 }
 
 func (d *DuckDBDriver) Meta() driver.DriverMeta {
@@ -527,7 +600,13 @@ func (d *DuckDBDriver) Meta() driver.DriverMeta {
 	return m
 }
 
-func (d *DuckDBDriver) Close() error { return nil }
+func (d *DuckDBDriver) Close() error {
+	if d.tempDir != "" {
+		ReleaseDuckDBFileLock(d.filePath)
+		_ = os.RemoveAll(d.tempDir)
+	}
+	return nil
+}
 
 func (d *DuckDBDriver) Ping(ctx context.Context) (driver.ServerInfo, error) {
 	start := time.Now()
@@ -1121,13 +1200,102 @@ func (d *DuckDBDriver) ManageObject(ctx context.Context, req driver.ObjectAction
 	return nil
 }
 
+func duckScriptNeedsSingleSession(stmts []string) bool {
+	if len(stmts) <= 1 {
+		return false
+	}
+	for _, stmt := range stmts {
+		tokens := lexDuckDBTokens(stmt)
+		if len(tokens) == 0 {
+			continue
+		}
+		if tokens[0].kind == "word" {
+			switch tokens[0].upper {
+			case "BEGIN", "START", "COMMIT", "END", "ROLLBACK", "SET", "RESET", "PRAGMA", "USE":
+				return true
+			}
+		}
+		for _, tok := range tokens {
+			if tok.kind == "word" && (tok.upper == "TEMP" || tok.upper == "TEMPORARY") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func buildDuckQueryResult(stmt string, recs []map[string]any, maxRows int, elapsedMs int64, isSelect bool) driver.QueryResult {
+	truncated := false
+	if maxRows > 0 && len(recs) > maxRows {
+		recs = recs[:maxRows]
+		truncated = true
+	}
+	var colNames []string
+	if len(recs) > 0 {
+		for k := range recs[0] {
+			colNames = append(colNames, k)
+		}
+		sort.Strings(colNames)
+	}
+	cols := make([]driver.QueryColumn, len(colNames))
+	for i, c := range colNames {
+		cols[i] = driver.QueryColumn{Name: c}
+	}
+	rows := make([][]any, len(recs))
+	for rIdx, rec := range recs {
+		row := make([]any, len(colNames))
+		for cIdx, c := range colNames {
+			row[cIdx] = rec[c]
+		}
+		rows[rIdx] = row
+	}
+	msg := ""
+	if !isSelect && len(rows) == 0 {
+		msg = "Executed successfully"
+	}
+	return driver.QueryResult{
+		Statement: stmt,
+		Columns:   cols,
+		Rows:      rows,
+		Total:     int64(len(rows)),
+		ElapsedMs: elapsedMs,
+		IsSelect:  isSelect,
+		Truncated: truncated,
+		Message:   msg,
+	}
+}
+
 func (d *DuckDBDriver) ExecuteSQL(ctx context.Context, _, query string, maxRows int) ([]driver.QueryResult, error) {
-	if d.webMode {
+	if d.webMode || sqlbase.IsRestrictedWebContext(ctx) {
 		if err := validateDuckDBWebSandbox(query); err != nil {
 			return nil, err
 		}
 	}
 	stmts := sqlbase.SplitStatements(query)
+	if len(stmts) == 0 {
+		return []driver.QueryResult{}, nil
+	}
+	if duckScriptNeedsSingleSession(stmts) {
+		start := time.Now()
+		sets, err := d.runJSONMulti(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+		elapsed := time.Since(start).Milliseconds()
+		if len(sets) == 0 {
+			return []driver.QueryResult{buildDuckQueryResult(query, nil, maxRows, elapsed, false)}, nil
+		}
+		out := make([]driver.QueryResult, 0, len(sets))
+		for idx, recs := range sets {
+			label := query
+			if idx < len(stmts) {
+				label = stmts[idx]
+			}
+			out = append(out, buildDuckQueryResult(label, recs, maxRows, elapsed, true))
+		}
+		return out, nil
+	}
+
 	var out []driver.QueryResult
 	for _, stmt := range stmts {
 		start := time.Now()
@@ -1135,32 +1303,7 @@ func (d *DuckDBDriver) ExecuteSQL(ctx context.Context, _, query string, maxRows 
 		if err != nil {
 			return out, err
 		}
-		if maxRows > 0 && len(recs) > maxRows {
-			recs = recs[:maxRows]
-		}
-		var colNames []string
-		if len(recs) > 0 {
-			for k := range recs[0] {
-				colNames = append(colNames, k)
-			}
-			sort.Strings(colNames)
-		}
-		cols := make([]driver.QueryColumn, len(colNames))
-		for i, c := range colNames {
-			cols[i] = driver.QueryColumn{Name: c}
-		}
-		rows := make([][]any, len(recs))
-		for rIdx, rec := range recs {
-			row := make([]any, len(colNames))
-			for cIdx, c := range colNames {
-				row[cIdx] = rec[c]
-			}
-			rows[rIdx] = row
-		}
-		out = append(out, driver.QueryResult{
-			Statement: stmt, Columns: cols, Rows: rows, Total: int64(len(rows)),
-			ElapsedMs: time.Since(start).Milliseconds(), IsSelect: sqlbase.IsQueryStatement(stmt),
-		})
+		out = append(out, buildDuckQueryResult(stmt, recs, maxRows, time.Since(start).Milliseconds(), sqlbase.IsQueryStatement(stmt)))
 	}
 	return out, nil
 }
@@ -1211,7 +1354,7 @@ func (d *DuckDBDriver) StreamExport(ctx context.Context, req driver.ExportReques
 		return err
 	}
 	res := resList[0]
-	format := strings.ToLower(req.Format)
+	format := strings.ToLower(strings.TrimSpace(req.Format))
 	switch format {
 	case "csv", "csv_bom":
 		if format == "csv_bom" {
@@ -1260,7 +1403,77 @@ func (d *DuckDBDriver) StreamExport(ctx context.Context, req driver.ExportReques
 			_, _ = fmt.Fprintf(w, "INSERT INTO %s (%s) VALUES (%s);\n", targetTbl, strings.Join(qCols, ", "), strings.Join(vals, ", "))
 		}
 		return nil
-	default:
+	case "jsonl":
+		bw := bufio.NewWriter(w)
+		rowMap := make(map[string]any, len(res.Columns)+1)
+		for _, r := range res.Rows {
+			clear(rowMap)
+			if req.Table != "" {
+				rowMap["__table__"] = req.Table
+			}
+			for i, c := range res.Columns {
+				if i < len(r) {
+					rowMap[c.Name] = r[i]
+				} else {
+					rowMap[c.Name] = nil
+				}
+			}
+			b, mErr := json.Marshal(rowMap)
+			if mErr != nil {
+				return mErr
+			}
+			if _, wErr := bw.Write(b); wErr != nil {
+				return wErr
+			}
+			if wErr := bw.WriteByte('\n'); wErr != nil {
+				return wErr
+			}
+		}
+		return bw.Flush()
+	case "markdown":
+		escapeCell := func(s string) string {
+			s = strings.ReplaceAll(s, "\r\n", " ")
+			s = strings.ReplaceAll(s, "\n", " ")
+			s = strings.ReplaceAll(s, `\`, `\\`)
+			s = strings.ReplaceAll(s, "|", `\|`)
+			return s
+		}
+		bw := bufio.NewWriter(w)
+		_, _ = bw.WriteString("| ")
+		for i, c := range res.Columns {
+			if i > 0 {
+				_, _ = bw.WriteString(" | ")
+			}
+			_, _ = bw.WriteString(escapeCell(c.Name))
+		}
+		_, _ = bw.WriteString(" |\n| ")
+		for i := range res.Columns {
+			if i > 0 {
+				_, _ = bw.WriteString(" | ")
+			}
+			_, _ = bw.WriteString("---")
+		}
+		_, _ = bw.WriteString(" |\n")
+		for _, r := range res.Rows {
+			_, _ = bw.WriteString("| ")
+			for i := range res.Columns {
+				if i > 0 {
+					_, _ = bw.WriteString(" | ")
+				}
+				var v any
+				if i < len(r) {
+					v = r[i]
+				}
+				if v == nil {
+					_, _ = bw.WriteString("`NULL`")
+				} else {
+					_, _ = bw.WriteString(escapeCell(fmt.Sprintf("%v", v)))
+				}
+			}
+			_, _ = bw.WriteString(" |\n")
+		}
+		return bw.Flush()
+	case "json", "":
 		bw := bufio.NewWriter(w)
 		if _, err := bw.WriteString("["); err != nil {
 			return err
@@ -1289,6 +1502,8 @@ func (d *DuckDBDriver) StreamExport(ctx context.Context, req driver.ExportReques
 			return err
 		}
 		return bw.Flush()
+	default:
+		return fmt.Errorf("unsupported export format: %s", req.Format)
 	}
 }
 
@@ -1298,25 +1513,45 @@ func (d *DuckDBDriver) BatchImport(ctx context.Context, req driver.ImportRequest
 	format := strings.ToLower(strings.TrimSpace(req.Format))
 	if format == "sql" || format == "" {
 		res := driver.ImportResult{}
+		var batchedStmts []string
+		flushBatched := func() error {
+			if len(batchedStmts) == 0 {
+				return nil
+			}
+			script := strings.Join(batchedStmts, ";\n")
+			if _, execErr := d.runJSONMulti(ctx, script); execErr != nil {
+				return execErr
+			}
+			res.ImportedRows += len(batchedStmts)
+			batchedStmts = batchedStmts[:0]
+			return nil
+		}
 		err := sqlbase.StreamStatements(req.Reader, func(stmt string) error {
-			if d.webMode {
+			if d.webMode || sqlbase.IsRestrictedWebContext(ctx) {
 				if sbErr := validateDuckDBWebSandbox(stmt); sbErr != nil {
 					return sbErr
 				}
 			}
-			if _, execErr := d.runJSON(ctx, stmt); execErr != nil {
-				if req.ContinueOnError {
-					res.FailedCount++
-					if len(res.Warnings) < 20 {
-						res.Warnings = append(res.Warnings, execErr.Error())
-					}
-					return nil
+			if !req.ContinueOnError {
+				batchedStmts = append(batchedStmts, stmt)
+				if len(batchedStmts) >= 250 {
+					return flushBatched()
 				}
-				return execErr
+				return nil
+			}
+			if _, execErr := d.runJSON(ctx, stmt); execErr != nil {
+				res.FailedCount++
+				if len(res.Warnings) < 20 {
+					res.Warnings = append(res.Warnings, execErr.Error())
+				}
+				return nil
 			}
 			res.ImportedRows++
 			return nil
 		})
+		if err == nil && !req.ContinueOnError {
+			err = flushBatched()
+		}
 		res.ElapsedMs = time.Since(start).Milliseconds()
 		return res, err
 	}
@@ -1458,7 +1693,7 @@ func (d *DuckDBDriver) KillSession(_ context.Context, _ string) error {
 
 func (d *DuckDBDriver) ExportDatabaseFile(ctx context.Context, destPath string) error {
 	srcPath := filepath.Clean(strings.TrimSpace(d.filePath))
-	if srcPath == "" || srcPath == "." || srcPath == ":memory:" {
+	if d.tempDir != "" || srcPath == "" || srcPath == "." || srcPath == ":memory:" {
 		return errors.New("in-memory DuckDB databases do not persist as standalone files")
 	}
 	cleanDest := filepath.Clean(strings.TrimSpace(destPath))
@@ -1472,7 +1707,7 @@ func (d *DuckDBDriver) ExportDatabaseFile(ctx context.Context, destPath string) 
 	}
 
 	// Flush any pending WAL frames into the main DuckDB file before snapshotting
-	_, _ = d.runJSONUnlocked(ctx, "CHECKPOINT")
+	_, _ = d.runJSONMultiUnlocked(ctx, "CHECKPOINT")
 
 	fi, err := os.Lstat(srcPath)
 	if err != nil {

@@ -351,5 +351,13 @@ func NewRestrictedDialContext(timeout time.Duration) func(ctx context.Context, n
 			return nil
 		},
 	}
-	return dialer.DialContext
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		netLower := strings.ToLower(strings.TrimSpace(network))
+		switch netLower {
+		case "tcp", "tcp4", "tcp6":
+		default:
+			return nil, fmt.Errorf("network transport %q is restricted for non-administrator accounts", network)
+		}
+		return dialer.DialContext(ctx, netLower, address)
+	}
 }

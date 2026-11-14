@@ -248,6 +248,9 @@ export function parseClipboardTabular(
         const records: Record<string, any>[] = arr.map((obj) => {
           const rec: Record<string, any> = {};
           for (const [k, v] of Object.entries(obj)) {
+            if (k === '__proto__' || k === 'constructor' || k === 'prototype') {
+              continue;
+            }
             const matched = colMapLower.get(k.toLowerCase());
             if (matched) {
               rec[matched.name] = v;

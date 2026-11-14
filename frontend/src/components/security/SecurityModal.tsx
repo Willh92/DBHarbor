@@ -58,7 +58,7 @@ interface Props {
 }
 
 function calcPasswordStrength(pwd: string): { percent: number; label: string; color: string } {
-  if (!pwd) return { percent: 0, label: 'Empty', color: '#d9d9d9' };
+  if (!pwd) return { percent: 0, label: 'Empty', color: 'rgba(140, 140, 140, 0.85)' };
   let score = 0;
   if (pwd.length >= 6) score += 25;
   if (pwd.length >= 10) score += 25;

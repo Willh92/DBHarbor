@@ -70,7 +70,7 @@ export function translateWithLocale(
 
   if (vars) {
     Object.entries(vars).forEach(([k, v]) => {
-      tpl = tpl.replace(new RegExp(`\\{${k}\\}`, 'g'), String(v));
+      tpl = tpl.split(`{${k}}`).join(String(v));
     });
   }
   return tpl;

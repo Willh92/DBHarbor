@@ -822,7 +822,7 @@ func (d *Driver) ImportDocuments(ctx context.Context, database, collection strin
 		return driver.ImportResult{}, errors.New("import content is empty")
 	}
 
-	coll := d.client.Database(database).Collection(collection)
+	coll := d.client.Database(d.resolveDBName(database)).Collection(collection)
 	res := driver.ImportResult{}
 	normFmt := strings.ToLower(strings.TrimSpace(format))
 
@@ -987,14 +987,15 @@ func (d *Driver) UpdateDocument(ctx context.Context, database, collection, idStr
 		return fmt.Errorf("failed to parse document JSON: %w", err)
 	}
 	delete(doc, "_id")
+	coll := d.client.Database(d.resolveDBName(database)).Collection(collection)
 	idVal := parseObjectIDOrValue(idStr)
-	res, err := d.client.Database(database).Collection(collection).ReplaceOne(ctx, bson.M{"_id": idVal}, doc)
+	res, err := coll.ReplaceOne(ctx, bson.D{{Key: "_id", Value: idVal}}, doc)
 	if err != nil {
 		return err
 	}
 	if res.MatchedCount == 0 {
 		// Retry raw string _id if hex string happened to not be ObjectID
-		_, err = d.client.Database(database).Collection(collection).ReplaceOne(ctx, bson.M{"_id": idStr}, doc)
+		_, err = coll.ReplaceOne(ctx, bson.D{{Key: "_id", Value: idStr}}, doc)
 		return err
 	}
 	return nil
@@ -1002,14 +1003,14 @@ func (d *Driver) UpdateDocument(ctx context.Context, database, collection, idStr
 
 func (d *Driver) DeleteDocuments(ctx context.Context, database, collection string, ids []string) (int64, error) {
 	var total int64
-	coll := d.client.Database(database).Collection(collection)
+	coll := d.client.Database(d.resolveDBName(database)).Collection(collection)
 	for _, rawID := range ids {
-		res, err := coll.DeleteOne(ctx, bson.M{"_id": parseObjectIDOrValue(rawID)})
+		res, err := coll.DeleteOne(ctx, bson.D{{Key: "_id", Value: parseObjectIDOrValue(rawID)}})
 		if err != nil {
 			return total, err
 		}
 		if res.DeletedCount == 0 {
-			res, _ = coll.DeleteOne(ctx, bson.M{"_id": rawID})
+			res, _ = coll.DeleteOne(ctx, bson.D{{Key: "_id", Value: rawID}})
 		}
 		if res != nil {
 			total += res.DeletedCount
@@ -1104,7 +1105,7 @@ func (d *Driver) CreateIndexAdvanced(ctx context.Context, req driver.DocCreateIn
 }
 
 func (d *Driver) DropIndex(ctx context.Context, database, collection, indexName string) error {
-	_, err := d.client.Database(database).Collection(collection).Indexes().DropOne(ctx, indexName)
+	_, err := d.client.Database(d.resolveDBName(database)).Collection(collection).Indexes().DropOne(ctx, indexName)
 	return err
 }
 
@@ -1182,12 +1183,26 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 }
 
 func (d *Driver) KillSession(ctx context.Context, sessionID string) error {
-	var opid int64
-	_, _ = fmt.Sscanf(sessionID, "%d", &opid)
-	return d.client.Database("admin").RunCommand(ctx, bson.D{
-		{Key: "killOp", Value: 1},
-		{Key: "op", Value: opid},
-	}).Err()
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" {
+		return errors.New("session ID is required")
+	}
+	if opid, err := strconv.ParseInt(sid, 10, 64); err == nil {
+		return d.client.Database("admin").RunCommand(ctx, bson.D{
+			{Key: "killOp", Value: 1},
+			{Key: "op", Value: opid},
+		}).Err()
+	}
+	parts := strings.SplitN(sid, ":", 2)
+	if len(parts) == 2 && strings.TrimSpace(parts[0]) != "" {
+		if _, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64); err == nil {
+			return d.client.Database("admin").RunCommand(ctx, bson.D{
+				{Key: "killOp", Value: 1},
+				{Key: "op", Value: sid},
+			}).Err()
+		}
+	}
+	return fmt.Errorf("invalid MongoDB operation ID %q", sessionID)
 }
 
 func parseExtJSONOrEmpty(s string) (bson.D, error) {

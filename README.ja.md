@@ -3,7 +3,7 @@
 **言語切替**: [English](./README.md) | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | **日本語**
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.3-1677ff.svg)](./CHANGELOG.ja.md)
+[![Version](https://img.shields.io/badge/Version-v1.0.4-1677ff.svg)](./CHANGELOG.ja.md)
 [![CGO_ENABLED=0](https://img.shields.io/badge/Go-CGO__ENABLED%3D0-00ADD8.svg)](https://github.com/Willh92/DBHarbor.git)
 
 **phpMyAdmin の直感的なビジュアル操作性**と**モダンなマルチエンジン IDE 機能**を融合した、外部依存ゼロ・単一バイナリの Web データベース管理プラットフォームです。

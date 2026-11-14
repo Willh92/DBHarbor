@@ -167,8 +167,20 @@ func (lp *LoginProtector) RecordSuccess(ip, username string) {
 	normUser := strings.ToLower(strings.TrimSpace(username))
 	key := ip + "|" + normUser
 	lp.mu.Lock()
+	var keyFailures int
+	if rk, ok := lp.byKey[key]; ok && rk != nil {
+		keyFailures = rk.failures
+	}
 	delete(lp.byKey, key)
-	delete(lp.byIP, ip)
+	if keyFailures > 0 {
+		if ri, ok := lp.byIP[ip]; ok && ri != nil {
+			if ri.failures <= keyFailures {
+				delete(lp.byIP, ip)
+			} else {
+				ri.failures -= keyFailures
+			}
+		}
+	}
 	if normUser != "" {
 		delete(lp.byUser, normUser)
 	}

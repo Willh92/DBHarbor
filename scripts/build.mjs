@@ -112,12 +112,19 @@ function syncChangelogAndInstallers(buildAll = false) {
 
   // Ensure scripts/install-service.sh strictly uses POSIX LF (\n) line endings
   const shSrc = path.join(ROOT_DIR, 'scripts', 'install-service.sh');
-  if (fs.existsSync(shSrc)) {
-    const lfContent = fs.readFileSync(shSrc, 'utf8').replace(/\r\n/g, '\n');
-    fs.writeFileSync(shSrc, lfContent, 'utf8');
+  try {
+    const rawContent = fs.readFileSync(shSrc, 'utf8');
+    const lfContent = rawContent.replace(/\r\n/g, '\n');
+    if (lfContent !== rawContent) {
+      fs.writeFileSync(shSrc, lfContent, 'utf8');
+    }
     fs.mkdirSync(DIST_DIR, { recursive: true });
     const shDest = path.join(DIST_DIR, 'install-service.sh');
     fs.writeFileSync(shDest, lfContent, { encoding: 'utf8', mode: 0o755 });
+  } catch (err) {
+    if (err?.code !== 'ENOENT') {
+      throw err;
+    }
   }
 
   const psSrc = path.join(ROOT_DIR, 'scripts', 'install-service.ps1');

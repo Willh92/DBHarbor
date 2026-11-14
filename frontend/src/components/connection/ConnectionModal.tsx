@@ -585,7 +585,7 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
                         noStyle
                         rules={field.required ? [{ required: true }] : undefined}
                       >
-                        <Input placeholder={field.placeholder} autoComplete="off" />
+                        <Input placeholder={field.placeholder ? t(field.placeholder) : undefined} autoComplete="off" />
                       </Form.Item>
                       <Button
                         icon={<FolderOpenOutlined />}
@@ -608,7 +608,7 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
                   rules={field.required ? [{ required: true }] : undefined}
                 >
                   {field.type === 'number' ? (
-                    <InputNumber style={{ width: '100%' }} placeholder={field.placeholder} />
+                    <InputNumber style={{ width: '100%' }} placeholder={field.placeholder ? t(field.placeholder) : undefined} />
                   ) : field.type === 'password' ? (
                     <Input.Password
                       autoComplete="new-password"
@@ -625,12 +625,14 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
                               editing.unlocked
                             ? t('Unlocked in current session (leave blank to keep session password)')
                             : field.placeholder
+                              ? t(field.placeholder)
+                              : undefined
                       }
                     />
                   ) : field.type === 'select' ? (
                     <Select options={field.selectOptions?.map((o) => ({ ...o, label: t(o.label) }))} />
                   ) : (
-                    <Input placeholder={field.placeholder} autoComplete="off" />
+                    <Input placeholder={field.placeholder ? t(field.placeholder) : undefined} autoComplete="off" />
                   )}
                 </Form.Item>
               </Col>

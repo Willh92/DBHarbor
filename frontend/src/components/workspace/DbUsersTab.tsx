@@ -817,6 +817,7 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
       <Modal
         open={Boolean(pwdTarget)}
         title={t('Change Password: {name}', { name: pwdTarget?.identity || '' })}
+        width="min(480px, calc(100vw - 24px))"
         onCancel={() => setPwdTarget(null)}
         onOk={handleChangePassword}
         confirmLoading={pwdSaving}

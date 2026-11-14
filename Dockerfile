@@ -10,7 +10,7 @@ RUN npm run build && node -e "const fs=require('fs'),path=require('path'),zlib=r
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS backend-builder
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
-ARG VERSION=1.0.3
+ARG VERSION=1.0.4
 ARG CHANNEL=release
 ARG GIT_COMMIT=release
 WORKDIR /workspace/backend
@@ -32,10 +32,12 @@ RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S dbharbor \
     && adduser -S -G dbharbor dbharbor \
     && mkdir -p /app/data \
-    && chown -R dbharbor:dbharbor /app
+    && chmod 0755 /app \
+    && chown dbharbor:dbharbor /app/data \
+    && chmod 0700 /app/data
 WORKDIR /app
-COPY --from=backend-builder /out/dbharbor /app/dbharbor
-COPY LICENSE /app/LICENSE
+COPY --from=backend-builder --chmod=0755 /out/dbharbor /app/dbharbor
+COPY --chmod=0644 LICENSE /app/LICENSE
 USER dbharbor
 VOLUME ["/app/data"]
 EXPOSE 8787

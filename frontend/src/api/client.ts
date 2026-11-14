@@ -1188,7 +1188,8 @@ export const api = {
     }),
 
   // Live Monitor
-  getMonitor: (connId: string) => request<MonitorSnapshot>(`/conn/${connId}/monitor`),
+  getMonitor: (connId: string, opts?: { signal?: AbortSignal; skipDbAuthPrompt?: boolean }) =>
+    request<MonitorSnapshot>(`/conn/${connId}/monitor`, opts),
   killSession: (connId: string, sessionId: string) =>
     request<{ message: string }>(`/conn/${connId}/monitor/kill`, { method: 'POST', body: { sessionId } }),
 };

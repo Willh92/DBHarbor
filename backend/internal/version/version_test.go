@@ -22,11 +22,20 @@ func TestCompareSemver(t *testing.T) {
 		{"v2.0.0", "v1.9.9", 1},
 		{"1.2.0-beta.1", "1.2.0", -1},
 		{"1.2.0", "1.2.0-rc.1", 1},
+		{"1.0.4-preview.2", "1.0.4-preview.10", -1},
+		{"1.0.4-rc.10", "1.0.4-rc.2", 1},
+		{"1.0.4-1", "1.0.4-alpha", -1},
 	}
 	for _, tc := range cases {
 		if got := CompareSemver(tc.a, tc.b); got != tc.want {
 			t.Fatalf("CompareSemver(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
 		}
+	}
+	if got := parseFirstVersionHeading("# Changelog\n\n## [v1.0.4-preview.10] - 2026-11-14\n- notes"); got != "1.0.4-preview.10" {
+		t.Fatalf("parseFirstVersionHeading bracketed prerelease = %q, want 1.0.4-preview.10", got)
+	}
+	if got := parseFirstVersionHeading("# Changelog\n\n## v1.0.4-rc.1 - 2026-11-14\n- notes"); got != "1.0.4-rc.1" {
+		t.Fatalf("parseFirstVersionHeading unbracketed prerelease = %q, want 1.0.4-rc.1", got)
 	}
 }
 
