@@ -596,8 +596,7 @@ func (d *Driver) BrowseData(ctx context.Context, req driver.BrowseDataRequest) (
 			cleanup()
 			return res, err
 		}
-		var total int64
-		if conn.QueryRowContext(ctx, countSQL).Scan(&total) == nil {
+		if total, ok := sqlbase.QueryCountConn(ctx, conn, countSQL); ok {
 			res.Total = total
 			res.HasTotal = true
 		}

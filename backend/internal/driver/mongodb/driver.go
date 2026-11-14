@@ -981,6 +981,10 @@ func (d *Driver) ImportDocuments(ctx context.Context, database, collection strin
 	return res, nil
 }
 
+type mongoIDFilter struct {
+	ID any `bson:"_id"`
+}
+
 func (d *Driver) UpdateDocument(ctx context.Context, database, collection, idStr, docJSON string) error {
 	var doc bson.M
 	if err := bson.UnmarshalExtJSON([]byte(docJSON), false, &doc); err != nil {
@@ -989,13 +993,13 @@ func (d *Driver) UpdateDocument(ctx context.Context, database, collection, idStr
 	delete(doc, "_id")
 	coll := d.client.Database(d.resolveDBName(database)).Collection(collection)
 	idVal := parseObjectIDOrValue(idStr)
-	res, err := coll.ReplaceOne(ctx, bson.D{{Key: "_id", Value: idVal}}, doc)
+	res, err := coll.ReplaceOne(ctx, mongoIDFilter{ID: idVal}, doc)
 	if err != nil {
 		return err
 	}
 	if res.MatchedCount == 0 {
 		// Retry raw string _id if hex string happened to not be ObjectID
-		_, err = coll.ReplaceOne(ctx, bson.D{{Key: "_id", Value: idStr}}, doc)
+		_, err = coll.ReplaceOne(ctx, mongoIDFilter{ID: idStr}, doc)
 		return err
 	}
 	return nil
@@ -1005,12 +1009,12 @@ func (d *Driver) DeleteDocuments(ctx context.Context, database, collection strin
 	var total int64
 	coll := d.client.Database(d.resolveDBName(database)).Collection(collection)
 	for _, rawID := range ids {
-		res, err := coll.DeleteOne(ctx, bson.D{{Key: "_id", Value: parseObjectIDOrValue(rawID)}})
+		res, err := coll.DeleteOne(ctx, mongoIDFilter{ID: parseObjectIDOrValue(rawID)})
 		if err != nil {
 			return total, err
 		}
 		if res.DeletedCount == 0 {
-			res, _ = coll.DeleteOne(ctx, bson.D{{Key: "_id", Value: rawID}})
+			res, _ = coll.DeleteOne(ctx, mongoIDFilter{ID: rawID})
 		}
 		if res != nil {
 			total += res.DeletedCount

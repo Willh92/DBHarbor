@@ -298,6 +298,32 @@ func ExecuteMultiSQLConn(ctx context.Context, q Queryer, script string, maxRows 
 	return results, nil
 }
 
+func execBatchOnQueryer(ctx context.Context, q Queryer, sqls []string) error {
+	for _, stmt := range sqls {
+		if _, err := q.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// QueryCountConn executes a single scalar COUNT(*) query over a bound Queryer.
+func QueryCountConn(ctx context.Context, q Queryer, countSQL string) (int64, bool) {
+	rows, err := q.QueryContext(ctx, countSQL)
+	if err != nil {
+		return 0, false
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return 0, false
+	}
+	var total int64
+	if err := rows.Scan(&total); err != nil {
+		return 0, false
+	}
+	return total, true
+}
+
 func ApplyMutations(ctx context.Context, db *sql.DB, d Dialect, req driver.RowMutationRequest) (driver.MutationResult, error) {
 	return ApplyMutationsConn(ctx, db, d, req)
 }
@@ -316,10 +342,8 @@ func ApplyMutationsConn(ctx context.Context, q TxQueryer, d Dialect, req driver.
 
 	// ClickHouse ALTER TABLE mutations are non-transactional
 	if d == DialectClickHouse {
-		for _, stmt := range sqls {
-			if _, err := q.ExecContext(ctx, stmt); err != nil {
-				return out, err
-			}
+		if err := execBatchOnQueryer(ctx, q, sqls); err != nil {
+			return out, err
 		}
 		out.Inserted = len(req.Inserts)
 		out.Updated = len(req.Updates)
@@ -333,10 +357,8 @@ func ApplyMutationsConn(ctx context.Context, q TxQueryer, d Dialect, req driver.
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	for _, stmt := range sqls {
-		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return out, err
-		}
+	if err := execBatchOnQueryer(ctx, tx, sqls); err != nil {
+		return out, err
 	}
 	if err := tx.Commit(); err != nil {
 		return out, err

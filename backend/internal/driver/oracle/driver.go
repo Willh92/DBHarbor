@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,8 +15,6 @@ import (
 
 	go_ora "github.com/sijms/go-ora/v2"
 )
-
-var reOracleSessionID = regexp.MustCompile(`^\d+,\d+(,@\d+)?$`)
 
 type restrictedOraDialer struct {
 	fn func(ctx context.Context, network, address string) (net.Conn, error)
@@ -673,11 +671,43 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 	return snap, nil
 }
 
-func (d *Driver) KillSession(ctx context.Context, sessionID string) error {
-	sid := strings.TrimSpace(sessionID)
-	if !reOracleSessionID.MatchString(sid) {
-		return fmt.Errorf("invalid Oracle session ID format %q (expected sid,serial# or sid,serial#,@inst_id)", sessionID)
+func parseOracleSessionTarget(raw string) (sid uint64, serial uint64, inst uint64, hasInst bool, err error) {
+	parts := strings.Split(strings.TrimSpace(raw), ",")
+	if len(parts) != 2 && len(parts) != 3 {
+		return 0, 0, 0, false, fmt.Errorf("invalid Oracle session ID format %q (expected sid,serial# or sid,serial#,@inst_id)", raw)
 	}
-	_, err := d.db.ExecContext(ctx, "ALTER SYSTEM KILL SESSION '"+sid+"' IMMEDIATE")
+	sid, err = strconv.ParseUint(parts[0], 10, 64)
+	if err != nil {
+		return 0, 0, 0, false, fmt.Errorf("invalid Oracle session SID in %q", raw)
+	}
+	serial, err = strconv.ParseUint(parts[1], 10, 64)
+	if err != nil {
+		return 0, 0, 0, false, fmt.Errorf("invalid Oracle session SERIAL# in %q", raw)
+	}
+	if len(parts) == 3 {
+		if !strings.HasPrefix(parts[2], "@") || len(parts[2]) < 2 {
+			return 0, 0, 0, false, fmt.Errorf("invalid Oracle RAC instance selector in %q", raw)
+		}
+		inst, err = strconv.ParseUint(parts[2][1:], 10, 64)
+		if err != nil || inst == 0 {
+			return 0, 0, 0, false, fmt.Errorf("invalid Oracle RAC instance ID in %q", raw)
+		}
+		hasInst = true
+	}
+	return sid, serial, inst, hasInst, nil
+}
+
+func (d *Driver) KillSession(ctx context.Context, sessionID string) error {
+	sidNum, serialNum, instNum, hasInst, err := parseOracleSessionTarget(sessionID)
+	if err != nil {
+		return err
+	}
+	var killSQL string
+	if hasInst {
+		killSQL = fmt.Sprintf("ALTER SYSTEM KILL SESSION '%d,%d,@%d' IMMEDIATE", sidNum, serialNum, instNum)
+	} else {
+		killSQL = fmt.Sprintf("ALTER SYSTEM KILL SESSION '%d,%d' IMMEDIATE", sidNum, serialNum)
+	}
+	_, err = d.db.ExecContext(ctx, killSQL)
 	return err
 }
