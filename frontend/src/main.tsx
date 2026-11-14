@@ -4,6 +4,15 @@ import './index.css';
 import App from './App';
 import { detectInitialLocale, ensureLocaleLoaded } from './i18n';
 
+if (typeof window !== 'undefined' && 'ongesturestart' in window) {
+  const preventSafariGestureZoom = (event: Event) => {
+    event.preventDefault();
+  };
+  document.addEventListener('gesturestart', preventSafariGestureZoom, { passive: false });
+  document.addEventListener('gesturechange', preventSafariGestureZoom, { passive: false });
+  document.addEventListener('gestureend', preventSafariGestureZoom, { passive: false });
+}
+
 const rootEl = document.getElementById('root')!;
 
 ensureLocaleLoaded(detectInitialLocale()).finally(() => {
