@@ -42,12 +42,14 @@ func init() {
 					{Label: "TLS (Skip Certificate Verification)", Value: "skip-verify"},
 				},
 			},
+			{Key: "caCert", Label: "Custom CA Certificate (PEM, optional)", Type: "text", Target: "options", Placeholder: "-----BEGIN CERTIFICATE-----..."},
 		},
 	}, New)
 }
 
 type Driver struct {
 	cfg     driver.ConnectionConfig
+	tlsCfg  *tls.Config
 	mu      sync.Mutex
 	clients map[int]*goredis.Client
 }
@@ -59,11 +61,19 @@ var (
 )
 
 func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
-	if cfg.Option("tls", "false") == "skip-verify" && cfg.Option("__restrict_internal_ip", "") == "1" {
-		return nil, errors.New("TLS skip-verify is not permitted for restricted non-admin connections")
+	restrictIP := cfg.Option("__restrict_internal_ip", "") == "1"
+	host := strings.TrimSpace(cfg.Host)
+	if host == "" && !restrictIP {
+		host = "127.0.0.1"
+	}
+	cleanHost := strings.Trim(host, "[]")
+	tlsCfg, err := sqlbase.BuildDriverTLSConfig(cleanHost, cfg.Option("tls", "false"), cfg.Option("caCert", ""), restrictIP)
+	if err != nil {
+		return nil, err
 	}
 	return &Driver{
 		cfg:     cfg,
+		tlsCfg:  tlsCfg,
 		clients: make(map[int]*goredis.Client),
 	}, nil
 }
@@ -102,9 +112,10 @@ func (d *Driver) clientForDB(dbIdx int) *goredis.Client {
 	if restrictIP {
 		opts.Dialer = sqlbase.NewRestrictedDialContext(8 * time.Second)
 	}
-	if tlsMode := d.cfg.Option("tls", "false"); tlsMode == "true" || tlsMode == "skip-verify" {
-		skipVerify := tlsMode == "skip-verify" && !restrictIP
-		opts.TLSConfig = &tls.Config{ServerName: cleanHost, MinVersion: tls.VersionTLS12, InsecureSkipVerify: skipVerify} // #nosec G402
+	if d.tlsCfg != nil {
+		opts.TLSConfig = d.tlsCfg
+	} else if tlsCfg, err := sqlbase.BuildDriverTLSConfig(cleanHost, d.cfg.Option("tls", "false"), d.cfg.Option("caCert", ""), restrictIP); err == nil && tlsCfg != nil {
+		opts.TLSConfig = tlsCfg
 	}
 	c := goredis.NewClient(opts)
 	d.clients[dbIdx] = c
@@ -737,10 +748,22 @@ func (d *Driver) ExecuteCommand(ctx context.Context, dbIndex int, cmdLine string
 	if len(args) == 0 {
 		return driver.KVCommandResult{}, errors.New("please enter a Redis command")
 	}
+	return d.executeCommandArgs(ctx, dbIndex, cmdLine, args)
+}
+
+func (d *Driver) ExecuteCommandArgs(ctx context.Context, dbIndex int, args ...any) (driver.KVCommandResult, error) {
+	if len(args) == 0 {
+		return driver.KVCommandResult{}, errors.New("please enter a Redis command")
+	}
+	cmdLabel := fmt.Sprintf("%v", args[0])
+	return d.executeCommandArgs(ctx, dbIndex, cmdLabel, args)
+}
+
+func (d *Driver) executeCommandArgs(ctx context.Context, dbIndex int, cmdLabel string, args []any) (driver.KVCommandResult, error) {
 	start := time.Now()
 	val, err := d.clientForDB(dbIndex).Do(ctx, args...).Result()
 	if errors.Is(err, goredis.Nil) {
-		return driver.KVCommandResult{Command: cmdLine, Output: "(nil)", ElapsedMs: time.Since(start).Milliseconds()}, nil
+		return driver.KVCommandResult{Command: cmdLabel, Output: "(nil)", ElapsedMs: time.Since(start).Milliseconds()}, nil
 	}
 	if err != nil {
 		return driver.KVCommandResult{}, err
@@ -753,7 +776,7 @@ func (d *Driver) ExecuteCommand(ctx context.Context, dbIndex int, cmdLine string
 		out = fmt.Sprintf("%v", val)
 	}
 	return driver.KVCommandResult{
-		Command:   cmdLine,
+		Command:   cmdLabel,
 		Output:    out,
 		ElapsedMs: time.Since(start).Milliseconds(),
 	}, nil

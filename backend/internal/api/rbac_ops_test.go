@@ -251,6 +251,11 @@ func TestRBACMultiUserIsolationAndOperations(t *testing.T) {
 		"SELECT * FROM orders FOR UPDATE",
 		"PRAGMA journal_mode = DELETE",
 		"PRAGMA wal_checkpoint(FULL)",
+		"SELECT '\\'; DROP TABLE orders; SELECT ''",
+		"SELECT e'\\'; DROP TABLE orders; SELECT ''",
+		`SELECT "\"; DROP TABLE orders; SELECT "`,
+		"SELECT /*! ' */ ; DROP TABLE orders; -- '",
+		"SELECT #1; DROP TABLE orders",
 	} {
 		w := doJSON(http.MethodPost, "/api/conn/"+connAID+"/query", auditTok, map[string]any{
 			"database": "main",
@@ -259,6 +264,20 @@ func TestRBACMultiUserIsolationAndOperations(t *testing.T) {
 		if w.Code != http.StatusForbidden {
 			t.Fatalf("expected unsafe SQL %q to be blocked with 403, got %d: %s", unsafeSQL, w.Code, w.Body.String())
 		}
+	}
+	// Verify export custom SQL also blocks backslash-quote smuggle for readonly user and orders table survives intact
+	expReq := httptest.NewRequest(http.MethodGet, "/api/conn/"+connAID+"/export?database=main&format=json&sql="+url.QueryEscape("SELECT '\\'; DROP TABLE orders; SELECT ''"), nil)
+	expReq.Header.Set("Authorization", "Bearer "+auditTok)
+	expW := httptest.NewRecorder()
+	router.ServeHTTP(expW, expReq)
+	if expW.Code != http.StatusForbidden {
+		t.Fatalf("expected readonly export smuggle to return 403, got %d: %s", expW.Code, expW.Body.String())
+	}
+	if wVerify := doJSON(http.MethodPost, "/api/conn/"+connAID+"/query", adminTok, map[string]any{
+		"database": "main",
+		"query":    "SELECT COUNT(*) FROM orders",
+	}); wVerify.Code != http.StatusOK {
+		t.Fatalf("expected orders table to survive blocked read-only smuggles, got %d: %s", wVerify.Code, wVerify.Body.String())
 	}
 
 	// Mutating REST endpoints MUST be blocked with 403 for auditor_bob

@@ -311,7 +311,9 @@ export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
                   }
                 >
                   <Switch
-                    size="small"
+                    size={isMobile ? 'default' : 'small'}
+                    className={isMobile ? 'dbharbor-touch-target' : undefined}
+                    aria-label={`${u.username} ${t('Status')}`}
                     checked={!u.disabled}
                     disabled={u.username === currentUsername}
                     onChange={(checked) => handleToggleEnabled(u, checked)}
@@ -364,16 +366,25 @@ export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
             {
               title: t('Actions'),
               key: 'actions',
-              width: 195,
+              width: isMobile ? 235 : 195,
               render: (_, u) => (
-                <Space size={4} wrap>
+                <Space size={isMobile ? [12, 12] : 4} wrap>
                   <Tooltip title={t('Edit Role & Permissions')}>
-                    <Button size="small" type="text" icon={<EditOutlined />} onClick={() => openEditModal(u)} />
+                    <Button
+                      size="small"
+                      type="text"
+                      className="dbharbor-touch-target"
+                      aria-label={t('Edit Role & Permissions')}
+                      icon={<EditOutlined />}
+                      onClick={() => openEditModal(u)}
+                    />
                   </Tooltip>
                   <Tooltip title={t('Reset Password')}>
                     <Button
                       size="small"
                       type="text"
+                      className="dbharbor-touch-target"
+                      aria-label={t('Reset Password')}
                       icon={<KeyOutlined />}
                       onClick={() => {
                         setResetTarget(u);
@@ -397,7 +408,13 @@ export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
                       }}
                     >
                       <Tooltip title={t('Reset 2FA')}>
-                        <Button size="small" type="text" icon={<SafetyCertificateOutlined />} />
+                        <Button
+                          size="small"
+                          type="text"
+                          className="dbharbor-touch-target"
+                          aria-label={t('Reset 2FA')}
+                          icon={<SafetyCertificateOutlined />}
+                        />
                       </Tooltip>
                     </Popconfirm>
                   )}
@@ -415,7 +432,14 @@ export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
                       }}
                     >
                       <Tooltip title={t('Force Sign Out All Devices')}>
-                        <Button size="small" type="text" danger icon={<DisconnectOutlined />} />
+                        <Button
+                          size="small"
+                          type="text"
+                          danger
+                          className="dbharbor-touch-target"
+                          aria-label={t('Force Sign Out All Devices')}
+                          icon={<DisconnectOutlined />}
+                        />
                       </Tooltip>
                     </Popconfirm>
                   )}
@@ -437,7 +461,14 @@ export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
                       }}
                     >
                       <Tooltip title={t('Delete User')}>
-                        <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+                        <Button
+                          size="small"
+                          type="text"
+                          danger
+                          className="dbharbor-touch-target"
+                          aria-label={t('Delete User')}
+                          icon={<DeleteOutlined />}
+                        />
                       </Tooltip>
                     </Popconfirm>
                   )}
@@ -492,11 +523,11 @@ export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
               <Form.Item
                 name="password"
                 label={t('Initial Password')}
-                rules={[{ required: true, min: 6, message: t('Min 6 characters') }]}
+                rules={[{ required: true, min: 8, message: t('Password must be at least 8 characters') }]}
               >
                 <Input.Password
                   prefix={<LockOutlined />}
-                  placeholder={t('At least 6 characters')}
+                  placeholder={t('At least 8 characters')}
                   autoComplete="new-password"
                 />
               </Form.Item>
@@ -590,9 +621,9 @@ export const UserManagementModal: React.FC<Props> = ({ open, onClose }) => {
           <Form.Item
             name="newPassword"
             label={t('New Temporary Password')}
-            rules={[{ required: true, min: 6, message: t('Min 6 characters') }]}
+            rules={[{ required: true, min: 8, message: t('Password must be at least 8 characters') }]}
           >
-            <Input.Password prefix={<LockOutlined />} placeholder={t('At least 6 characters')} autoComplete="new-password" />
+            <Input.Password prefix={<LockOutlined />} placeholder={t('At least 8 characters')} autoComplete="new-password" />
           </Form.Item>
           <Form.Item name="forcePasswordChange" valuePropName="checked">
             <Checkbox>{t('Mark password as temporary and revoke active sessions')}</Checkbox>

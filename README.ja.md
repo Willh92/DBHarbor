@@ -3,7 +3,7 @@
 **言語切替**: [English](./README.md) | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | **日本語**
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.4-1677ff.svg)](./CHANGELOG.ja.md)
+[![Version](https://img.shields.io/badge/Version-v1.0.5-1677ff.svg)](./CHANGELOG.ja.md)
 [![CGO_ENABLED=0](https://img.shields.io/badge/Go-CGO__ENABLED%3D0-00ADD8.svg)](https://github.com/Willh92/DBHarbor.git)
 
 **phpMyAdmin の直感的なビジュアル操作性**と**モダンなマルチエンジン IDE 機能**を融合した、外部依存ゼロ・単一バイナリの Web データベース管理プラットフォームです。
@@ -24,7 +24,7 @@
   - **テーブル構造・DB 固有オブジェクト作成 & ユーザー権限管理**: カラムの追加・変更・リネーム・削除（生成/計算カラム・`CHECK` 制約対応）、インデックス/外部キー/パーティション管理、**スケジュールイベント**（MySQL/MariaDB/OceanBase）、**シーケンス**（PG/Oracle/DM8/MSSQL/MariaDB/TiDB/DuckDB）、**マテリアライズドビュー＆リフレッシュ**（PG/Oracle/DM8/ClickHouse）、**パッケージ (`Spec` + `Body`)・シノニム・DB リンク**（Oracle/DM8）、**拡張機能・カスタム型 (`ENUM`/`DOMAIN`)**（PG/KingbaseES）、**関数・プロシージャ・トリガー**のビジュアル作成＆編集、DB ユーザー＆権限管理（`GRANT` / `REVOKE`、Redis ACL、MongoDB ロール）、SQLite 無損失テーブル再構築、サイドバーの**デフォルト全折りたたみ＋一括展開/折りたたみスイッチ**と接続/DB/スキーマ間の完全な状態分離。
   - **ブラウザからの一時ローカル単一ファイル DB (`SQLite 3` / `DuckDB`)・フルハイトグリッド & スマート SQL コンソール**: Web サーバー版で手元の `.db`/`.sqlite`/`.duckdb` ファイルをドラッグ＆ドロップまたは **「ローカル DB を開く (`Open Local DB`)」** で直接開き、Chromium ブラウザでの**元ファイルへの直接上書き保存**および最新スナップショットのダウンロードに対応。省メモリ `CellStateHub` フルハイトグリッド（空白行クリック直接挿入、一括カラム編集、Excel・メモ帳互換の TSV コピー＆ペースト）、軽量 Monaco Editor、`Ctrl/Cmd + Enter` 実行、`EXPLAIN` 実行計画、DB 全体/複数テーブルのストリーミング入出力（アップロード RAM `< 64 KiB`）、SQL スクリプト直接実行。
 - **Web マルチユーザー RBAC・ログイン画面ブランディング・セキュリティ保護 & 緊急リカバリ *(Web サーバー版のみ)***:
-  - **初期デフォルト認証情報ゼロ・ブランディング設定 & インデックス登録防止**: 初回起動時の**初期管理者セットアップウィザード**（パスワード最低 `8` 文字、`admin123` 廃止）、未認証時の情報漏洩ゼロ化、ブラウザ `<title>`・上部アイコン（`<= 128 KB` カスタム画像＋Favicon 同期）・見出し・サブタイトルの自由変更、および `/robots.txt`・`X-Robots-Tag`・`<meta name="robots">` による三重の検索エンジンクローラ拒否を搭載。
+  - **初期デフォルト認証情報ゼロ・ブランディング設定 & インデックス登録防止**: 初回起動時の**初期管理者セットアップウィザード**（パスワード最低 `8` 文字、`admin123` 廃止）、未認証時の情報漏洩ゼロ化、ブラウザ `<title>`・上部アイコン（`<= 128 KB` ラスター画像限定＋Favicon 同期）・見出し・サブタイトルの自由変更、および `/robots.txt`・`X-Robots-Tag`・`<meta name="robots">` による三重の検索エンジンクローラ拒否を搭載。
   - **セッション優先の DB パスワード非保存ポリシー & 認証エラー時の再入力プロンプト**: 新規データベース接続はデフォルトで **「パスワードを保存」がオフ**（パスワードは現在のログインセッションのメモリ内でのみ保持されディスクには一切保存されず、次回ログイン時に認証情報の入力を要求。チェック時は `AES-256-GCM` で暗号化保存され、保存済みの接続も「接続を編集」からオフにしてディスク上の暗号化パスワードを即座に消去可能）。また、パスワード保存済みの接続でも DB 側のアカウントやパスワード変更・不一致でエラーになった際は、古いプールを破棄して再入力モーダルを自動表示し、認証成功後に元のリクエストを透過的に再試行します。
   - **3 階層 RBAC・TOTP 2FA & 多層サンドボックス**: 3 階層 RBAC（`Admin` / `Read-Write` / `Read-Only`）とユーザー別のタブ/SQL 下書き分離、秘密鍵派生の使い捨て CAPTCHA、`trustedProxies` 対応レート制限 (`HTTP 429`)、オフライン QR コードによる RFC 6238 TOTP 2FA + 8 個のリカバリコード + 2FA 試行回数制限、厳格な TLS 証明書検証、非管理者向け `<DataDir>/local_databases/u_<hash>/` ＆ `<DataDir>/ephemeral_workspaces/` ユーザー別サンドボックス（字句スキャナによる SQLite `ATTACH`/ファイル関数遮断、サーバー管理の `duckdbCliPath` と DuckDB `-safe` モード + `stdin` 入力 + `enable_external_access = false`、MariaDB `/*M!...*/` 読み取り専用ガード）、全リモートドライバのダイヤル時 DNS リバインディング SSRF 検証、参照カウント式コネクションプール、SQL Server `USE [db]` 接続固定、永続設定 `<DataDir>/config.json` と**自動無害化機能付き緊急管理者リカバリ**に対応。
 - **ネイティブダークタイトルバー同期・モバイルタッチ最適化 & 多言語対応 (i18n)**:
@@ -61,7 +61,7 @@ npm test
 
 ## OS 標準データディレクトリ・CLI オプション & 永続 `config.json`
 
-DBHarbor はカレントディレクトリを汚染せず、各 OS の標準アプリケーションデータ領域にメタデータ (`dbharbor.db`) と暗号鍵 (`.secret.key`) を自動保存します（`-data-dir` で変更可能）：
+DBHarbor はカレントディレクトリを汚染せず、各 OS の標準アプリケーションデータ領域にメタデータ (`dbharbor.db`) と暗号鍵 (`.master.key`) を自動保存します（`-data-dir` で変更可能）：
 
 | OS | 通常ユーザー起動時 | システムサービス / デーモン起動時 |
 | :--- | :--- | :--- |
@@ -81,7 +81,7 @@ DBHarbor はカレントディレクトリを汚染せず、各 OS の標準ア�
 | `-unix-socket` | `DBHARBOR_UNIX_SOCKET` | *(空)* | Unix ドメインソケット待受パス（例: `/run/dbharbor/dbharbor.sock`） |
 | `-unix-socket-perm` | `DBHARBOR_UNIX_SOCKET_PERM` | `0660` | Unix ソケットの 8 進数パーミッション |
 | `-unix-socket-group` | `DBHARBOR_UNIX_SOCKET_GROUP` | *(空)* | Unix ソケットの所有グループ名または GID（`www-data`、`nginx` など） |
-| `-data-dir` | `DBHARBOR_DATA_DIR` | *(OS 標準)* | メタデータ DB・`config.json`・`.secret.key` の保存先ディレクトリ |
+| `-data-dir` | `DBHARBOR_DATA_DIR` | *(OS 標準)* | メタデータ DB・`config.json`・`.master.key` の保存先ディレクトリ |
 | `-admin-user` | `DBHARBOR_ADMIN_USER` | *(空 — Web 設定)* | 初回ヘッドレス初期化用の管理者ユーザー名（ユーザー未登録時のみ有効） |
 | `-admin-pass` | `DBHARBOR_ADMIN_PASS` | *(空 — Web 設定)* | 初回ヘッドレス初期化用の管理者パスワード（**最低 8 文字**） |
 | `-idle-ttl` | `DBHARBOR_IDLE_TTL` | `30` | アイドル DB 接続プールの自動解放タイムアウト（分） |
@@ -130,7 +130,7 @@ DBHarbor はカレントディレクトリを汚染せず、各 OS の標準ア�
 1. **`<DataDir>/config.json` を編集して再起動**：`"recovery"` を `{ "enabled": true, "adminUsername": "admin", "newPassword": "YourNewStrongPassword", "reset2FA": true }`（8 文字以上、または `"newPassword": "auto"` で 16 文字のランダムパスワードを生成して起動ログに出力）に設定し、DBHarbor を再起動します。起動時に `dbharbor.db` を `<DataDir>/.backups/` へ自動退避し、パスワード/2FA のリセットと既存セッション失効を行った後、**即座に `config.json` を自動無害化（`"enabled": false, "newPassword": ""`）**して平文パスワードをディスクから消去します。
 2. **ワンショット CLI 復旧**：`dbharbor -data-dir /var/lib/dbharbor -recover-admin -recover-pass auto -reset-2fa`
 
-> **Web サーバー版のローカルファイル & ネットワーク境界**：DBHarbor の内部メタデータ DB（`dbharbor.db`）・`config.json`・暗号鍵（`.secret.key`）は全モードで自動的に非表示・保護されます。**Web サーバー版**では、非管理者（`Read-Write`）によるサーバー保存 SQLite / DuckDB ファイル操作はユーザー別の `<DataDir>/local_databases/u_<hash>/` サンドボックス内に制限され、ブラウザから **「ローカル DB を開く (`Open Local DB`)」** で開いた一時単一ファイル DB はユーザー別の `0700` `<DataDir>/ephemeral_workspaces/` に分離されます（マジックヘッダー検証、12 時間アイドル自動クリーンアップ、字句スキャナによる SQLite `ATTACH`/ファイル関数遮断、サーバー管理の `security.duckdbCliPath` と DuckDB `-safe` モード + `stdin` 入力 + `enable_external_access = false`、およびダイヤル時の DNS リバインディング・プライベート網 SSRF ガードを適用）。**デスクトップ GUI 版**はユーザーアカウント機能を持たないログイン不要のローカルモードでホスト全体のファイルにアクセス可能です。
+> **Web サーバー版のローカルファイル & ネットワーク境界**：DBHarbor の内部メタデータ DB（`dbharbor.db`）・`config.json`・暗号鍵（`.master.key`）は全モードで自動的に非表示・保護されます。**Web サーバー版**では、非管理者（`Read-Write`）によるサーバー保存 SQLite / DuckDB ファイル操作はユーザー別の `<DataDir>/local_databases/u_<hash>/` サンドボックス内に制限され、ブラウザから **「ローカル DB を開く (`Open Local DB`)」** で開いた一時単一ファイル DB はユーザー別の `0700` `<DataDir>/ephemeral_workspaces/` に分離されます（マジックヘッダー検証、12 時間アイドル自動クリーンアップ、字句スキャナによる SQLite `ATTACH`/ファイル関数遮断、サーバー管理の `security.duckdbCliPath` と DuckDB `-safe` モード + `stdin` 入力 + `enable_external_access = false`、およびダイヤル時の DNS リバインディング・プライベート網 SSRF ガードを適用）。**デスクトップ GUI 版**はユーザーアカウント機能を持たないログイン不要のローカルモードでホスト全体のファイルにアクセス可能です。
 
 ---
 

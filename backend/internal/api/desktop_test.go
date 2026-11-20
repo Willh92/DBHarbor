@@ -191,6 +191,31 @@ func TestDesktopPureLocalModeE2E(t *testing.T) {
 	if err != nil || !strings.Contains(string(sqlBytes), "HarborDesktop") {
 		t.Fatalf("exported SQL file missing expected content: err=%v body=%s", err, string(sqlBytes))
 	}
+
+	// Verify /export/desktop-save removes partial file if StreamExport fails (missing table)
+	badSavePath := filepath.Join(tmpDir, "failed_export.sql")
+	// Re-point SaveFileDialog via a separate small server or check missing-table failure leaves no partial file
+	badBody, _ := json.Marshal(map[string]any{
+		"database": "main",
+		"table":    "no_such_table_xyz",
+		"format":   "sql",
+	})
+	_ = os.Remove(exportOutPath)
+	reqBadExp, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/conn/"+connID+"/export/desktop-save", bytes.NewReader(badBody))
+	reqBadExp.Header.Set("Content-Type", "application/json")
+	reqBadExp.AddCookie(sessionCookie)
+	respBadExp, err := noRedirectClient.Do(reqBadExp)
+	if err != nil {
+		t.Fatalf("POST /export/desktop-save bad table failed: %v", err)
+	}
+	_ = respBadExp.Body.Close()
+	if respBadExp.StatusCode == http.StatusOK {
+		t.Fatalf("expected non-200 status on missing table desktop-save, got 200")
+	}
+	if _, statErr := os.Stat(exportOutPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected failed desktop-save to remove partial file %s, stat err=%v", exportOutPath, statErr)
+	}
+	_ = badSavePath
 }
 
 func TestDesktopHeaderTokenUpdateCheckAndTriggers(t *testing.T) {

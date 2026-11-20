@@ -20,6 +20,7 @@ import (
 // Queryer abstracts *sql.DB, *sql.Conn, and *sql.Tx for unified query execution.
 type Queryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
@@ -83,7 +84,15 @@ func IsProtectedSystemDatabase(dbType, name string) bool {
 }
 
 func IsQueryStatement(stmt string) bool {
-	s := strings.TrimSpace(StripLeadingSQLComments(stmt))
+	return isQueryStatementWithTrimmed(strings.TrimSpace(StripLeadingSQLComments(stmt)))
+}
+
+// IsQueryStatementForEngine behaves like IsQueryStatement using lexical comment rules for engine.
+func IsQueryStatementForEngine(engine, stmt string) bool {
+	return isQueryStatementWithTrimmed(strings.TrimSpace(StripLeadingSQLCommentsForEngine(engine, stmt)))
+}
+
+func isQueryStatementWithTrimmed(s string) bool {
 	if s == "" {
 		return false
 	}
@@ -102,7 +111,15 @@ func IsQueryStatement(stmt string) bool {
 
 // IsDDLStatement reports whether stmt mutates schema metadata so caches can be invalidated.
 func IsDDLStatement(stmt string) bool {
-	kw := leadingSQLKeyword(stmt)
+	return isDDLKeyword(leadingSQLKeyword(stmt))
+}
+
+// IsDDLStatementForEngine behaves like IsDDLStatement using lexical comment rules for engine.
+func IsDDLStatementForEngine(engine, stmt string) bool {
+	return isDDLKeyword(leadingSQLKeywordForEngine(engine, stmt))
+}
+
+func isDDLKeyword(kw string) bool {
 	switch kw {
 	case "CREATE", "ALTER", "DROP", "RENAME", "TRUNCATE":
 		return true
@@ -141,6 +158,10 @@ func ExecuteSingleQueryConn(ctx context.Context, q Queryer, stmt string, maxRows
 }
 
 func executeSingleQueryWithBudget(ctx context.Context, q Queryer, stmt string, maxRows int, remainingBytes *int) (driver.QueryResult, error) {
+	return executeSingleQueryWithBudgetForEngine(ctx, q, "", stmt, maxRows, remainingBytes)
+}
+
+func executeSingleQueryWithBudgetForEngine(ctx context.Context, q Queryer, engine, stmt string, maxRows int, remainingBytes *int) (driver.QueryResult, error) {
 	start := time.Now()
 	if maxRows <= 0 {
 		maxRows = 1000
@@ -150,7 +171,11 @@ func executeSingleQueryWithBudget(ctx context.Context, q Queryer, stmt string, m
 		remainingBytes = &b
 	}
 
-	if IsQueryStatement(stmt) {
+	isQuery := IsQueryStatement(stmt)
+	if strings.TrimSpace(engine) != "" {
+		isQuery = IsQueryStatementForEngine(engine, stmt)
+	}
+	if isQuery {
 		rows, err := q.QueryContext(ctx, stmt)
 		if err != nil {
 			return driver.QueryResult{}, err
@@ -278,18 +303,26 @@ func executeSingleQueryWithBudget(ctx context.Context, q Queryer, stmt string, m
 }
 
 func ExecuteMultiSQL(ctx context.Context, db *sql.DB, script string, maxRows int) ([]driver.QueryResult, error) {
-	return ExecuteMultiSQLConn(ctx, db, script, maxRows)
+	return ExecuteMultiSQLConnForEngine(ctx, db, "", script, maxRows)
+}
+
+func ExecuteMultiSQLForEngine(ctx context.Context, db *sql.DB, engine, script string, maxRows int) ([]driver.QueryResult, error) {
+	return ExecuteMultiSQLConnForEngine(ctx, db, engine, script, maxRows)
 }
 
 func ExecuteMultiSQLConn(ctx context.Context, q Queryer, script string, maxRows int) ([]driver.QueryResult, error) {
-	stmts := SplitStatements(script)
+	return ExecuteMultiSQLConnForEngine(ctx, q, "", script, maxRows)
+}
+
+func ExecuteMultiSQLConnForEngine(ctx context.Context, q Queryer, engine, script string, maxRows int) ([]driver.QueryResult, error) {
+	stmts := SplitStatementsForEngine(engine, script)
 	if len(stmts) == 0 {
 		return []driver.QueryResult{}, nil
 	}
 	remainingBytes := maxQueryResultBytes
 	results := make([]driver.QueryResult, 0, len(stmts))
 	for _, stmt := range stmts {
-		r, err := executeSingleQueryWithBudget(ctx, q, stmt, maxRows, &remainingBytes)
+		r, err := executeSingleQueryWithBudgetForEngine(ctx, q, engine, stmt, maxRows, &remainingBytes)
 		if err != nil {
 			return results, fmt.Errorf("statement execution failed [%s]: %w", truncateStr(stmt, 120), err)
 		}
@@ -322,6 +355,37 @@ func QueryCountConn(ctx context.Context, q Queryer, countSQL string) (int64, boo
 		return 0, false
 	}
 	return total, true
+}
+
+// Exec executes a single SQL statement over a bound Queryer (*sql.DB, *sql.Conn, or *sql.Tx).
+func Exec(ctx context.Context, q Queryer, query string, args ...any) error {
+	_, err := q.ExecContext(ctx, query, args...)
+	return err
+}
+
+// ExecResult executes a single SQL statement and returns sql.Result over a bound Queryer.
+func ExecResult(ctx context.Context, q Queryer, query string, args ...any) (sql.Result, error) {
+	return q.ExecContext(ctx, query, args...)
+}
+
+// ExecBatch executes statements sequentially over a bound Queryer.
+func ExecBatch(ctx context.Context, q Queryer, sqls []string) error {
+	return execBatchOnQueryer(ctx, q, sqls)
+}
+
+// Query executes a SQL query returning *sql.Rows over a bound Queryer.
+func Query(ctx context.Context, q Queryer, query string, args ...any) (*sql.Rows, error) {
+	return q.QueryContext(ctx, query, args...)
+}
+
+// QueryRow executes a SQL query returning *sql.Row over a bound Queryer.
+func QueryRow(ctx context.Context, q Queryer, query string, args ...any) *sql.Row {
+	return q.QueryRowContext(ctx, query, args...)
+}
+
+// QueryCount executes a single scalar COUNT(*) query over a bound Queryer.
+func QueryCount(ctx context.Context, q Queryer, countSQL string) (int64, bool) {
+	return QueryCountConn(ctx, q, countSQL)
 }
 
 func ApplyMutations(ctx context.Context, db *sql.DB, d Dialect, req driver.RowMutationRequest) (driver.MutationResult, error) {
@@ -822,7 +886,14 @@ func streamTableSQLInserts(ctx context.Context, q Queryer, d Dialect, targetTbl,
 }
 
 func leadingSQLKeyword(stmt string) string {
-	s := StripLeadingSQLComments(stmt)
+	return leadingSQLKeywordFromStripped(StripLeadingSQLComments(stmt))
+}
+
+func leadingSQLKeywordForEngine(engine, stmt string) string {
+	return leadingSQLKeywordFromStripped(StripLeadingSQLCommentsForEngine(engine, stmt))
+}
+
+func leadingSQLKeywordFromStripped(s string) string {
 	end := 0
 	for end < len(s) && ((s[end] >= 'a' && s[end] <= 'z') || (s[end] >= 'A' && s[end] <= 'Z') || s[end] == '_') {
 		end++
@@ -891,7 +962,7 @@ func BatchImportConn(
 			}
 		}()
 
-		err := StreamStatements(req.Reader, func(stmt string) error {
+		err := StreamStatementsForEngine(string(d), req.Reader, func(stmt string) error {
 			if cErr := ctx.Err(); cErr != nil {
 				return cErr
 			}
@@ -905,7 +976,7 @@ func BatchImportConn(
 					return vErr
 				}
 			}
-			kw := leadingSQLKeyword(stmt)
+			kw := leadingSQLKeywordForEngine(string(d), stmt)
 
 			if canAutoBatch {
 				switch kw {

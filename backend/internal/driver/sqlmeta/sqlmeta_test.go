@@ -2,6 +2,7 @@ package sqlmeta
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -370,20 +371,24 @@ func TestClickHouseDefinerTargetAndDbLinkHardening(t *testing.T) {
 	drv := &mockSQLDriver{}
 
 	// 1. Comment-obfuscated DEFINER/**/= and SQL SECURITY DEFINER blocked for non-admin Web users
-	for _, badRoutine := range []string{
-		"CREATE DEFINER/**/= 'root'@'%' EVENT ev_esc ON SCHEDULE EVERY 1 HOUR DO SELECT 1",
-		"CREATE /*M!50017 DEFINER='root'@'localhost' */ EVENT ev_esc ON SCHEDULE EVERY 1 HOUR DO SELECT 1",
+	for _, tc := range []struct {
+		eng        string
+		badRoutine string
+	}{
+		{"mysql", "CREATE DEFINER/**/= 'root'@'%' EVENT ev_esc ON SCHEDULE EVERY 1 HOUR DO SELECT 1"},
+		{"mysql", "CREATE /*!50017 DEFINER='root'@'localhost' */ EVENT ev_esc ON SCHEDULE EVERY 1 HOUR DO SELECT 1"},
+		{"mariadb", "CREATE /*M!50017 DEFINER='root'@'localhost' */ EVENT ev_esc ON SCHEDULE EVERY 1 HOUR DO SELECT 1"},
 	} {
-		if _, err := ExecuteObjectAction(ctx, "mysql", drv, driver.ObjectActionRequest{
+		if _, err := ExecuteObjectAction(ctx, tc.eng, drv, driver.ObjectActionRequest{
 			Database:   "shop",
 			ObjectName: "ev_esc",
 			ObjectType: "EVENT",
 			Action:     "CREATE_OR_REPLACE",
 			WebMode:    true,
 			IsAdmin:    false,
-			RoutineSQL: badRoutine,
+			RoutineSQL: tc.badRoutine,
 		}); err == nil {
-			t.Fatalf("expected comment-obfuscated DEFINER %q to be blocked", badRoutine)
+			t.Fatalf("expected %s comment-obfuscated DEFINER %q to be blocked", tc.eng, tc.badRoutine)
 		}
 	}
 
@@ -505,5 +510,441 @@ func TestClickHouseDefinerTargetAndDbLinkHardening(t *testing.T) {
 		},
 	}); err == nil {
 		t.Fatal("expected TNS PROTOCOL=IPC smuggling to be blocked when AllowPrivIP=false")
+	}
+
+	// 5. Dialect-aware DEFINER & nested-comment / hash-comment regressions via ExecuteObjectAction
+	if _, err := ExecuteObjectAction(ctx, "mysql", drv, driver.ObjectActionRequest{
+		Database:    "shop",
+		ObjectName:  "v_safe_quote",
+		ObjectType:  "VIEW",
+		Action:      "CREATE_VIEW",
+		WebMode:     true,
+		IsAdmin:     false,
+		PreviewOnly: true,
+		ViewSQL:     "CREATE VIEW v_safe_quote AS SELECT 'it\\'s DEFINER = ok' AS note",
+	}); err != nil {
+		t.Fatalf("expected MySQL CREATE_VIEW with escaped quote before DEFINER = in string literal to pass, got %v", err)
+	}
+	if _, err := ExecuteObjectAction(ctx, "mysql", drv, driver.ObjectActionRequest{
+		Database:    "shop",
+		ObjectName:  "p_evil_def",
+		ObjectType:  "PROCEDURE",
+		Action:      "CREATE_ROUTINE",
+		WebMode:     true,
+		IsAdmin:     false,
+		PreviewOnly: true,
+		RoutineSQL:  "CREATE PROCEDURE p_evil_def() COMMENT 'abc\\'' SQL SECURITY DEFINER BEGIN SELECT 1; END",
+	}); err == nil {
+		t.Fatal("expected MySQL CREATE_ROUTINE with SQL SECURITY DEFINER after escaped quote to be rejected")
+	}
+	if _, err := ExecuteObjectAction(ctx, "postgres", drv, driver.ObjectActionRequest{
+		Schema:      "public",
+		ObjectName:  "v_nested_def",
+		ObjectType:  "VIEW",
+		Action:      "CREATE_VIEW",
+		WebMode:     true,
+		IsAdmin:     false,
+		PreviewOnly: true,
+		ViewSQL:     "CREATE VIEW v_nested_def AS /* /* */ ' */ DEFINER = root SELECT 1",
+	}); err == nil {
+		t.Fatal("expected PostgreSQL CREATE_VIEW with nested comment DEFINER bypass to be rejected")
+	}
+	if _, err := ExecuteObjectAction(ctx, "duckdb", drv, driver.ObjectActionRequest{
+		Schema:      "main",
+		ObjectName:  "v_duck_bad",
+		ObjectType:  "VIEW",
+		Action:      "CREATE_VIEW",
+		WebMode:     true,
+		IsAdmin:     false,
+		PreviewOnly: true,
+		ViewSQL:     "SELECT #1 FROM (SELECT 42); CALL duckdb_secrets()",
+	}); err == nil {
+		t.Fatal("expected DuckDB CREATE_VIEW with #1 multi-statement CALL duckdb_secrets() to be rejected")
+	}
+
+	// 6. Iteration 4 regressions: DollarQuotes gating, MySQL /*M! & /*!99999 quote-swallowing, DuckDB PIVOT/UNPIVOT/FROM VALUES
+	for _, badMySQLRoutine := range []string{
+		"CREATE FUNCTION f_dollar_single($x$ INT) RETURNS INT DETERMINISTIC SQL SECURITY DEFINER RETURN $x$",
+		"CREATE PROCEDURE p_dollar_single(IN $x$ INT) SQL SECURITY DEFINER SELECT $x$",
+		"CREATE PROCEDURE p_maria_cmt() /*M! ' */ SQL SECURITY DEFINER /* ' */ BEGIN SELECT 1; END",
+		"CREATE PROCEDURE p_ver_cmt() /*!99999 ' */ SQL SECURITY DEFINER /* ' */ BEGIN SELECT 1; END",
+	} {
+		if _, err := ExecuteObjectAction(ctx, "mysql", drv, driver.ObjectActionRequest{
+			Database:    "shop",
+			ObjectName:  "p_iter4",
+			ObjectType:  "PROCEDURE",
+			Action:      "CREATE_ROUTINE",
+			WebMode:     true,
+			IsAdmin:     false,
+			PreviewOnly: true,
+			RoutineSQL:  badMySQLRoutine,
+		}); err == nil {
+			t.Fatalf("expected MySQL CREATE_ROUTINE to reject %q", badMySQLRoutine)
+		}
+	}
+	if _, err := ExecuteObjectAction(ctx, "clickhouse", drv, driver.ObjectActionRequest{
+		Database:    "default",
+		ObjectName:  "v_ch_dollar",
+		ObjectType:  "VIEW",
+		Action:      "CREATE_VIEW",
+		WebMode:     true,
+		IsAdmin:     false,
+		AllowPrivIP: false,
+		PreviewOnly: true,
+		ViewSQL:     "CREATE VIEW v_ch_dollar AS SELECT 1 AS $x$, s3('http://169.254.169.254/') AS $x$",
+	}); err == nil {
+		t.Fatal("expected ClickHouse CREATE_VIEW with $x$ wrapper around s3() to be rejected in restricted Web mode")
+	}
+	for _, badDuckView := range []string{
+		"PIVOT '/etc/passwd' ON col USING SUM(val)",
+		"UNPIVOT '/etc/passwd' ON col",
+		"SELECT * FROM VALUES (1) AS t(a), '/etc/passwd'",
+	} {
+		if _, err := ExecuteObjectAction(ctx, "duckdb", drv, driver.ObjectActionRequest{
+			Schema:      "main",
+			ObjectName:  "v_duck_pivot",
+			ObjectType:  "VIEW",
+			Action:      "CREATE_VIEW",
+			WebMode:     true,
+			IsAdmin:     false,
+			PreviewOnly: true,
+			ViewSQL:     badDuckView,
+		}); err == nil {
+			t.Fatalf("expected DuckDB CREATE_VIEW sandbox to reject %q", badDuckView)
+		}
+	}
+
+	// 7. Iteration 5 regressions: '\*/' inside MySQL/MariaDB executable comments + MariaDB /*M!50003 DDL target/split parity
+	for _, tc := range []struct {
+		eng string
+		sql string
+	}{
+		{"mysql", "CREATE PROCEDURE p9() SQL /*!50000 SECURITY */ /*!99999 ' \\*/ DEFINER /* ' */ BEGIN SELECT 1; END"},
+		{"mysql", "CREATE PROCEDURE p12() SQL /*!50000 SECURITY */ /*!99999 \" \\*/ DEFINER /* \" */ BEGIN SELECT 1; END"},
+		{"mysql", "CREATE PROCEDURE p() /*!99999 '\\*/ /*!50001 SQL SECURITY DEFINER -- '\n */ BEGIN SELECT 1; END"},
+		{"mysql", "CREATE PROCEDURE p_odd() /*!99999 '\\\\\\*/ /*!50001 SQL SECURITY DEFINER -- '\n */ BEGIN SELECT 1; END"},
+		{"mariadb", "CREATE PROCEDURE p10() SQL /*M!50000 SECURITY */ /*M!999999 ' \\*/ DEFINER /* ' */ BEGIN SELECT 1; END"},
+	} {
+		if _, err := ExecuteObjectAction(ctx, tc.eng, drv, driver.ObjectActionRequest{
+			Database:    "shop",
+			ObjectName:  "p_iter5",
+			ObjectType:  "PROCEDURE",
+			Action:      "CREATE_ROUTINE",
+			WebMode:     true,
+			IsAdmin:     false,
+			PreviewOnly: true,
+			RoutineSQL:  tc.sql,
+		}); err == nil {
+			t.Fatalf("expected %s ExecuteObjectAction to reject DEFINER bypass %q", tc.eng, tc.sql)
+		}
+	}
+
+	for _, tc := range []struct {
+		objType string
+		action  string
+		viewSQL string
+		routSQL string
+	}{
+		{"VIEW", "CREATE_VIEW", "/*M!50003 DROP TABLE items; */ CREATE VIEW v_maria_pwn AS SELECT 1", ""},
+		{"VIEW", "CREATE_VIEW", "/*M!50003 DROP TABLE items -- */\nCREATE VIEW v_maria_pwn AS SELECT 1", ""},
+		{"VIEW", "CREATE_VIEW", "CREATE /*M!50003 TABLE pwn(x INT) */ VIEW v_maria_pwn AS SELECT 1", ""},
+		{"PROCEDURE", "CREATE_ROUTINE", "", "/*M!50003 DROP TABLE items; */ CREATE PROCEDURE p_maria_pwn() BEGIN SELECT 1; END"},
+		{"TRIGGER", "CREATE_TRIGGER", "", "/*M!50003 DROP TABLE items; */ CREATE TRIGGER t_maria_pwn BEFORE INSERT ON items FOR EACH ROW SET @a=1"},
+	} {
+		if _, err := ExecuteObjectAction(ctx, "mariadb", drv, driver.ObjectActionRequest{
+			Database:    "shop",
+			ObjectName:  "maria_pwn",
+			ObjectType:  tc.objType,
+			Action:      tc.action,
+			WebMode:     true,
+			IsAdmin:     false,
+			PreviewOnly: true,
+			ViewSQL:     tc.viewSQL,
+			RoutineSQL:  tc.routSQL,
+		}); err == nil {
+			t.Fatalf("expected mariadb ExecuteObjectAction %s to reject /*M!50003 bypass", tc.action)
+		}
+	}
+
+	// 8. Iteration 6 regressions: nested executable-comment DEFINER bypasses & benign /*!50000 'ok' */
+	for _, tc := range []struct {
+		name string
+		eng  string
+		sql  string
+	}{
+		{"mysql_nest_bs_1close", "mysql", "CREATE PROCEDURE p1() SQL /*!50000 SECURITY /*!99999 ' \\*/ DEFINER /* ' */ BEGIN SELECT 1; END"},
+		{"mysql_nest_bs_2close", "mysql", "CREATE PROCEDURE p2() SQL /*!50000 SECURITY /*!99999 ' \\*/ DEFINER /* ' */ */ BEGIN SELECT 1; END"},
+		{"mysql_nest_nobs_1close", "mysql", "CREATE PROCEDURE p3() SQL /*!50000 SECURITY /*!99999 ' */ DEFINER /* ' */ BEGIN SELECT 1; END"},
+		{"mysql_nest_nobs_2close", "mysql", "CREATE PROCEDURE p4() SQL /*!50000 SECURITY /*!99999 ' */ DEFINER /* ' */ */ BEGIN SELECT 1; END"},
+		{"mysql_nest_dbl_nobs", "mysql", "CREATE PROCEDURE p5() SQL /*!50000 SECURITY /*!99999 \" */ DEFINER /* \" */ */ BEGIN SELECT 1; END"},
+		{"mysql_nest_bt_nobs", "mysql", "CREATE PROCEDURE p6() SQL /*!50000 SECURITY /*!99999 ` */ DEFINER /* ` */ */ BEGIN SELECT 1; END"},
+		{"maria_nest_nobs_2close", "mariadb", "CREATE PROCEDURE pm1() SQL /*M!50000 SECURITY /*M!999999 ' */ DEFINER /* ' */ */ BEGIN SELECT 1; END"},
+		{"maria_nest_bs_1close", "mariadb", "CREATE PROCEDURE pm2() SQL /*M!50000 SECURITY /*M!999999 ' \\*/ DEFINER /* ' */ BEGIN SELECT 1; END"},
+		{"mysql_direct_unclosed", "mysql", "CREATE PROCEDURE pu() SQL /*!50000 SECURITY ' */ DEFINER /* ' */ BEGIN SELECT 1; END"},
+	} {
+		if _, err := ExecuteObjectAction(ctx, tc.eng, drv, driver.ObjectActionRequest{
+			Database:    "shop",
+			ObjectName:  tc.name,
+			ObjectType:  "PROCEDURE",
+			Action:      "CREATE_ROUTINE",
+			WebMode:     true,
+			IsAdmin:     false,
+			PreviewOnly: true,
+			RoutineSQL:  tc.sql,
+		}); err == nil {
+			t.Fatalf("%s (%s): expected ExecuteObjectAction to reject nested exec-comment DEFINER bypass", tc.name, tc.eng)
+		}
+	}
+
+	if _, err := ExecuteObjectAction(ctx, "mysql", drv, driver.ObjectActionRequest{
+		Database:    "shop",
+		ObjectName:  "p_benign_exec_ok",
+		ObjectType:  "PROCEDURE",
+		Action:      "CREATE_ROUTINE",
+		WebMode:     true,
+		IsAdmin:     false,
+		PreviewOnly: true,
+		RoutineSQL:  "CREATE PROCEDURE p_benign_exec_ok() COMMENT /*!50000 'ok' */ BEGIN SELECT 1; END",
+	}); err != nil {
+		t.Fatalf("expected benign MySQL CREATE_ROUTINE with /*!50000 'ok' */ to pass, got %v", err)
+	}
+
+	// 9. Iteration 7 regressions: version-mismatched sequential/nested DEFINER + /*!99999 BEGIN */ multi-statement split bypasses
+	for _, tc := range []struct {
+		name    string
+		eng     string
+		objType string
+		action  string
+		sql     string
+	}{
+		{"ps1", "mysql", "PROCEDURE", "CREATE_ROUTINE", "CREATE PROCEDURE ps1() /*!50000 SQL SECURITY */ /*!99999 'b' */ DEFINER BEGIN SELECT 1; END"},
+		{"ps3", "mariadb", "PROCEDURE", "CREATE_ROUTINE", "CREATE PROCEDURE ps3() /*M!50000 SQL SECURITY */ /*M!999999 'b' */ DEFINER BEGIN SELECT 1; END"},
+		{"p_50001", "mysql", "PROCEDURE", "CREATE_ROUTINE", "CREATE PROCEDURE p_50001() /*!50000 SQL SECURITY */ /*!50001 'b' */ DEFINER BEGIN SELECT 1; END"},
+		{"ph1", "mysql", "PROCEDURE", "CREATE_ROUTINE", "CREATE PROCEDURE ph1() /*!50000 SQL SECURITY /*!99999 'a' */ /*!99999 'b' */ DEFINER BEGIN SELECT 1; END"},
+		{"ph2", "mariadb", "PROCEDURE", "CREATE_ROUTINE", "CREATE PROCEDURE ph2() /*M!50000 SQL SECURITY /*M!999999 'a' */ /*M!999999 'b' */ DEFINER BEGIN SELECT 1; END"},
+		{"ph5", "mysql", "PROCEDURE", "CREATE_ROUTINE", "CREATE PROCEDURE ph5() /*!50000 SQL SECURITY /* ' */ /*!99999 'b' */ DEFINER BEGIN SELECT 1; END"},
+		{"fh1", "mysql", "FUNCTION", "CREATE_ROUTINE", "CREATE FUNCTION fh1() RETURNS INT DETERMINISTIC /*!50000 SQL SECURITY /*!99999 'a' */ /*!99999 'b' */ DEFINER RETURN 1"},
+		{"B1", "mysql", "PROCEDURE", "CREATE_ROUTINE", "CREATE PROCEDURE p_adj1() SQL /*!50000 SECURITY */ /*!99999 'a' */ DEFINER BEGIN SELECT 1; END"},
+		{"B5", "mysql", "PROCEDURE", "CREATE_ROUTINE", "CREATE PROCEDURE p_adj4() SQL /*!50000 SECURITY /* x */ /*!99999 'a' */ DEFINER BEGIN SELECT 1; END"},
+		{"B7", "mariadb", "PROCEDURE", "CREATE_ROUTINE", "CREATE PROCEDURE pm_adj2() SQL /*M!50000 SECURITY /* x */ /*M!999999 'a' */ DEFINER BEGIN SELECT 1; END"},
+		{"p_num", "mysql", "PROCEDURE", "CREATE_ROUTINE", "CREATE PROCEDURE p_num() SQL /*!50000 SECURITY */ /*!99999 1 */ DEFINER BEGIN SELECT 1; END"},
+		{"p_reset", "mysql", "PROCEDURE", "CREATE_ROUTINE", "CREATE PROCEDURE p_reset() /*!50000 SQL SECURITY /*!99999 */ /*!99999 'b' */ DEFINER BEGIN SELECT 1; END"},
+		{"split_proc_mysql", "mysql", "PROCEDURE", "CREATE_ROUTINE", "CREATE PROCEDURE p_b1() /*!99999 BEGIN */ SELECT 1; DROP TABLE users;"},
+		{"split_proc_maria", "mariadb", "PROCEDURE", "CREATE_ROUTINE", "CREATE PROCEDURE p_b2() /*M!999999 BEGIN */ SELECT 1; DROP TABLE users;"},
+		{"split_trig_mysql", "mysql", "TRIGGER", "CREATE_TRIGGER", "CREATE TRIGGER t_b1 BEFORE INSERT ON items FOR EACH ROW /*!99999 BEGIN */ SET @a=1; DROP TABLE users;"},
+		{"split_event_raw", "mysql", "EVENT", "CREATE_OR_REPLACE", "CREATE EVENT ev_b ON SCHEDULE EVERY 1 DAY DO /*!99999 BEGIN */ SELECT 1; DROP TABLE users;"},
+	} {
+		if _, err := ExecuteObjectAction(ctx, tc.eng, drv, driver.ObjectActionRequest{
+			Database:    "shop",
+			ObjectName:  tc.name,
+			ObjectType:  tc.objType,
+			Action:      tc.action,
+			WebMode:     true,
+			IsAdmin:     false,
+			PreviewOnly: true,
+			RoutineSQL:  tc.sql,
+		}); err == nil {
+			t.Fatalf("%s (%s): expected ExecuteObjectAction to reject %q", tc.name, tc.eng, tc.sql)
+		}
+	}
+
+	if _, err := ExecuteObjectAction(ctx, "mysql", drv, driver.ObjectActionRequest{
+		Database:    "shop",
+		ObjectName:  "ev_spec_b",
+		ObjectType:  "EVENT",
+		Action:      "CREATE_OR_REPLACE",
+		WebMode:     true,
+		IsAdmin:     false,
+		PreviewOnly: true,
+		Spec: &driver.ObjectSpec{
+			ScheduleKind: "EVERY",
+			EveryValue:   1,
+			EveryUnit:    "DAY",
+			BodySQL:      "/*!99999 BEGIN */ SELECT 1; DROP TABLE users",
+		},
+	}); err == nil {
+		t.Fatalf("expected EVENT spec BodySQL /*!99999 BEGIN */ multi-stmt bypass to be rejected")
+	}
+
+	if _, err := ExecuteObjectAction(ctx, "mariadb", drv, driver.ObjectActionRequest{
+		Database:    "shop",
+		ObjectName:  "v_maria_alg_ok",
+		ObjectType:  "VIEW",
+		Action:      "CREATE_VIEW",
+		WebMode:     true,
+		IsAdmin:     false,
+		PreviewOnly: true,
+		ViewSQL:     "CREATE /*M!50003 ALGORITHM=UNDEFINED */ VIEW v_maria_alg_ok AS SELECT 1",
+	}); err != nil {
+		t.Fatalf("expected benign MariaDB CREATE_VIEW with /*M!50003 ALGORITHM=UNDEFINED */ to pass, got %v", err)
+	}
+
+	// 10. Iteration 8 regressions: preserveExecQuotes clamping, 32+ dummy comments, MariaDB 5x4 cross-family
+	var sb35 strings.Builder
+	for i := 0; i < 35; i++ {
+		fmt.Fprintf(&sb35, "/*!%d*/ ", 10001+i)
+	}
+	empty35 := sb35.String()
+
+	var sbMariaCross strings.Builder
+	for i := 0; i < 5; i++ {
+		fmt.Fprintf(&sbMariaCross, "/*!%d*/ ", 10001+i)
+	}
+	for i := 0; i < 4; i++ {
+		fmt.Fprintf(&sbMariaCross, "/*M!%d*/ ", 10001+i)
+	}
+	mariaCross := sbMariaCross.String()
+
+	for _, tc := range []struct {
+		name    string
+		eng     string
+		objType string
+		action  string
+		viewSQL string
+		routSQL string
+	}{
+		{"pq_definer", "mysql", "PROCEDURE", "CREATE_ROUTINE", "", "CREATE PROCEDURE p_pq() COMMENT /*!50000 ' */ ' */ /*!50000 SQL SECURITY */ /*!80000 x */ DEFINER BEGIN SELECT 1; END"},
+		{"pq_split", "mysql", "PROCEDURE", "CREATE_ROUTINE", "", "CREATE PROCEDURE p_pqs() COMMENT /*!50000 ' */ ' */ /*!80000 BEGIN */ SELECT 1; DROP TABLE users;"},
+		{"cap35_definer", "mysql", "PROCEDURE", "CREATE_ROUTINE", "", "CREATE PROCEDURE p_c35() " + empty35 + " /*!50000 SQL SECURITY */ /*!99999 'x' */ DEFINER BEGIN SELECT 1; END"},
+		{"cap35_split", "mysql", "PROCEDURE", "CREATE_ROUTINE", "", "CREATE PROCEDURE p_c35s() " + empty35 + " /*!99999 BEGIN */ SELECT 1 /*!50000 ; DROP TABLE users */"},
+		{"cap35_trig", "mysql", "TRIGGER", "CREATE_TRIGGER", "", "CREATE TRIGGER t_c35 BEFORE INSERT ON items FOR EACH ROW " + empty35 + " /*!99999 BEGIN */ SET @a=1 /*!50000 ; DROP TABLE users */"},
+		{"cap35_view", "mysql", "VIEW", "CREATE_VIEW", "CREATE VIEW v_c35 AS SELECT " + empty35 + " 1 /*!50000 ; DROP TABLE users */", ""},
+		{"maria_cross", "mariadb", "PROCEDURE", "CREATE_ROUTINE", "", "CREATE PROCEDURE pm_cr() " + mariaCross + " /*M!100300 SQL SECURITY */ /*!80000 x */ /*!50000 DEFINER */ BEGIN SELECT 1; END"},
+	} {
+		if _, err := ExecuteObjectAction(ctx, tc.eng, drv, driver.ObjectActionRequest{
+			Database:    "shop",
+			ObjectName:  tc.name,
+			ObjectType:  tc.objType,
+			Action:      tc.action,
+			WebMode:     true,
+			IsAdmin:     false,
+			PreviewOnly: true,
+			ViewSQL:     tc.viewSQL,
+			RoutineSQL:  tc.routSQL,
+		}); err == nil {
+			t.Fatalf("%s (%s): expected ExecuteObjectAction to reject Iteration 8 payload", tc.name, tc.eng)
+		}
+	}
+
+	if _, err := ExecuteObjectAction(ctx, "mysql", drv, driver.ObjectActionRequest{
+		Database:    "shop",
+		ObjectName:  "p_benign_35_empty",
+		ObjectType:  "PROCEDURE",
+		Action:      "CREATE_ROUTINE",
+		WebMode:     true,
+		IsAdmin:     false,
+		PreviewOnly: true,
+		RoutineSQL:  "CREATE PROCEDURE p_benign_35_empty() " + empty35 + " COMMENT 'ok' BEGIN SELECT 1; END",
+	}); err != nil {
+		t.Fatalf("expected benign 35-empty-comment procedure to pass, got %v", err)
+	}
+
+	// 11. Iteration 9 regressions: MySQL/MariaDB '--<non-whitespace>' is not a comment
+	for _, tc := range []struct {
+		name    string
+		eng     string
+		objType string
+		action  string
+		viewSQL string
+		routSQL string
+	}{
+		{"proc_dd1_split", "mysql", "PROCEDURE", "CREATE_ROUTINE", "", "CREATE PROCEDURE p_dd1() BEGIN SELECT 1 --1; END; DROP TABLE users"},
+		{"view_dd1_split", "mysql", "VIEW", "CREATE_VIEW", "CREATE VIEW v_dd1 AS SELECT 1 --1; DROP TABLE users", ""},
+		{"maria_proc_dd1_split", "mariadb", "PROCEDURE", "CREATE_ROUTINE", "", "CREATE PROCEDURE pm_dd1() BEGIN SELECT 1 --1; END; DROP TABLE users"},
+		{"maria_view_dd1_split", "mariadb", "VIEW", "CREATE_VIEW", "CREATE VIEW vm_dd1 AS SELECT 1 --1; DROP TABLE users", ""},
+		{"event_dd1_split", "mysql", "EVENT", "CREATE_OR_REPLACE", "", "CREATE EVENT ev_dd1 ON SCHEDULE EVERY 1 DAY DO BEGIN SELECT 1 --1; END; DROP TABLE users"},
+		{"proc_dd1_definer", "mysql", "PROCEDURE", "CREATE_ROUTINE", "", "CREATE PROCEDURE p_dd1_def() SELECT 1 --1 SQL SECURITY DEFINER\n BEGIN SELECT 1; END"},
+		{"view_dddq_split", "mysql", "VIEW", "CREATE_VIEW", "CREATE VIEW v_dddq AS SELECT 1 --- '\n1; DROP TABLE users", ""},
+		{"proc_ddd1_split", "mysql", "PROCEDURE", "CREATE_ROUTINE", "", "CREATE PROCEDURE p_ddd1() BEGIN SELECT 1 --- '\n 1; END; DROP TABLE users"},
+		{"proc_ddd_definer", "mysql", "PROCEDURE", "CREATE_ROUTINE", "", "CREATE PROCEDURE p_ddd_def() SELECT 1 --- '\n 1 SQL SECURITY DEFINER BEGIN SELECT 1; END"},
+		{"view_del_split", "mysql", "VIEW", "CREATE_VIEW", "CREATE VIEW v_del AS SELECT 1 --\x7f'\n1; DROP TABLE users", ""},
+		{"proc_exd_split", "mysql", "PROCEDURE", "CREATE_ROUTINE", "", "CREATE PROCEDURE p_exd() BEGIN SELECT 1 /*!50000 -- ' */ '\n */ ; END; DROP TABLE users"},
+		{"proc_exh_split", "mysql", "PROCEDURE", "CREATE_ROUTINE", "", "CREATE PROCEDURE p_exh() BEGIN SELECT 1 /*!50000 # ' */ '\n */ ; END; DROP TABLE users"},
+		{"maria_proc_exd_split", "mariadb", "PROCEDURE", "CREATE_ROUTINE", "", "CREATE PROCEDURE pm_exd() BEGIN SELECT 1 /*M!50000 -- ' */ '\n */ ; END; DROP TABLE users"},
+	} {
+		if _, err := ExecuteObjectAction(ctx, tc.eng, drv, driver.ObjectActionRequest{
+			Database:    "shop",
+			ObjectName:  tc.name,
+			ObjectType:  tc.objType,
+			Action:      tc.action,
+			WebMode:     true,
+			IsAdmin:     false,
+			PreviewOnly: true,
+			ViewSQL:     tc.viewSQL,
+			RoutineSQL:  tc.routSQL,
+		}); err == nil {
+			t.Fatalf("%s (%s): expected ExecuteObjectAction to reject bypass", tc.name, tc.eng)
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		viewSQL string
+	}{
+		{"v_dd1_benign", "CREATE VIEW v_dd1_benign AS SELECT 1 --1"},
+		{"v_ex_benign_nl", "CREATE VIEW v_ex_benign_nl AS /*!50000 -- */\nSELECT 1"},
+		{"v_ex_benign_sp", "CREATE VIEW v_ex_benign_sp AS /*!50000 -- */ SELECT 1"},
+	} {
+		if _, err := ExecuteObjectAction(ctx, "mysql", drv, driver.ObjectActionRequest{
+			Database:    "shop",
+			ObjectName:  tc.name,
+			ObjectType:  "VIEW",
+			Action:      "CREATE_VIEW",
+			WebMode:     true,
+			IsAdmin:     false,
+			PreviewOnly: true,
+			ViewSQL:     tc.viewSQL,
+		}); err != nil {
+			t.Fatalf("expected benign MySQL CREATE_VIEW %q to pass, got %v", tc.viewSQL, err)
+		}
+	}
+}
+
+func TestIter11ClickHouseMatViewBracketSmuggle(t *testing.T) {
+	ctx := context.Background()
+	drv := &mockSQLDriver{}
+
+	for _, badEngineClause := range []string{
+		"MergeTree() ORDER BY ['a]b'] ; DROP TABLE users -- '",
+		"MergeTree() ORDER BY [1; DROP TABLE users; -- ]",
+		"MergeTree() ORDER BY [1 /*]",
+	} {
+		if _, err := ExecuteObjectAction(ctx, "clickhouse", drv, driver.ObjectActionRequest{
+			Database:    "default",
+			ObjectName:  "mv_pwn",
+			ObjectType:  "MATERIALIZED_VIEW",
+			Action:      "CREATE_OR_REPLACE",
+			WebMode:     true,
+			IsAdmin:     false,
+			PreviewOnly: true,
+			Spec: &driver.ObjectSpec{
+				EngineClause: badEngineClause,
+				SelectSQL:    "SELECT 1",
+			},
+		}); err == nil {
+			t.Fatalf("expected ClickHouse MATERIALIZED_VIEW to reject bracket smuggle EngineClause %q", badEngineClause)
+		}
+	}
+
+	for _, okEngineClause := range []string{
+		"MergeTree() ORDER BY (id, ts)",
+		"MergeTree() ORDER BY ['a', 'b']",
+	} {
+		sqls, err := ExecuteObjectAction(ctx, "clickhouse", drv, driver.ObjectActionRequest{
+			Database:    "default",
+			ObjectName:  "mv_ok",
+			ObjectType:  "MATERIALIZED_VIEW",
+			Action:      "CREATE_OR_REPLACE",
+			WebMode:     true,
+			IsAdmin:     false,
+			PreviewOnly: true,
+			Spec: &driver.ObjectSpec{
+				EngineClause: okEngineClause,
+				SelectSQL:    "SELECT 1",
+			},
+		})
+		if err != nil || len(sqls) != 1 {
+			t.Fatalf("expected ClickHouse MATERIALIZED_VIEW benign EngineClause %q to pass, got err=%v sqls=%#v", okEngineClause, err, sqls)
+		}
 	}
 }

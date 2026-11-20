@@ -119,23 +119,33 @@ func FormatLiteralForDialect(d Dialect, val any) string {
 }
 
 // ContainsUnquotedSQLMeta reports whether expr contains unquoted ';', '#', '--', '/*',
-// or unclosed single/double/backtick/bracket quotes.
+// or unclosed single/double/backtick/bracket quotes using standard SQL single-quote rules.
 func ContainsUnquotedSQLMeta(expr string) bool {
-	return containsUnquotedSQLMeta(expr)
+	return containsUnquotedSQLMetaWithOpts(expr, SQLSyntaxOptions{HashComments: true, BracketIdentifiers: true, BracketDoubleEscape: true, BacktickIdentifiers: true})
 }
 
-func containsUnquotedSQLMeta(expr string) bool {
+// ContainsUnquotedSQLMetaForEngine behaves like ContainsUnquotedSQLMeta using lexical rules for engine.
+func ContainsUnquotedSQLMetaForEngine(engine, expr string) bool {
+	return containsUnquotedSQLMetaWithOpts(expr, SyntaxOptionsForEngine(engine))
+}
+
+func containsUnquotedSQLMetaWithOpts(expr string, opts SQLSyntaxOptions) bool {
 	inSingle := false
+	singleBackslashEsc := false
 	inDouble := false
 	inBacktick := false
 	inBracket := false
+	prevIsIdentChar := false
+	isIdentByte := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '$' || b >= 0x80 || (opts.AlternativeQuotes && b == '#')
+	}
 	for i := 0; i < len(expr); i++ {
 		ch := expr[i]
 		if ch == 0 {
 			return true
 		}
 		if inSingle {
-			if ch == '\\' && i+1 < len(expr) {
+			if singleBackslashEsc && ch == '\\' && i+1 < len(expr) {
 				i++
 				continue
 			}
@@ -144,16 +154,23 @@ func containsUnquotedSQLMeta(expr string) bool {
 					i++
 				} else {
 					inSingle = false
+					singleBackslashEsc = false
+					prevIsIdentChar = false
 				}
 			}
 			continue
 		}
 		if inDouble {
+			if opts.BackslashEscapes && ch == '\\' && i+1 < len(expr) {
+				i++
+				continue
+			}
 			if ch == '"' {
 				if i+1 < len(expr) && expr[i+1] == '"' {
 					i++
 				} else {
 					inDouble = false
+					prevIsIdentChar = false
 				}
 			}
 			continue
@@ -164,152 +181,142 @@ func containsUnquotedSQLMeta(expr string) bool {
 					i++
 				} else {
 					inBacktick = false
+					prevIsIdentChar = false
 				}
 			}
 			continue
 		}
 		if inBracket {
 			if ch == ']' {
-				if i+1 < len(expr) && expr[i+1] == ']' {
+				if opts.BracketDoubleEscape && i+1 < len(expr) && expr[i+1] == ']' {
 					i++
 				} else {
 					inBracket = false
+					prevIsIdentChar = false
 				}
 			}
 			continue
 		}
+		if opts.EscapeStringPrefix && !prevIsIdentChar && (ch == 'E' || ch == 'e') && i+1 < len(expr) && expr[i+1] == '\'' {
+			inSingle = true
+			singleBackslashEsc = true
+			prevIsIdentChar = false
+			i++
+			continue
+		}
+		if opts.AlternativeQuotes && !prevIsIdentChar && (ch == 'q' || ch == 'Q' || ch == 'n' || ch == 'N') {
+			if prefixLen, closeSeq, ok := matchAltQuoteOpen(expr[i:]); ok {
+				endIdx := strings.Index(expr[i+prefixLen:], closeSeq)
+				if endIdx < 0 {
+					return true
+				}
+				i += prefixLen + endIdx + len(closeSeq) - 1
+				prevIsIdentChar = false
+				continue
+			}
+		}
+		if opts.DollarQuotes && !prevIsIdentChar && ch == '$' {
+			if tag, ok := matchSQLDollarTag(expr[i:]); ok {
+				endIdx := strings.Index(expr[i+len(tag):], tag)
+				if endIdx < 0 {
+					return true
+				}
+				i += len(tag) + endIdx + len(tag) - 1
+				prevIsIdentChar = false
+				continue
+			}
+		}
 		switch ch {
 		case '\'':
 			inSingle = true
+			singleBackslashEsc = opts.BackslashEscapes
+			prevIsIdentChar = false
 		case '"':
 			inDouble = true
+			prevIsIdentChar = false
 		case '`':
-			inBacktick = true
+			if opts.BacktickIdentifiers {
+				inBacktick = true
+			}
+			prevIsIdentChar = false
 		case '[':
-			inBracket = true
-		case ';', '#':
+			if opts.BracketIdentifiers {
+				inBracket = true
+			}
+			prevIsIdentChar = false
+		case ';':
 			return true
+		case '#':
+			if opts.HashComments {
+				return true
+			}
+			prevIsIdentChar = false
 		case '-':
 			if i+1 < len(expr) && expr[i+1] == '-' {
 				return true
 			}
+			prevIsIdentChar = false
 		case '/':
 			if i+1 < len(expr) && expr[i+1] == '*' {
 				return true
 			}
+			prevIsIdentChar = false
+		default:
+			prevIsIdentChar = isIdentByte(ch)
 		}
 	}
 	return inSingle || inDouble || inBacktick || inBracket
 }
 
-func validateDDLFragment(label, val string) error {
+func validateDDLFragment(d Dialect, label, val string) error {
 	trimmed := strings.TrimSpace(val)
 	if trimmed == "" {
 		return nil
 	}
-	if containsUnquotedSQLMeta(trimmed) {
+	if containsUnquotedSQLMetaWithOpts(trimmed, SyntaxOptionsForEngine(string(d))) {
 		return fmt.Errorf("invalid %s: semicolons, unclosed quotes, or SQL comments are not allowed", label)
+	}
+	if len(SplitStatementsForEngine(string(d), "SELECT "+trimmed)) > 1 {
+		return fmt.Errorf("invalid %s: multiple SQL statements are not allowed", label)
 	}
 	return nil
 }
 
-// ValidateColumnType strictly validates a SQL column data type specification.
-// Only alphanumeric characters, spaces, underscores, commas, periods, quotes, and balanced
-// parentheses/brackets are allowed; SQL comments (--, /*, #) and semicolons are rejected.
+// ValidateColumnType strictly validates a SQL column data type specification using generic SQL rules.
 func ValidateColumnType(colType string) error {
+	return ValidateColumnTypeForEngine("", colType)
+}
+
+// ValidateColumnTypeForEngine strictly validates a SQL column data type specification using lexical rules for engine.
+func ValidateColumnTypeForEngine(engine, colType string) error {
+	return validateColumnTypeWithOpts(colType, SyntaxOptionsForEngine(engine))
+}
+
+func validateColumnTypeWithOpts(colType string, opts SQLSyntaxOptions) error {
 	trimmed := strings.TrimSpace(colType)
 	if trimmed == "" {
 		return errors.New("column type cannot be empty")
 	}
-	if containsUnquotedSQLMeta(trimmed) {
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] == '\r' || trimmed[i] == '\n' || trimmed[i] == 0 {
+			return errors.New("invalid column type: control characters are not allowed")
+		}
+	}
+	if containsUnquotedSQLMetaWithOpts(trimmed, opts) {
 		return errors.New("invalid column type: semicolons, unclosed quotes, or SQL comments are not allowed")
 	}
 	parenDepth := 0
 	bracketDepth := 0
 	inSingle := false
-	inDouble := false
-	for i := 0; i < len(trimmed); i++ {
-		ch := trimmed[i]
-		if ch == '\r' || ch == '\n' || ch == 0 {
-			return errors.New("invalid column type: control characters are not allowed")
-		}
-		if inSingle {
-			if ch == '\\' && i+1 < len(trimmed) {
-				i++
-				continue
-			}
-			if ch == '\'' {
-				if i+1 < len(trimmed) && trimmed[i+1] == '\'' {
-					i++
-				} else {
-					inSingle = false
-				}
-			}
-			continue
-		}
-		if inDouble {
-			if ch == '"' {
-				if i+1 < len(trimmed) && trimmed[i+1] == '"' {
-					i++
-				} else {
-					inDouble = false
-				}
-			}
-			continue
-		}
-		switch {
-		case (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'):
-		case ch == ' ' || ch == '_' || ch == ',' || ch == '.':
-		case ch == '\'':
-			inSingle = true
-		case ch == '"':
-			inDouble = true
-		case ch == '(':
-			parenDepth++
-		case ch == ')':
-			parenDepth--
-			if parenDepth < 0 {
-				return errors.New("invalid column type: unbalanced parentheses")
-			}
-		case ch == '[':
-			bracketDepth++
-		case ch == ']':
-			bracketDepth--
-			if bracketDepth < 0 {
-				return errors.New("invalid column type: unbalanced brackets")
-			}
-		default:
-			return fmt.Errorf("invalid column type %q: disallowed character %q", colType, ch)
-		}
-	}
-	if inSingle || inDouble || parenDepth != 0 || bracketDepth != 0 {
-		return errors.New("invalid column type: unclosed quotes or unbalanced parentheses")
-	}
-	return nil
-}
-
-// ValidateSQLExpression ensures expr is non-empty, contains no semicolons or SQL comments,
-// has no unclosed quotes, and has strictly balanced parentheses.
-func ValidateSQLExpression(label, expr string) error {
-	trimmed := strings.TrimSpace(expr)
-	if trimmed == "" {
-		return fmt.Errorf("%s cannot be empty", label)
-	}
-	if containsUnquotedSQLMeta(trimmed) {
-		return fmt.Errorf("invalid %s: semicolons, unclosed quotes, or SQL comments are not allowed", label)
-	}
-	parenDepth := 0
-	inSingle := false
+	singleBackslashEsc := false
 	inDouble := false
 	inBacktick := false
 	inBracket := false
+	prevIsIdentChar := false
 	for i := 0; i < len(trimmed); i++ {
 		ch := trimmed[i]
-		if ch == 0 {
-			return fmt.Errorf("invalid %s: null byte is not allowed", label)
-		}
 		if inSingle {
-			if ch == '\\' && i+1 < len(trimmed) {
+			if singleBackslashEsc && ch == '\\' && i+1 < len(trimmed) {
 				i++
 				continue
 			}
@@ -318,16 +325,23 @@ func ValidateSQLExpression(label, expr string) error {
 					i++
 				} else {
 					inSingle = false
+					singleBackslashEsc = false
+					prevIsIdentChar = false
 				}
 			}
 			continue
 		}
 		if inDouble {
+			if opts.BackslashEscapes && ch == '\\' && i+1 < len(trimmed) {
+				i++
+				continue
+			}
 			if ch == '"' {
 				if i+1 < len(trimmed) && trimmed[i+1] == '"' {
 					i++
 				} else {
 					inDouble = false
+					prevIsIdentChar = false
 				}
 			}
 			continue
@@ -338,58 +352,288 @@ func ValidateSQLExpression(label, expr string) error {
 					i++
 				} else {
 					inBacktick = false
+					prevIsIdentChar = false
 				}
 			}
 			continue
 		}
 		if inBracket {
 			if ch == ']' {
-				if i+1 < len(trimmed) && trimmed[i+1] == ']' {
+				if opts.BracketDoubleEscape && i+1 < len(trimmed) && trimmed[i+1] == ']' {
 					i++
 				} else {
 					inBracket = false
+					prevIsIdentChar = false
 				}
 			}
 			continue
 		}
+		if opts.EscapeStringPrefix && !prevIsIdentChar && (ch == 'E' || ch == 'e') && i+1 < len(trimmed) && trimmed[i+1] == '\'' {
+			inSingle = true
+			singleBackslashEsc = true
+			prevIsIdentChar = false
+			i++
+			continue
+		}
+		if opts.AlternativeQuotes && !prevIsIdentChar && (ch == 'q' || ch == 'Q' || ch == 'n' || ch == 'N') {
+			if prefixLen, closeSeq, ok := matchAltQuoteOpen(trimmed[i:]); ok {
+				endIdx := strings.Index(trimmed[i+prefixLen:], closeSeq)
+				if endIdx < 0 {
+					return errors.New("invalid column type: unclosed quotes or unbalanced parentheses")
+				}
+				i += prefixLen + endIdx + len(closeSeq) - 1
+				prevIsIdentChar = false
+				continue
+			}
+		}
+		if opts.DollarQuotes && !prevIsIdentChar && ch == '$' {
+			if tag, ok := matchSQLDollarTag(trimmed[i:]); ok {
+				endIdx := strings.Index(trimmed[i+len(tag):], tag)
+				if endIdx < 0 {
+					return errors.New("invalid column type: unclosed quotes or unbalanced parentheses")
+				}
+				i += len(tag) + endIdx + len(tag) - 1
+				prevIsIdentChar = false
+				continue
+			}
+		}
+		switch {
+		case (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_':
+			prevIsIdentChar = true
+		case ch == ' ' || ch == ',' || ch == '.':
+			prevIsIdentChar = false
+		case ch == '=' && parenDepth > 0:
+			prevIsIdentChar = false
+		case ch == '-' && parenDepth > 0 && i+1 < len(trimmed) && trimmed[i+1] >= '0' && trimmed[i+1] <= '9':
+			prevIsIdentChar = false
+		case ch == '\'':
+			inSingle = true
+			singleBackslashEsc = opts.BackslashEscapes
+			prevIsIdentChar = false
+		case ch == '"':
+			inDouble = true
+			prevIsIdentChar = false
+		case ch == '`' && opts.BacktickIdentifiers:
+			inBacktick = true
+			prevIsIdentChar = false
+		case ch == '[':
+			if opts.BracketIdentifiers {
+				inBracket = true
+			} else {
+				bracketDepth++
+			}
+			prevIsIdentChar = false
+		case ch == ']':
+			if opts.BracketIdentifiers {
+				return errors.New("invalid column type: unbalanced brackets")
+			}
+			bracketDepth--
+			if bracketDepth < 0 {
+				return errors.New("invalid column type: unbalanced brackets")
+			}
+			prevIsIdentChar = false
+		case ch == '(':
+			parenDepth++
+			prevIsIdentChar = false
+		case ch == ')':
+			parenDepth--
+			prevIsIdentChar = false
+			if parenDepth < 0 {
+				return errors.New("invalid column type: unbalanced parentheses")
+			}
+		default:
+			return fmt.Errorf("invalid column type %q: disallowed character %q", colType, ch)
+		}
+	}
+	if inSingle || inDouble || inBacktick || inBracket || parenDepth != 0 || bracketDepth != 0 {
+		return errors.New("invalid column type: unclosed quotes or unbalanced parentheses")
+	}
+	stmtCount := 0
+	_ = StreamStatementsWithOptions(strings.NewReader("CREATE TABLE __dbharbor_t (__dbharbor_c "+trimmed+")"), opts, func(string) error {
+		stmtCount++
+		return nil
+	})
+	if stmtCount != 1 {
+		return errors.New("invalid column type: multiple SQL statements are not allowed")
+	}
+	return nil
+}
+
+// ValidateSQLExpression ensures expr is non-empty, contains no semicolons or SQL comments,
+// has no unclosed quotes, and has strictly balanced parentheses using standard SQL single-quote rules.
+func ValidateSQLExpression(label, expr string) error {
+	return ValidateSQLExpressionForEngine("", label, expr)
+}
+
+// ValidateSQLExpressionForEngine behaves like ValidateSQLExpression using lexical rules for engine.
+func ValidateSQLExpressionForEngine(engine, label, expr string) error {
+	trimmed := strings.TrimSpace(expr)
+	if trimmed == "" {
+		return fmt.Errorf("%s cannot be empty", label)
+	}
+	opts := SyntaxOptionsForEngine(engine)
+	if containsUnquotedSQLMetaWithOpts(trimmed, opts) {
+		return fmt.Errorf("invalid %s: semicolons, unclosed quotes, or SQL comments are not allowed", label)
+	}
+	parenDepth := 0
+	inSingle := false
+	singleBackslashEsc := false
+	inDouble := false
+	inBacktick := false
+	inBracket := false
+	prevIsIdentChar := false
+	isIdentByte := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '$' || b >= 0x80 || (opts.AlternativeQuotes && b == '#')
+	}
+	for i := 0; i < len(trimmed); i++ {
+		ch := trimmed[i]
+		if ch == 0 {
+			return fmt.Errorf("invalid %s: null byte is not allowed", label)
+		}
+		if inSingle {
+			if singleBackslashEsc && ch == '\\' && i+1 < len(trimmed) {
+				i++
+				continue
+			}
+			if ch == '\'' {
+				if i+1 < len(trimmed) && trimmed[i+1] == '\'' {
+					i++
+				} else {
+					inSingle = false
+					singleBackslashEsc = false
+					prevIsIdentChar = false
+				}
+			}
+			continue
+		}
+		if inDouble {
+			if opts.BackslashEscapes && ch == '\\' && i+1 < len(trimmed) {
+				i++
+				continue
+			}
+			if ch == '"' {
+				if i+1 < len(trimmed) && trimmed[i+1] == '"' {
+					i++
+				} else {
+					inDouble = false
+					prevIsIdentChar = false
+				}
+			}
+			continue
+		}
+		if inBacktick {
+			if ch == '`' {
+				if i+1 < len(trimmed) && trimmed[i+1] == '`' {
+					i++
+				} else {
+					inBacktick = false
+					prevIsIdentChar = false
+				}
+			}
+			continue
+		}
+		if inBracket {
+			if ch == ']' {
+				if opts.BracketDoubleEscape && i+1 < len(trimmed) && trimmed[i+1] == ']' {
+					i++
+				} else {
+					inBracket = false
+					prevIsIdentChar = false
+				}
+			}
+			continue
+		}
+		if opts.EscapeStringPrefix && !prevIsIdentChar && (ch == 'E' || ch == 'e') && i+1 < len(trimmed) && trimmed[i+1] == '\'' {
+			inSingle = true
+			singleBackslashEsc = true
+			prevIsIdentChar = false
+			i++
+			continue
+		}
+		if opts.AlternativeQuotes && !prevIsIdentChar && (ch == 'q' || ch == 'Q' || ch == 'n' || ch == 'N') {
+			if prefixLen, closeSeq, ok := matchAltQuoteOpen(trimmed[i:]); ok {
+				endIdx := strings.Index(trimmed[i+prefixLen:], closeSeq)
+				if endIdx < 0 {
+					return fmt.Errorf("invalid %s: unclosed quotes or unbalanced parentheses", label)
+				}
+				i += prefixLen + endIdx + len(closeSeq) - 1
+				prevIsIdentChar = false
+				continue
+			}
+		}
+		if opts.DollarQuotes && !prevIsIdentChar && ch == '$' {
+			if tag, ok := matchSQLDollarTag(trimmed[i:]); ok {
+				endIdx := strings.Index(trimmed[i+len(tag):], tag)
+				if endIdx < 0 {
+					return fmt.Errorf("invalid %s: unclosed quotes or unbalanced parentheses", label)
+				}
+				i += len(tag) + endIdx + len(tag) - 1
+				prevIsIdentChar = false
+				continue
+			}
+		}
 		switch ch {
 		case '\'':
 			inSingle = true
+			singleBackslashEsc = opts.BackslashEscapes
+			prevIsIdentChar = false
 		case '"':
 			inDouble = true
+			prevIsIdentChar = false
 		case '`':
-			inBacktick = true
+			if opts.BacktickIdentifiers {
+				inBacktick = true
+			}
+			prevIsIdentChar = false
 		case '[':
-			inBracket = true
+			if opts.BracketIdentifiers {
+				inBracket = true
+			}
+			prevIsIdentChar = false
 		case '(':
 			parenDepth++
+			prevIsIdentChar = false
 		case ')':
 			parenDepth--
+			prevIsIdentChar = false
 			if parenDepth < 0 {
 				return fmt.Errorf("invalid %s: unbalanced parentheses", label)
 			}
+		default:
+			prevIsIdentChar = isIdentByte(ch)
 		}
 	}
 	if inSingle || inDouble || inBacktick || inBracket || parenDepth != 0 {
 		return fmt.Errorf("invalid %s: unclosed quotes or unbalanced parentheses", label)
 	}
-	if len(SplitStatements("SELECT "+trimmed)) > 1 {
+	if len(SplitStatementsForEngine(engine, "SELECT "+trimmed)) > 1 {
 		return fmt.Errorf("invalid %s: multiple SQL statements are not allowed", label)
 	}
 	return nil
 }
 
 func stripOuterParens(expr string) string {
+	return stripOuterParensWithOpts(expr, SQLSyntaxOptions{})
+}
+
+func stripOuterParensWithOpts(expr string, opts SQLSyntaxOptions) string {
 	s := strings.TrimSpace(expr)
+	isIdentByte := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '$' || b >= 0x80 || (opts.AlternativeQuotes && b == '#')
+	}
 	for len(s) >= 2 && s[0] == '(' && s[len(s)-1] == ')' {
 		depth := 0
 		inSingle := false
+		singleBackslashEsc := false
 		inDouble := false
+		inBacktick := false
+		inBracket := false
+		prevIsIdentChar := false
 		wrapsAll := true
 		for i := 0; i < len(s); i++ {
 			ch := s[i]
 			if inSingle {
-				if ch == '\\' && i+1 < len(s) {
+				if singleBackslashEsc && ch == '\\' && i+1 < len(s) {
 					i++
 					continue
 				}
@@ -398,38 +642,115 @@ func stripOuterParens(expr string) string {
 						i++
 					} else {
 						inSingle = false
+						singleBackslashEsc = false
+						prevIsIdentChar = false
 					}
 				}
 				continue
 			}
 			if inDouble {
+				if opts.BackslashEscapes && ch == '\\' && i+1 < len(s) {
+					i++
+					continue
+				}
 				if ch == '"' {
 					if i+1 < len(s) && s[i+1] == '"' {
 						i++
 					} else {
 						inDouble = false
+						prevIsIdentChar = false
 					}
 				}
 				continue
 			}
+			if inBacktick {
+				if ch == '`' {
+					if i+1 < len(s) && s[i+1] == '`' {
+						i++
+					} else {
+						inBacktick = false
+						prevIsIdentChar = false
+					}
+				}
+				continue
+			}
+			if inBracket {
+				if ch == ']' {
+					if opts.BracketDoubleEscape && i+1 < len(s) && s[i+1] == ']' {
+						i++
+					} else {
+						inBracket = false
+						prevIsIdentChar = false
+					}
+				}
+				continue
+			}
+			if opts.EscapeStringPrefix && !prevIsIdentChar && (ch == 'E' || ch == 'e') && i+1 < len(s) && s[i+1] == '\'' {
+				inSingle = true
+				singleBackslashEsc = true
+				prevIsIdentChar = false
+				i++
+				continue
+			}
+			if opts.AlternativeQuotes && !prevIsIdentChar && (ch == 'q' || ch == 'Q' || ch == 'n' || ch == 'N') {
+				if prefixLen, closeSeq, ok := matchAltQuoteOpen(s[i:]); ok {
+					endIdx := strings.Index(s[i+prefixLen:], closeSeq)
+					if endIdx < 0 {
+						wrapsAll = false
+						break
+					}
+					i += prefixLen + endIdx + len(closeSeq) - 1
+					prevIsIdentChar = false
+					continue
+				}
+			}
+			if opts.DollarQuotes && !prevIsIdentChar && ch == '$' {
+				if tag, ok := matchSQLDollarTag(s[i:]); ok {
+					endIdx := strings.Index(s[i+len(tag):], tag)
+					if endIdx < 0 {
+						wrapsAll = false
+						break
+					}
+					i += len(tag) + endIdx + len(tag) - 1
+					prevIsIdentChar = false
+					continue
+				}
+			}
 			switch ch {
 			case '\'':
 				inSingle = true
+				singleBackslashEsc = opts.BackslashEscapes
+				prevIsIdentChar = false
 			case '"':
 				inDouble = true
+				prevIsIdentChar = false
+			case '`':
+				if opts.BacktickIdentifiers {
+					inBacktick = true
+				}
+				prevIsIdentChar = false
+			case '[':
+				if opts.BracketIdentifiers {
+					inBracket = true
+				}
+				prevIsIdentChar = false
 			case '(':
 				depth++
+				prevIsIdentChar = false
 			case ')':
 				depth--
+				prevIsIdentChar = false
 				if depth == 0 && i < len(s)-1 {
 					wrapsAll = false
 				}
+			default:
+				prevIsIdentChar = isIdentByte(ch)
 			}
 			if !wrapsAll {
 				break
 			}
 		}
-		if !wrapsAll || depth != 0 {
+		if !wrapsAll || depth != 0 || inSingle || inDouble || inBacktick || inBracket {
 			break
 		}
 		s = strings.TrimSpace(s[1 : len(s)-1])
@@ -438,10 +759,10 @@ func stripOuterParens(expr string) string {
 }
 
 func formatGeneratedColumnClause(d Dialect, col driver.ColumnDef) (clause string, err error) {
-	if err := ValidateSQLExpression("generated column expression", col.GeneratedExpr); err != nil {
+	if err := ValidateSQLExpressionForEngine(string(d), "generated column expression", col.GeneratedExpr); err != nil {
 		return "", err
 	}
-	inner := stripOuterParens(col.GeneratedExpr)
+	inner := stripOuterParensWithOpts(col.GeneratedExpr, SyntaxOptionsForEngine(string(d)))
 	storage := strings.ToUpper(strings.TrimSpace(col.GeneratedStorage))
 	if d == DialectSQLServer {
 		if storage == "STORED" || storage == "PERSISTED" {
@@ -462,10 +783,10 @@ func formatGeneratedColumnClause(d Dialect, col driver.ColumnDef) (clause string
 }
 
 func buildCheckConstraintClause(d Dialect, chk driver.CheckConstraintDef) (string, error) {
-	if err := ValidateSQLExpression("CHECK constraint expression", chk.Expression); err != nil {
+	if err := ValidateSQLExpressionForEngine(string(d), "CHECK constraint expression", chk.Expression); err != nil {
 		return "", err
 	}
-	inner := stripOuterParens(chk.Expression)
+	inner := stripOuterParensWithOpts(chk.Expression, SyntaxOptionsForEngine(string(d)))
 	if strings.TrimSpace(chk.Name) != "" {
 		return fmt.Sprintf("CONSTRAINT %s CHECK (%s)", QuoteIdent(d, chk.Name), inner), nil
 	}
@@ -523,7 +844,7 @@ func BuildBrowseQuery(d Dialect, req driver.BrowseDataRequest) (dataSQL string, 
 	tbl := QualifyTable(d, req.Database, req.Schema, req.Table)
 	wherePart := ""
 	if f := strings.TrimSpace(req.Filter); f != "" {
-		if containsUnquotedSQLMeta(f) || len(SplitStatements("SELECT 1 WHERE "+f)) > 1 {
+		if containsUnquotedSQLMetaWithOpts(f, SyntaxOptionsForEngine(string(d))) || len(SplitStatementsForEngine(string(d), "SELECT 1 WHERE "+f)) > 1 {
 			return "", "", errors.New("semicolons, SQL comments, or unclosed quotes are not allowed in WHERE filter")
 		}
 		wherePart = " WHERE (" + f + ")"
@@ -693,11 +1014,11 @@ func BuildCreateTableDDL(d Dialect, req driver.CreateTableRequest) (string, erro
 			continue
 		}
 		if strings.TrimSpace(col.Type) != "" {
-			if err := ValidateColumnType(col.Type); err != nil {
+			if err := ValidateColumnTypeForEngine(string(d), col.Type); err != nil {
 				return "", err
 			}
 		}
-		if err := validateDDLFragment("column default value", col.DefaultValue); err != nil {
+		if err := validateDDLFragment(d, "column default value", col.DefaultValue); err != nil {
 			return "", err
 		}
 		var sb strings.Builder
@@ -815,16 +1136,16 @@ func BuildCreateTableDDL(d Dialect, req driver.CreateTableRequest) (string, erro
 		}
 	}
 
-	if err := validateDDLFragment("table engine", req.Engine); err != nil {
+	if err := validateDDLFragment(d, "table engine", req.Engine); err != nil {
 		return "", err
 	}
-	if err := validateDDLFragment("table charset", req.Charset); err != nil {
+	if err := validateDDLFragment(d, "table charset", req.Charset); err != nil {
 		return "", err
 	}
-	if err := validateDDLFragment("ORDER BY expression", req.OrderBy); err != nil {
+	if err := validateDDLFragment(d, "ORDER BY expression", req.OrderBy); err != nil {
 		return "", err
 	}
-	if err := validateDDLFragment("PARTITION BY expression", req.PartitionBy); err != nil {
+	if err := validateDDLFragment(d, "PARTITION BY expression", req.PartitionBy); err != nil {
 		return "", err
 	}
 
@@ -884,6 +1205,33 @@ func BuildCreateTableDDL(d Dialect, req driver.CreateTableRequest) (string, erro
 	return ddl.String(), nil
 }
 
+// BuildCreateTableIndexSQLs builds follow-up CREATE [UNIQUE] INDEX statements for CreateTableRequest.Indexes
+// on dialects where secondary indexes are created outside CREATE TABLE (PostgreSQL/KingbaseES, SQL Server, Oracle, Dameng, SQLite/DuckDB).
+func BuildCreateTableIndexSQLs(d Dialect, req driver.CreateTableRequest) ([]string, error) {
+	if d == DialectMySQL || d == DialectClickHouse || len(req.Indexes) == 0 {
+		return nil, nil
+	}
+	actions := make([]driver.AlterAction, 0, len(req.Indexes))
+	for _, idx := range req.Indexes {
+		if len(idx.Columns) == 0 {
+			continue
+		}
+		actions = append(actions, driver.AlterAction{
+			Action: "ADD_INDEX",
+			Index:  idx,
+		})
+	}
+	if len(actions) == 0 {
+		return nil, nil
+	}
+	return BuildAlterTableSQLs(d, driver.AlterTableRequest{
+		Database: req.Database,
+		Schema:   req.Schema,
+		Table:    req.Table,
+		Actions:  actions,
+	})
+}
+
 func normalizeClickHouseType(colType string, nullable bool) string {
 	t := strings.TrimSpace(colType)
 	if nullable {
@@ -941,11 +1289,15 @@ func sanitizeFKAction(act string) string {
 // BuildAlterTableSQLsForEngine builds dialect-specific ALTER TABLE statements, accounting for engine
 // sub-variants such as MariaDB using DROP CONSTRAINT instead of MySQL 8.0's DROP CHECK.
 func BuildAlterTableSQLsForEngine(dbType string, d Dialect, req driver.AlterTableRequest) ([]string, error) {
-	stmts, err := BuildAlterTableSQLs(d, req)
+	eng := strings.TrimSpace(dbType)
+	if eng == "" {
+		eng = string(d)
+	}
+	stmts, err := buildAlterTableSQLsForEngine(eng, d, req)
 	if err != nil {
 		return nil, err
 	}
-	if strings.EqualFold(strings.TrimSpace(dbType), "mariadb") && d == DialectMySQL {
+	if strings.EqualFold(eng, "mariadb") && d == DialectMySQL {
 		tbl := QualifyTable(d, req.Database, req.Schema, req.Table)
 		prefix := "ALTER TABLE " + tbl + " DROP CHECK "
 		replacement := "ALTER TABLE " + tbl + " DROP CONSTRAINT "
@@ -959,6 +1311,10 @@ func BuildAlterTableSQLsForEngine(dbType string, d Dialect, req driver.AlterTabl
 }
 
 func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, error) {
+	return buildAlterTableSQLsForEngine(string(d), d, req)
+}
+
+func buildAlterTableSQLsForEngine(engine string, d Dialect, req driver.AlterTableRequest) ([]string, error) {
 	if strings.TrimSpace(req.Table) == "" {
 		return nil, errors.New("table name cannot be empty")
 	}
@@ -974,11 +1330,11 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 				return nil, errors.New("column name and type cannot be empty when adding a column")
 			}
 			if strings.TrimSpace(col.Type) != "" {
-				if err := ValidateColumnType(col.Type); err != nil {
+				if err := ValidateColumnTypeForEngine(engine, col.Type); err != nil {
 					return nil, err
 				}
 			}
-			if err := validateDDLFragment("column default value", col.DefaultValue); err != nil {
+			if err := validateDDLFragment(d, "column default value", col.DefaultValue); err != nil {
 				return nil, err
 			}
 			nullStr := ""
@@ -1072,10 +1428,10 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 			if strings.TrimSpace(col.Name) == "" || strings.TrimSpace(col.Type) == "" {
 				return nil, errors.New("column name and type cannot be empty when modifying a column")
 			}
-			if err := ValidateColumnType(col.Type); err != nil {
+			if err := ValidateColumnTypeForEngine(engine, col.Type); err != nil {
 				return nil, err
 			}
-			if err := validateDDLFragment("column default value", col.DefaultValue); err != nil {
+			if err := validateDDLFragment(d, "column default value", col.DefaultValue); err != nil {
 				return nil, err
 			}
 			oldName := strings.TrimSpace(act.OldName)
@@ -1210,7 +1566,11 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 			if idx.Unique {
 				uniq = "UNIQUE "
 			}
-			stmts = append(stmts, fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)", uniq, QuoteIdent(d, idxName), tbl, strings.Join(qCols, ", ")))
+			idxIdent := QuoteIdent(d, idxName)
+			if (d == DialectOracle || d == DialectDameng) && strings.TrimSpace(req.Schema) != "" {
+				idxIdent = QualifyTable(d, "", req.Schema, idxName)
+			}
+			stmts = append(stmts, fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)", uniq, idxIdent, tbl, strings.Join(qCols, ", ")))
 
 		case "DROP_INDEX":
 			idxName := strings.TrimSpace(act.Index.Name)
@@ -1219,8 +1579,10 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 			}
 			if d == DialectMySQL || d == DialectSQLServer {
 				stmts = append(stmts, fmt.Sprintf("DROP INDEX %s ON %s", QuoteIdent(d, idxName), tbl))
-			} else if d == DialectPostgres && req.Schema != "" {
+			} else if d == DialectPostgres && strings.TrimSpace(req.Schema) != "" {
 				stmts = append(stmts, fmt.Sprintf("DROP INDEX IF EXISTS %s.%s", QuoteIdent(d, req.Schema), QuoteIdent(d, idxName)))
+			} else if (d == DialectOracle || d == DialectDameng) && strings.TrimSpace(req.Schema) != "" {
+				stmts = append(stmts, fmt.Sprintf("DROP INDEX %s", QualifyTable(d, "", req.Schema, idxName)))
 			} else {
 				stmts = append(stmts, fmt.Sprintf("DROP INDEX %s", QuoteIdent(d, idxName)))
 			}
@@ -1310,13 +1672,23 @@ func BuildAlterTableSQLs(d Dialect, req driver.AlterTableRequest) ([]string, err
 
 // BuildObjectActionSQLs builds dialect-specific DDL/DML statements for table & view management operations.
 func BuildObjectActionSQLs(d Dialect, req driver.ObjectActionRequest) ([]string, error) {
+	return BuildObjectActionSQLsForEngine(string(d), d, req)
+}
+
+// BuildObjectActionSQLsForEngine builds dialect-specific DDL/DML statements for table & view management operations,
+// applying lexical guard rules for the exact engine sub-variant (e.g. "mariadb" vs "mysql").
+func BuildObjectActionSQLsForEngine(engine string, d Dialect, req driver.ObjectActionRequest) ([]string, error) {
+	eng := strings.TrimSpace(engine)
+	if eng == "" {
+		eng = string(d)
+	}
 	action := strings.ToUpper(strings.TrimSpace(req.Action))
 	objName := strings.TrimSpace(req.ObjectName)
 	if objName == "" {
 		return nil, errors.New("target object name cannot be empty")
 	}
 	if req.WebMode && !req.IsAdmin {
-		if HasSQLDefinerClause(req.RoutineSQL) || HasSQLDefinerClause(req.ViewSQL) {
+		if HasSQLDefinerClauseForEngine(eng, req.RoutineSQL) || HasSQLDefinerClauseForEngine(eng, req.ViewSQL) {
 			return nil, errors.New("DEFINER and SQL SECURITY DEFINER clauses are not permitted for non-administrator accounts in Web mode")
 		}
 	}
@@ -1456,25 +1828,24 @@ func BuildObjectActionSQLs(d Dialect, req driver.ObjectActionRequest) ([]string,
 		}
 
 	case "CREATE_VIEW":
-		splitView := SplitStatements(req.ViewSQL)
-		if len(splitView) == 0 {
-			return nil, errors.New("view SELECT query cannot be empty")
-		}
-		if len(splitView) > 1 {
+		viewSQL, err := SplitSingleStatementForEngine(eng, req.ViewSQL)
+		if err != nil {
+			if errors.Is(err, errEmptySQLStatement) {
+				return nil, errors.New("view SELECT query cannot be empty")
+			}
 			return nil, errors.New("view definition must contain a single SQL statement")
 		}
-		viewSQL := strings.TrimSpace(splitView[0])
 		if d == DialectClickHouse && req.WebMode && !req.IsAdmin && !req.AllowPrivIP {
 			if err := ValidateClickHouseRestrictedWebSQL(viewSQL); err != nil {
 				return nil, err
 			}
 		}
-		leadKw := leadingSQLKeyword(viewSQL)
+		leadKw := leadingSQLKeywordForEngine(eng, viewSQL)
 		if leadKw == "CREATE" || leadKw == "ALTER" || leadKw == "REPLACE" {
-			if err := ValidateExpectedDDLTarget(viewSQL, []string{"CREATE", "ALTER", "REPLACE"}, "VIEW"); err != nil {
+			if err := ValidateExpectedDDLTargetForEngine(eng, viewSQL, []string{"CREATE", "ALTER", "REPLACE"}, "VIEW"); err != nil {
 				return nil, err
 			}
-			upperView := strings.ToUpper(StripLeadingSQLComments(viewSQL))
+			upperView := strings.ToUpper(StripLeadingSQLCommentsForEngine(eng, viewSQL))
 			if d == DialectSQLite && strings.HasPrefix(upperView, "CREATE") && !strings.Contains(upperView, "IF NOT EXISTS") {
 				return []string{"DROP VIEW IF EXISTS " + tbl, viewSQL}, nil
 			}
@@ -1502,12 +1873,12 @@ func BuildObjectActionSQLs(d Dialect, req driver.ObjectActionRequest) ([]string,
 		if rawDDL == "" {
 			return nil, errors.New("routine DDL statement cannot be empty")
 		}
-		splitRoutine := SplitStatements(rawDDL)
-		if len(splitRoutine) != 1 {
+		cleanedDDL, err := SplitSingleStatementForEngine(eng, rawDDL)
+		if err != nil {
 			return nil, errors.New("routine DDL must contain a single statement")
 		}
-		rawDDL = strings.TrimSpace(splitRoutine[0])
-		if err := ValidateExpectedDDLTarget(rawDDL, []string{"CREATE", "ALTER", "REPLACE"}, "FUNCTION", "PROCEDURE"); err != nil {
+		rawDDL = cleanedDDL
+		if err := ValidateExpectedDDLTargetForEngine(eng, rawDDL, []string{"CREATE", "ALTER", "REPLACE"}, "FUNCTION", "PROCEDURE"); err != nil {
 			return nil, err
 		}
 		if d == DialectClickHouse && req.WebMode && !req.IsAdmin && !req.AllowPrivIP {
@@ -1515,7 +1886,7 @@ func BuildObjectActionSQLs(d Dialect, req driver.ObjectActionRequest) ([]string,
 				return nil, err
 			}
 		}
-		upperDDL := strings.ToUpper(StripLeadingSQLComments(rawDDL))
+		upperDDL := strings.ToUpper(StripLeadingSQLCommentsForEngine(eng, rawDDL))
 		var stmts []string
 		if req.ReplaceExisting && (d == DialectMySQL || d == DialectSQLite) && !strings.Contains(upperDDL, "CREATE OR REPLACE") {
 			routineKind := "FUNCTION"
@@ -1535,15 +1906,15 @@ func BuildObjectActionSQLs(d Dialect, req driver.ObjectActionRequest) ([]string,
 		if rawDDL == "" {
 			return nil, errors.New("trigger DDL statement cannot be empty")
 		}
-		splitTrig := SplitStatements(rawDDL)
-		if len(splitTrig) != 1 {
+		cleanedDDL, err := SplitSingleStatementForEngine(eng, rawDDL)
+		if err != nil {
 			return nil, errors.New("trigger DDL must contain a single statement")
 		}
-		rawDDL = strings.TrimSpace(splitTrig[0])
-		if err := ValidateExpectedDDLTarget(rawDDL, []string{"CREATE", "ALTER", "REPLACE"}, "TRIGGER"); err != nil {
+		rawDDL = cleanedDDL
+		if err := ValidateExpectedDDLTargetForEngine(eng, rawDDL, []string{"CREATE", "ALTER", "REPLACE"}, "TRIGGER"); err != nil {
 			return nil, err
 		}
-		upperDDL := strings.ToUpper(StripLeadingSQLComments(rawDDL))
+		upperDDL := strings.ToUpper(StripLeadingSQLCommentsForEngine(eng, rawDDL))
 		var stmts []string
 		if req.ReplaceExisting || d == DialectSQLite {
 			switch d {

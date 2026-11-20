@@ -365,7 +365,7 @@ func (d *SQLiteDriver) alterTableWithRebuild(ctx context.Context, req driver.Alt
 
 		case "ADD_CHECK":
 			chk := act.Check
-			if err := sqlbase.ValidateSQLExpression("CHECK constraint expression", chk.Expression); err != nil {
+			if err := sqlbase.ValidateSQLExpressionForEngine("sqlite", "CHECK constraint expression", chk.Expression); err != nil {
 				return nil, err
 			}
 			if strings.TrimSpace(chk.Name) == "" {
@@ -524,7 +524,7 @@ func (d *SQLiteDriver) alterTableWithRebuild(ctx context.Context, req driver.Alt
 	defer func() { _ = tx.Rollback() }()
 
 	for _, step := range txSteps {
-		if _, err := tx.ExecContext(ctx, step); err != nil {
+		if err := sqlbase.Exec(ctx, tx, step); err != nil {
 			return previewList, fmt.Errorf("SQLite table rebuild failed [%s]: %w", step, err)
 		}
 	}

@@ -96,10 +96,12 @@ const ResizableHeaderCell: React.FC<HeaderCellProps> = ({
   const isDraggingRef = useRef(false);
   const lastTapTimeRef = useRef<number>(0);
   const dragCleanupRef = useRef<(() => void) | null>(null);
+  const suppressClickCleanupRef = useRef<(() => void) | null>(null);
 
   useEffect(
     () => () => {
       dragCleanupRef.current?.();
+      suppressClickCleanupRef.current?.();
     },
     []
   );
@@ -118,6 +120,7 @@ const ResizableHeaderCell: React.FC<HeaderCellProps> = ({
     e.stopPropagation();
 
     dragCleanupRef.current?.();
+    suppressClickCleanupRef.current?.();
 
     const pointerId = e.pointerId;
     const pointerType = e.pointerType;
@@ -235,15 +238,26 @@ const ResizableHeaderCell: React.FC<HeaderCellProps> = ({
       if (hasMoved) {
         applyColWidth();
         // Block any trailing click on parent sortable <th> right after finishing a drag
+        suppressClickCleanupRef.current?.();
+        let timerId = 0;
+        const cleanupSuppress = () => {
+          if (timerId) {
+            window.clearTimeout(timerId);
+            timerId = 0;
+          }
+          window.removeEventListener('click', suppressClick, true);
+          if (suppressClickCleanupRef.current === cleanupSuppress) {
+            suppressClickCleanupRef.current = null;
+          }
+        };
         const suppressClick = (clickEvent: MouseEvent) => {
           clickEvent.stopPropagation();
           clickEvent.preventDefault();
-          window.removeEventListener('click', suppressClick, true);
+          cleanupSuppress();
         };
+        suppressClickCleanupRef.current = cleanupSuppress;
         window.addEventListener('click', suppressClick, true);
-        window.setTimeout(() => {
-          window.removeEventListener('click', suppressClick, true);
-        }, 80);
+        timerId = window.setTimeout(cleanupSuppress, 80);
         onResizeWidth(latestWidth);
       } else if (pointerType !== 'mouse' && upEvent.type === 'pointerup') {
         const now = Date.now();

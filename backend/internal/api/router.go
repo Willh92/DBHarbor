@@ -577,8 +577,8 @@ func (s *Server) authenticateRequest(w http.ResponseWriter, r *http.Request) (*a
 		return claims, p, true
 	}
 
-	// Only single-use short-lived export tickets (?ticket=...) are accepted on streaming GET /export
-	if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/export") {
+	// Only single-use short-lived export tickets (?ticket=...) are accepted on streaming GET /api/conn/.../export
+	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/conn/") && strings.HasSuffix(r.URL.Path, "/export") {
 		if ticket := strings.TrimSpace(r.URL.Query().Get("ticket")); ticket != "" {
 			claims, err := s.tokens.ParseTokenWithPurpose(ticket, auth.PurposeExportTicket)
 			if err != nil {

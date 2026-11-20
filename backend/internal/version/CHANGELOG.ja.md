@@ -4,6 +4,24 @@
 
 DBHarbor の主な変更履歴は本ファイルに記録され、GitHub リポジトリ [Willh92/DBHarbor](https://github.com/Willh92/DBHarbor.git) と同期されます。
 
+## [v1.0.5] - 2026-11-20
+
+### SQL 方言ガードレール・マルチエンジン ストリーミング/インデックス強化・フロントエンドライフサイクル＆モバイル/テーマ整合性・CodeQL ゼロアラートリリース
+- **セキュリティ & SQL 方言ガードレール（バックエンド）**：
+  - **読み取り専用ガード & 方言別字句解析の強化**：`sqlbase.IsReadOnlySafeStatement` におけるスキーマ修飾付き `PRAGMA`（例: `PRAGMA main.wal_checkpoint(...)`）の読み取り専用バイパスを修正。方言スコープ別の字句スキャン（`DollarQuotes`、`/*M!` / `/*!99999` 実行可能コメント、`NestedBlockComments`、`HashComments`、Oracle `q'...'` `AlternativeQuotes`）、カラム型検証（`sqlmeta.ValidateColumnTypeForEngine`）、およびエンジン限定 SQLite 式検証（`ValidateSQLExpressionForEngine`）を強化しました。
+  - **DuckDB Web サンドボックスの整合性向上**：`driver/sqlite/duckdb.go`（`validateDuckDBWebSandbox`）を `sqlbase/ddlguard.go` と完全に整合させ、`FROM ('...')` テーブル関数読み取り、`PRAGMA`、`CALL`、`READ_XLSX` / `ST_READ` / `GLOB` / `LS`、`DESC`、`PIVOT` / `UNPIVOT`、および `FROM VALUES` によるファイル/外部アクセス回避を遮断しました。
+  - **認証・ブランディング・TLS・アップロード & デスクトップ衛生管理**：`NormalizeAndValidateLoginBranding` を厳格なラスター画像限定 MIME＋マジックバイト検証へ強化（SVG XSS を遮断）、`Store.CreateUser` と `AdminResetPassword` 全体で最低 `8` 文字パスワードポリシーを統一、`sqlbase.BuildDriverTLSConfig` による `ClickHouse` / `Redis` の TLS 1.2+ 統一構成、`?ticket=` クエリ認証の `/api/conn/.../export` エンドポイント限定、256 MiB ストリーミング前の早期マジックヘッダー検証（`handleUploadLocalDBFile`）、およびデスクトップ版の `f.Close()` 検査とシグナル対応フォールバック処理を実装しました。
+- **機能・並行処理・メモリ改善（バックエンド）**：
+  - **DuckDB ストリーミングエクスポート & マルチ方言セカンダリインデックス**：`DuckDBDriver.StreamExport` を `json.NewDecoder` による逐次ストリーミング出力へ刷新し、`MaxRows > 0` 時の `LIMIT` プッシュダウンおよび `req.Format` に対応。`PostgreSQL` / `KingbaseES`、`SQL Server`、`Oracle`、`Dameng DM8` の `CreateTable` で後続の `CREATE INDEX`（`ADD_INDEX`）文生成に対応しました。
+  - **DB スコープ・プール退避・ACL & タイムスタンプ修正**：`ClickHouse` マルチテーブル `StreamExport` を `acquireConnForDB(ctx, req.Database)` で対象 DB にスコープ限定し、`GetAutocompleteMeta`（`PostgreSQL` / `Oracle` / `Dameng` / `ClickHouse`）へ `LIMIT 25000` 上限を適用。`PostgreSQL` のアイドル状態サブプールが `4` を超えた場合の自動退避、Redis ACL `ExecuteCommandArgs` の引数分割によるパスワード破損修正、および `ImportConnections` での RFC3339 タイムスタンプ保持を実施しました。
+- **フロントエンド セキュリティ・SQL エスケープ・ライフサイクル・モバイル & テーマ整合性**：
+  - **セキュリティ & 方言対応 SQL フォーマット**：最低 `8` 文字パスワード検証（`SecurityModal`、`UserManagementModal`）およびラスター限定ブランディング検証（`LoginBrandEmblem`、`SecurityModal`）をバックエンドと統一。方言対応の `utils/sqlFormat.ts`（`quoteIdentForEngine`、MySQL/MariaDB/ClickHouse バックスラッシュエスケープ、NUL 安全な `qualifyTableForEngine`、先頭ゼロ文字列リテラルのクォート）を抽出し、`TableDataTab.handleExportFiltered` の修正および `SchemaObjectModal` のクォート処理（`END`、DuckDB `INSTALL`/`LOAD`、`mssql` 整合性）を強化しました。
+  - **メモリ・並行競合 & ライフサイクルクリーンアップ**：エクスポート用 `Blob` URL の遅延解放（`utils/download.ts`）、MongoDB 非同期シーケンス/中断ガードと `WeakMap` ベース `_id` キー生成（`utils/mongoDocId.ts`、`MongoCollectionTab`）、サイドバーの LRU キャッシュ上限・コンテキスト整理・MongoDB `lastDB` キャッシュミス同期（`ConnectionSidebar`）、およびアンマウント/タイマー解放（`WorkbenchLayout`、`TableDataTab`、`ResizableTable`）を実装しました。
+  - **モバイル操作性 & OS テーマ動的追従**：モバイル（`375x812` / `390x844` / `375x420`）の表示切れ、`TableDataTab` モバイルページネーションと `180px` グリッド下限を修正し、`640px` / `760px` ブレークポイント統一、`100dvh` 採用、`.dbharbor-touch-target::after` ヒット領域の分離、および `aria-label` 補完を実施。ユーザー上書き未設定時の OS `prefers-color-scheme` ライブ監視（`runtimeMode.ts`、`App.tsx`）を追加し、UI フォールバック表記を `'v1.0.5'` へ更新しました。
+- **静的解析ゼロアラート & リリース準備**：
+  - **ローカル CodeQL 全件ゼロアラート達成**：JS/TS の品質警告（`useWorkbenchStore.ts`、`TableDataTab.tsx`）をすべて解消し、Go（`go-security-and-quality.qls`、`go-security-extended.qls`）、JS/TS（`javascript-security-and-quality.qls`、`javascript-security-extended.qls`）、GitHub Actions（`actions-security-and-quality.qls`）の全スイートで **0 アラート** を確認しました。
+  - **バージョン・ドキュメント & 埋め込み変更履歴の同期**：バージョン表記を `1.0.5` / `v1.0.5` へ統一し、`README*.md` と `SECURITY.md` の `.master.key` 記述およびセキュリティポリシーを更新、4 言語の埋め込み `CHANGELOG*.md` を同期し、`TestEmbeddedChangelogsInSyncWithVersionAndRoot` を追加しました。
+
 ## [v1.0.4] - 2026-11-14
 
 ### CodeQL ゼロアラート＆サプライチェーン強化・14 ドライバ並行/方言修正・ダークモード白フラッシュ防止・モバイル/Safari 互換性改善

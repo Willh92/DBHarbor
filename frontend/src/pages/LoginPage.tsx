@@ -34,6 +34,7 @@ import {
   DEFAULT_LOGIN_BRANDING,
   LoginBrandEmblem,
   readBrandingImageAsDataUrl,
+  sanitizeRasterBrandingDataUrl,
 } from '../components/common/LoginBrandEmblem';
 import { useResponsive } from '../hooks/useResponsive';
 import { useI18n } from '../i18n/useI18n';
@@ -113,16 +114,14 @@ export const LoginPage: React.FC = () => {
 
     const iconLink = document.querySelector('link[rel="icon"]') as HTMLLinkElement | null;
     if (iconLink) {
-      const safeRasterIconMatch =
-        effectiveBranding.iconMode === 'custom' && effectiveBranding.customIconDataUrl
-          ? /^(data:image\/(?:png|jpeg|jpg|webp|gif|x-icon|vnd\.microsoft\.icon);base64,[A-Za-z0-9+/=]+)$/i.exec(
-              effectiveBranding.customIconDataUrl.trim()
-            )
-          : null;
-      if (safeRasterIconMatch) {
-        const mimeMatch = /^data:(image\/[a-z0-9.+-]+);base64,/i.exec(safeRasterIconMatch[1]);
+      const safeRasterIcon =
+        effectiveBranding.iconMode === 'custom'
+          ? sanitizeRasterBrandingDataUrl(effectiveBranding.customIconDataUrl)
+          : '';
+      if (safeRasterIcon) {
+        const mimeMatch = /^data:(image\/[a-z0-9.+-]+);base64,/i.exec(safeRasterIcon);
         iconLink.type = mimeMatch?.[1]?.toLowerCase() || 'image/png';
-        iconLink.href = safeRasterIconMatch[1];
+        iconLink.href = safeRasterIcon;
       } else {
         iconLink.type = 'image/svg+xml';
         iconLink.href = '/favicon.svg';
@@ -353,7 +352,7 @@ export const LoginPage: React.FC = () => {
   return (
     <div
       style={{
-        minHeight: '100vh',
+        minHeight: '100dvh',
         height: '100dvh',
         display: 'flex',
         flexDirection: 'column',
@@ -383,10 +382,12 @@ export const LoginPage: React.FC = () => {
           <LanguageSwitcher size="middle" />
           <Button
             shape="circle"
-            style={{ width: 38, height: 38 }}
+            className="dbharbor-touch-target"
+            style={{ width: isMobile ? 44 : 38, height: isMobile ? 44 : 38 }}
             icon={darkMode ? <SunOutlined /> : <MoonOutlined />}
             onClick={toggleDarkMode}
             title={t('Toggle Theme')}
+            aria-label={t('Toggle Theme')}
           />
         </Space>
       </div>
@@ -613,7 +614,7 @@ export const LoginPage: React.FC = () => {
                               <input
                                 ref={setupIconInputRef}
                                 type="file"
-                                accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml"
+                                accept="image/png,image/jpeg,image/webp,image/gif,image/x-icon,image/vnd.microsoft.icon,.ico"
                                 style={{ display: 'none' }}
                                 onChange={handleSetupIconFileChange}
                               />

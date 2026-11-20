@@ -41,6 +41,7 @@ import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
 import type { DriverCapabilities, ObjectActionPayload, ObjectItem, ObjectSpec } from '../../types';
+import { formatSqlLiteralForEngine, qualifyTableForEngine, quoteIdentForEngine } from '../../utils/sqlFormat';
 import { writeTextToClipboard } from '../../utils/tableClipboard';
 import { LazyCodeEditor } from '../common/LazyCodeEditor';
 
@@ -110,23 +111,12 @@ const ALL_MODAL_TYPES: SchemaObjectType[] = [
 function quoteIdent(dbType: string, name: string): string {
   const clean = name.trim();
   if (!clean) return 'object_name';
-  const low = dbType.toLowerCase();
-  if (low === 'mysql' || low === 'mariadb' || low === 'tidb' || low === 'oceanbase' || low === 'clickhouse') {
-    return `\`${clean.replace(/`/g, '``')}\``;
-  }
-  if (low === 'sqlserver') {
-    return `[${clean.replace(/]/g, ']]')}]`;
-  }
-  return `"${clean.replace(/"/g, '""')}"`;
+  return quoteIdentForEngine(dbType, clean) || 'object_name';
 }
 
 function qualifiedIdent(dbType: string, schema: string | undefined, name: string): string {
-  const low = dbType.toLowerCase();
-  const qName = quoteIdent(dbType, name);
-  if (schema && (low === 'postgres' || low === 'kingbase' || low === 'sqlserver' || low === 'oracle' || low === 'dameng' || low === 'dm8')) {
-    return `${quoteIdent(dbType, schema)}.${qName}`;
-  }
-  return qName;
+  const clean = name.trim() || 'object_name';
+  return qualifyTableForEngine(dbType, clean, schema);
 }
 
 function normalizeObjectType(raw: string): SchemaObjectType {
@@ -160,6 +150,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
   const { isMobile } = useResponsive();
   const darkMode = useWorkbenchStore((s) => s.darkMode);
   const lowDb = dbType.toLowerCase();
+  const isSqlServer = lowDb === 'sqlserver' || lowDb === 'mssql';
 
   const [activeTab, setActiveTab] = useState<'form' | 'sql'>('form');
   const [objType, setObjType] = useState<SchemaObjectType>('VIEW');
@@ -308,20 +299,22 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
         return isTableMacro ? 'SELECT 1 AS id, x AS val' : 'x + 1';
       }
       if (tp === 'PACKAGE') {
-        return `CREATE OR REPLACE PACKAGE ${qName} AS\n  PROCEDURE noop;\nEND ${nameHint || 'new_object'};`;
+        const endIdent = quoteIdent(dbType, nameHint || 'new_object');
+        return `CREATE OR REPLACE PACKAGE ${qName} AS\n  PROCEDURE noop;\nEND ${endIdent};`;
       }
       if (tp === 'PACKAGE_BODY') {
-        return `CREATE OR REPLACE PACKAGE BODY ${qName} AS\n  PROCEDURE noop IS\n  BEGIN\n    NULL;\n  END noop;\nEND ${nameHint || 'new_object'};`;
+        const endIdent = quoteIdent(dbType, nameHint || 'new_object');
+        return `CREATE OR REPLACE PACKAGE BODY ${qName} AS\n  PROCEDURE noop IS\n  BEGIN\n    NULL;\n  END noop;\nEND ${endIdent};`;
       }
       if (tp === 'DICTIONARY') {
         const srcTbl = tables[0] || 'source_table';
         if (dictPreset === 'postgresql') {
-          return `CREATE OR REPLACE DICTIONARY ${qName}\n(\n  id UInt64,\n  name String\n)\nPRIMARY KEY id\nSOURCE(POSTGRESQL(host '127.0.0.1' port 5432 user 'postgres' password '' db 'postgres' table '${srcTbl}'))\nLIFETIME(MIN 60 MAX 300)\nLAYOUT(HASHED());`;
+          return `CREATE OR REPLACE DICTIONARY ${qName}\n(\n  id UInt64,\n  name String\n)\nPRIMARY KEY id\nSOURCE(POSTGRESQL(host '127.0.0.1' port 5432 user 'postgres' password '' db 'postgres' table ${formatSqlLiteralForEngine(dbType, srcTbl)}))\nLIFETIME(MIN 60 MAX 300)\nLAYOUT(HASHED());`;
         }
         if (dictPreset === 'http') {
           return `CREATE OR REPLACE DICTIONARY ${qName}\n(\n  id UInt64,\n  name String\n)\nPRIMARY KEY id\nSOURCE(HTTP(url 'http://127.0.0.1:8080/dict' format 'JSONEachRow'))\nLIFETIME(300)\nLAYOUT(FLAT());`;
         }
-        return `CREATE OR REPLACE DICTIONARY ${qName}\n(\n  id UInt64,\n  name String\n)\nPRIMARY KEY id\nSOURCE(CLICKHOUSE(DB '${database || 'default'}' TABLE '${srcTbl}'))\nLIFETIME(MIN 60 MAX 300)\nLAYOUT(FLAT());`;
+        return `CREATE OR REPLACE DICTIONARY ${qName}\n(\n  id UInt64,\n  name String\n)\nPRIMARY KEY id\nSOURCE(CLICKHOUSE(DB ${formatSqlLiteralForEngine(dbType, database || 'default')} TABLE ${formatSqlLiteralForEngine(dbType, srcTbl)}))\nLIFETIME(MIN 60 MAX 300)\nLAYOUT(FLAT());`;
       }
       if (tp === 'FUNCTION') {
         if (lowDb === 'clickhouse') {
@@ -330,7 +323,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
         if (lowDb === 'postgres' || lowDb === 'kingbase') {
           return 'BEGIN\n  RETURN NULL;\nEND;';
         }
-        if (lowDb === 'sqlserver' || lowDb === 'oracle' || lowDb === 'dameng' || lowDb === 'dm8') {
+        if (isSqlServer || lowDb === 'oracle' || lowDb === 'dameng' || lowDb === 'dm8') {
           return '  RETURN NULL;';
         }
         return 'RETURN NULL;';
@@ -349,7 +342,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
       }
       return '';
     },
-    [dbType, schema, tables, isTableMacro, dictPreset, database, lowDb]
+    [dbType, schema, tables, isTableMacro, dictPreset, database, lowDb, isSqlServer]
   );
 
   // Initialize modal state on open or target context change (without resetting on internal form state edits)
@@ -579,7 +572,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
       }
       case 'SEQUENCE': {
         const parts: string[] = [`CREATE SEQUENCE ${qObj}`];
-        if ((lowDb === 'postgres' || lowDb === 'kingbase' || lowDb === 'sqlserver') && seqDataType) {
+        if ((lowDb === 'postgres' || lowDb === 'kingbase' || isSqlServer) && seqDataType) {
           parts.push(`AS ${seqDataType}`);
         }
         if (seqIncrement !== null) parts.push(`INCREMENT BY ${seqIncrement}`);
@@ -593,17 +586,20 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
       case 'EVENT': {
         const sched =
           evScheduleKind === 'AT'
-            ? `AT '${(evExecuteAt || '2026-12-31 23:59:59').replace(/'/g, "''")}'`
-            : `EVERY ${evEveryVal ?? 1} ${evEveryUnit}${evStartsAt ? ` STARTS '${evStartsAt.replace(/'/g, "''")}'` : ''}${evEndsAt ? ` ENDS '${evEndsAt.replace(/'/g, "''")}'` : ''}`;
+            ? `AT ${formatSqlLiteralForEngine(dbType, evExecuteAt || '2026-12-31 23:59:59')}`
+            : `EVERY ${evEveryVal ?? 1} ${evEveryUnit}${evStartsAt ? ` STARTS ${formatSqlLiteralForEngine(dbType, evStartsAt)}` : ''}${evEndsAt ? ` ENDS ${formatSqlLiteralForEngine(dbType, evEndsAt)}` : ''}`;
         const preserveStr = evPreserve ? 'ON COMPLETION PRESERVE' : 'ON COMPLETION NOT PRESERVE';
         const enableStr = evEnabled ? 'ENABLE' : 'DISABLE';
         return `CREATE EVENT IF NOT EXISTS ${qObj}\nON SCHEDULE ${sched}\n${preserveStr}\n${enableStr}\nDO\nBEGIN\n  ${bodySql.trim() || 'SELECT 1;'}\nEND;`;
       }
       case 'EXTENSION': {
         if (lowDb === 'duckdb') {
-          return `INSTALL ${cleanName};\nLOAD ${cleanName};`;
+          const safeExt = /^[A-Za-z_][A-Za-z0-9_]*$/.test(cleanName)
+            ? cleanName
+            : quoteIdent(dbType, cleanName);
+          return `INSTALL ${safeExt};\nLOAD ${safeExt};`;
         }
-        const verPart = extVersion.trim() ? ` VERSION '${extVersion.trim().replace(/'/g, "''")}'` : '';
+        const verPart = extVersion.trim() ? ` VERSION ${formatSqlLiteralForEngine(dbType, extVersion.trim())}` : '';
         const casPart = extCascade ? ' CASCADE' : '';
         return `CREATE EXTENSION IF NOT EXISTS ${quoteIdent(dbType, cleanName)}${verPart}${casPart};`;
       }
@@ -612,7 +608,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
           const chk = domainCheckExpr.trim() ? ` CHECK (${domainCheckExpr.trim()})` : '';
           return `CREATE DOMAIN ${qObj} AS ${domainBaseType.trim() || 'VARCHAR(255)'}${chk};`;
         }
-        const vals = enumValues.map((v) => `'${v.replace(/'/g, "''")}'`).join(', ');
+        const vals = enumValues.map((v) => formatSqlLiteralForEngine(dbType, v)).join(', ');
         return `CREATE TYPE ${qObj} AS ENUM (${vals});`;
       }
       case 'PACKAGE':
@@ -624,7 +620,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
         const targetRef = synTargetOwner.trim()
           ? `${quoteIdent(dbType, synTargetOwner.trim())}.${quoteIdent(dbType, synTargetObject.trim() || 'target_object')}`
           : quoteIdent(dbType, synTargetObject.trim() || 'target_object');
-        if (lowDb === 'sqlserver') {
+        if (isSqlServer) {
           return `CREATE SYNONYM ${qObj} FOR ${targetRef};`;
         }
         const pub = isPublicObj ? 'PUBLIC ' : '';
@@ -636,7 +632,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
         const auth = dbLinkUser.trim()
           ? ` CONNECT TO ${quoteIdent(dbType, dbLinkUser.trim())} IDENTIFIED BY "${dbLinkPass ? '******' : ''}"`
           : '';
-        return `CREATE ${pub}DATABASE LINK ${quoteIdent(dbType, cleanName)}${auth} USING '${dbLinkHost.trim().replace(/'/g, "''")}';`;
+        return `CREATE ${pub}DATABASE LINK ${quoteIdent(dbType, cleanName)}${auth} USING ${formatSqlLiteralForEngine(dbType, dbLinkHost.trim())};`;
       }
       case 'MACRO': {
         const args = macroParams.map((p) => p.trim()).filter(Boolean).join(', ');
@@ -652,7 +648,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
         if (lowDb === 'postgres' || lowDb === 'kingbase') {
           return `CREATE OR REPLACE FUNCTION ${qObj}(${fnParams})\nRETURNS ${fnReturns || 'TEXT'}\nLANGUAGE plpgsql\nAS $$\n${bodySql.trim() || 'BEGIN\n  RETURN NULL;\nEND;'}\n$$;`;
         }
-        if (lowDb === 'sqlserver') {
+        if (isSqlServer) {
           return `CREATE OR ALTER FUNCTION ${qObj}(${fnParams})\nRETURNS ${fnReturns || 'NVARCHAR(255)'}\nAS\nBEGIN\n${bodySql.trim() || '  RETURN NULL;'}\nEND;`;
         }
         if (lowDb === 'oracle' || lowDb === 'dameng' || lowDb === 'dm8') {
@@ -664,7 +660,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
         if (lowDb === 'postgres' || lowDb === 'kingbase') {
           return `CREATE OR REPLACE PROCEDURE ${qObj}(${procParams})\nLANGUAGE plpgsql\nAS $$\n${bodySql.trim() || 'BEGIN\nEND;'}\n$$;`;
         }
-        if (lowDb === 'sqlserver') {
+        if (isSqlServer) {
           return `CREATE OR ALTER PROCEDURE ${qObj}${procParams ? ` ${procParams}` : ''}\nAS\nBEGIN\n  SET NOCOUNT ON;\n  ${bodySql.trim() || 'SELECT 1;'}\nEND;`;
         }
         if (lowDb === 'oracle' || lowDb === 'dameng' || lowDb === 'dm8') {
@@ -679,7 +675,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
         if (lowDb === 'postgres' || lowDb === 'kingbase') {
           return `CREATE OR REPLACE TRIGGER ${quoteIdent(dbType, cleanName)}\n${trigTiming} ${trigEvent} ON ${qTbl}\nFOR EACH ROW\n${bodySql.trim() || 'EXECUTE FUNCTION trigger_handler_fn()'};`;
         }
-        if (lowDb === 'sqlserver') {
+        if (isSqlServer) {
           const mssqlTiming = trigTiming === 'INSTEAD OF' ? 'INSTEAD OF' : 'AFTER';
           return `CREATE OR ALTER TRIGGER ${qObj}\nON ${qTbl}\n${mssqlTiming} ${trigEvent}\nAS\nBEGIN\n  SET NOCOUNT ON;\n  ${bodySql.trim()}\nEND;`;
         }
@@ -699,6 +695,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
     targetTable,
     replaceExisting,
     lowDb,
+    isSqlServer,
     bodySql,
     mvToTable,
     mvEngine,
@@ -1263,7 +1260,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
 
         {objType === 'SEQUENCE' && (
           <Row gutter={[10, 8]}>
-            {(lowDb === 'postgres' || lowDb === 'kingbase' || lowDb === 'sqlserver') && (
+            {(lowDb === 'postgres' || lowDb === 'kingbase' || isSqlServer) && (
               <Col xs={12} sm={6}>
                 <Form.Item label={t('Data Type')} style={{ marginBottom: 10 }}>
                   <Select
@@ -1584,7 +1581,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
                 />
               </Form.Item>
             </Col>
-            {lowDb !== 'sqlserver' && (
+            {!isSqlServer && (
               <Col xs={12} sm={5}>
                 <Form.Item label={t('Public Synonym')} style={{ marginBottom: 10 }}>
                   <Switch checked={isPublicObj} onChange={setIsPublicObj} />
@@ -1644,7 +1641,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
                     const srcTbl = tables[0] || 'source_table';
                     if (next === 'postgresql') {
                       setBodySql(
-                        `CREATE OR REPLACE DICTIONARY ${qName}\n(\n  id UInt64,\n  name String\n)\nPRIMARY KEY id\nSOURCE(POSTGRESQL(host '127.0.0.1' port 5432 user 'postgres' password '' db 'postgres' table '${srcTbl}'))\nLIFETIME(MIN 60 MAX 300)\nLAYOUT(HASHED());`
+                        `CREATE OR REPLACE DICTIONARY ${qName}\n(\n  id UInt64,\n  name String\n)\nPRIMARY KEY id\nSOURCE(POSTGRESQL(host '127.0.0.1' port 5432 user 'postgres' password '' db 'postgres' table ${formatSqlLiteralForEngine(dbType, srcTbl)}))\nLIFETIME(MIN 60 MAX 300)\nLAYOUT(HASHED());`
                       );
                     } else if (next === 'http') {
                       setBodySql(
@@ -1652,7 +1649,7 @@ export const SchemaObjectModal: React.FC<SchemaObjectModalProps> = ({
                       );
                     } else {
                       setBodySql(
-                        `CREATE OR REPLACE DICTIONARY ${qName}\n(\n  id UInt64,\n  name String\n)\nPRIMARY KEY id\nSOURCE(CLICKHOUSE(DB '${database || 'default'}' TABLE '${srcTbl}'))\nLIFETIME(MIN 60 MAX 300)\nLAYOUT(FLAT());`
+                        `CREATE OR REPLACE DICTIONARY ${qName}\n(\n  id UInt64,\n  name String\n)\nPRIMARY KEY id\nSOURCE(CLICKHOUSE(DB ${formatSqlLiteralForEngine(dbType, database || 'default')} TABLE ${formatSqlLiteralForEngine(dbType, srcTbl)}))\nLIFETIME(MIN 60 MAX 300)\nLAYOUT(FLAT());`
                       );
                     }
                   };

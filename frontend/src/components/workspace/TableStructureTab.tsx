@@ -59,6 +59,7 @@ import type {
   WorkspaceTab,
 } from '../../types';
 import { formatBytes } from '../../utils/format';
+import { formatSqlLiteralForEngine, quoteIdentForEngine } from '../../utils/sqlFormat';
 import { writeTextToClipboard } from '../../utils/tableClipboard';
 import { ContextNavBar, type TransferModalMode, type TransferOpenOptions } from './ContextNavBar';
 
@@ -636,16 +637,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
   const buildGeneratedSQL = (kind: 'select' | 'insert' | 'update' | 'ddl'): string => {
     const cols = structure?.columns || [];
     const tblName = tab.table || 'table_name';
-    const q = (id: string) =>
-      tab.dbType === 'mysql' ||
-      tab.dbType === 'mariadb' ||
-      tab.dbType === 'tidb' ||
-      tab.dbType === 'oceanbase' ||
-      tab.dbType === 'clickhouse'
-        ? `\`${id}\``
-        : tab.dbType === 'sqlserver'
-          ? `[${id}]`
-          : `"${id}"`;
+    const q = (id: string) => quoteIdentForEngine(tab.dbType, id);
     if (kind === 'ddl') {
       return structure?.ddl || `-- DDL for ${tblName}`;
     }
@@ -657,13 +649,13 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
     const targetCols = writeCols.length ? writeCols : cols;
     if (kind === 'insert') {
       const names = targetCols.map((c) => q(c.name)).join(', ');
-      const placeholders = targetCols.map((c) => `'${c.name}_val'`).join(', ');
+      const placeholders = targetCols.map((c) => formatSqlLiteralForEngine(tab.dbType, `${c.name}_val`)).join(', ');
       return `INSERT INTO ${q(tblName)} (${names})\nVALUES (${placeholders});`;
     }
     const pkCols = cols.filter((c) => c.isPrimaryKey);
     const setCols = targetCols.filter((c) => !c.isPrimaryKey);
     const setClause = (setCols.length ? setCols : targetCols)
-      .map((c) => `  ${q(c.name)} = '${c.name}_val'`)
+      .map((c) => `  ${q(c.name)} = ${formatSqlLiteralForEngine(tab.dbType, `${c.name}_val`)}`)
       .join(',\n');
     const whereClause = pkCols.length
       ? pkCols.map((c) => `${q(c.name)} = 1`).join(' AND ')
@@ -960,7 +952,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
                 </Typography.Text>
               )}
             </Space>
-            <Space size={6} wrap>
+            <Space size={isMobile ? 8 : 6} wrap>
               <Dropdown
                 trigger={['click']}
                 placement="bottomRight"
@@ -987,11 +979,14 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
               </Dropdown>
               <Button
                 size="small"
-                style={isMobile ? { height: 34, paddingInline: 10 } : undefined}
+                className={isMobile ? 'dbharbor-touch-target' : undefined}
+                style={isMobile ? { width: 34, height: 34, padding: 0 } : undefined}
                 icon={<ReloadOutlined />}
+                title={t('Refresh Structure')}
+                aria-label={t('Refresh Structure')}
                 onClick={() => void loadStructure()}
               >
-                {isMobile ? '' : t('Refresh Structure')}
+                {isMobile ? undefined : t('Refresh Structure')}
               </Button>
             </Space>
           </div>
@@ -1051,9 +1046,9 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
                 ? [
                     {
                       title: t('Actions'),
-                      width: 135,
+                      width: isMobile ? 145 : 135,
                       render: (_: any, r: ColumnDef) => (
-                        <Space size={4} style={{ whiteSpace: 'nowrap' }}>
+                        <Space size={isMobile ? 12 : 4} style={{ whiteSpace: 'nowrap' }}>
                           <Button
                             size="small"
                             type="link"
@@ -1067,7 +1062,15 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
                             onConfirm={() => void handleDropColumn(r.name)}
                           >
                             <Tooltip title={r.isPrimaryKey ? 'PK' : t('Actions')}>
-                              <Button size="small" type="text" danger icon={<DeleteOutlined />} disabled={r.isPrimaryKey} />
+                              <Button
+                                size="small"
+                                type="text"
+                                danger
+                                className="dbharbor-touch-target"
+                                aria-label={t('Delete')}
+                                icon={<DeleteOutlined />}
+                                disabled={r.isPrimaryKey}
+                              />
                             </Tooltip>
                           </Popconfirm>
                         </Space>
@@ -1135,15 +1138,17 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
                     ? [
                         {
                           title: t('Actions'),
-                          width: 115,
+                          width: isMobile ? 125 : 115,
                           render: (_: any, r: IndexDef) =>
                             !r.primary ? (
-                              <Space size={4}>
+                              <Space size={isMobile ? 12 : 4}>
                                 <Button
                                   size="small"
                                   type="text"
+                                  className="dbharbor-touch-target"
                                   icon={<EditOutlined />}
                                   title={t('Modify')}
+                                  aria-label={t('Modify')}
                                   onClick={() => {
                                     setEditingIdx(r);
                                     idxForm.setFieldsValue({
@@ -1158,7 +1163,14 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
                                   title={t('Drop index {name}?', { name: r.name })}
                                   onConfirm={() => void handleDropIndex(r.name)}
                                 >
-                                  <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+                                  <Button
+                                    size="small"
+                                    type="text"
+                                    danger
+                                    className="dbharbor-touch-target"
+                                    aria-label={t('Delete')}
+                                    icon={<DeleteOutlined />}
+                                  />
                                 </Popconfirm>
                               </Space>
                             ) : null,
@@ -1218,7 +1230,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
                           title: t('Actions'),
                           width: 220,
                           render: (_: any, r: SkippingIndexDef) => (
-                            <Space size={4}>
+                            <Space size={isMobile ? 10 : 4} wrap>
                               <Button
                                 size="small"
                                 icon={<SyncOutlined />}
@@ -1236,7 +1248,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
                                 title={t('Drop index {name}?', { name: r.name })}
                                 onConfirm={() => void handleSkippingIndexAction('DROP_SKIPPING_INDEX', r)}
                               >
-                                <Button size="small" danger icon={<DeleteOutlined />} />
+                                <Button size="small" danger className="dbharbor-touch-target" aria-label={t('Delete')} icon={<DeleteOutlined />} />
                               </Popconfirm>
                             </Space>
                           ),
@@ -1288,7 +1300,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
                           title={t('Drop foreign key {name}?', { name: r.name })}
                           onConfirm={() => void handleDropForeignKey(r.name)}
                         >
-                          <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+                          <Button size="small" type="text" danger className="dbharbor-touch-target" aria-label={t('Delete')} icon={<DeleteOutlined />} />
                         </Popconfirm>
                       ),
                     },
@@ -1358,7 +1370,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
                           title={t('Drop check constraint {name}?', { name: r.name })}
                           onConfirm={() => void handleDropCheck(r)}
                         >
-                          <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+                          <Button size="small" type="text" danger className="dbharbor-touch-target" aria-label={t('Delete')} icon={<DeleteOutlined />} />
                         </Popconfirm>
                       ),
                     },
@@ -1427,7 +1439,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
                       title: t('Actions'),
                       width: 220,
                       render: (_: any, r: ProjectionDef) => (
-                        <Space size={4}>
+                        <Space size={isMobile ? 10 : 4} wrap>
                           <Button
                             size="small"
                             icon={<SyncOutlined />}
@@ -1445,7 +1457,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
                             title={t('Drop projection {name}?', { name: r.name })}
                             onConfirm={() => void handleProjectionAction('DROP_PROJECTION', r)}
                           >
-                            <Button size="small" danger icon={<DeleteOutlined />} />
+                            <Button size="small" danger className="dbharbor-touch-target" aria-label={t('Delete')} icon={<DeleteOutlined />} />
                           </Popconfirm>
                         </Space>
                       ),
@@ -1901,7 +1913,7 @@ export const TableStructureTab: React.FC<Props> = ({ tab, onOpenTransfer }) => {
             {t('Copy DDL')}
           </Button>
         </div>
-        <div style={{ height: 'clamp(200px, calc(100vh - 280px), 520px)', border: '1px solid rgba(128,128,128,0.2)', borderRadius: 8, overflow: 'hidden' }}>
+        <div style={{ height: 'clamp(200px, calc(100dvh - 280px), 520px)', border: '1px solid rgba(128,128,128,0.2)', borderRadius: 8, overflow: 'hidden' }}>
           <SqlCodeViewer code={structure?.ddl || '-- DDL'} darkMode={darkMode} height="100%" />
         </div>
       </div>

@@ -4,12 +4,14 @@ export interface ResponsiveState {
   isMobile: boolean;
   isTablet: boolean;
   isCompactHeight: boolean;
+  isNarrowViewport: boolean;
 }
 
 const DEFAULT_STATE: ResponsiveState = {
   isMobile: false,
   isTablet: false,
   isCompactHeight: false,
+  isNarrowViewport: false,
 };
 
 let currentSnapshot: ResponsiveState = DEFAULT_STATE;
@@ -23,14 +25,16 @@ function computeSnapshot(): ResponsiveState {
   const isMobile = window.matchMedia('(max-width: 640px)').matches;
   const isTablet = !isMobile && window.matchMedia('(max-width: 960px)').matches;
   const isCompactHeight = window.matchMedia('(max-height: 700px)').matches;
+  const isNarrowViewport = window.matchMedia('(max-width: 759px)').matches;
   if (
     currentSnapshot.isMobile === isMobile &&
     currentSnapshot.isTablet === isTablet &&
-    currentSnapshot.isCompactHeight === isCompactHeight
+    currentSnapshot.isCompactHeight === isCompactHeight &&
+    currentSnapshot.isNarrowViewport === isNarrowViewport
   ) {
     return currentSnapshot;
   }
-  currentSnapshot = { isMobile, isTablet, isCompactHeight };
+  currentSnapshot = { isMobile, isTablet, isCompactHeight, isNarrowViewport };
   return currentSnapshot;
 }
 
@@ -43,6 +47,7 @@ function initMediaListeners() {
 
   const queries = [
     window.matchMedia('(max-width: 640px)'),
+    window.matchMedia('(max-width: 759px)'),
     window.matchMedia('(max-width: 960px)'),
     window.matchMedia('(max-height: 700px)'),
   ];

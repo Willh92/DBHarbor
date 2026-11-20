@@ -169,13 +169,11 @@ func (d *Driver) ListDatabases(ctx context.Context) ([]driver.DatabaseSummary, e
 }
 
 func (d *Driver) CreateDatabase(ctx context.Context, name, _ string) error {
-	_, err := d.db.ExecContext(ctx, "CREATE DATABASE "+sqlbase.QuoteIdent(sqlbase.DialectSQLServer, name))
-	return err
+	return sqlbase.Exec(ctx, d.db, "CREATE DATABASE "+sqlbase.QuoteIdent(sqlbase.DialectSQLServer, name))
 }
 
 func (d *Driver) DropDatabase(ctx context.Context, name string) error {
-	_, err := d.db.ExecContext(ctx, "DROP DATABASE "+sqlbase.QuoteIdent(sqlbase.DialectSQLServer, name))
-	return err
+	return sqlbase.Exec(ctx, d.db, "DROP DATABASE "+sqlbase.QuoteIdent(sqlbase.DialectSQLServer, name))
 }
 
 func (d *Driver) CreateSchema(ctx context.Context, database, schema string) error {
@@ -197,7 +195,7 @@ func (d *Driver) ListSchemas(ctx context.Context, database string) ([]string, er
 	if database != "" {
 		prefix = sqlbase.QuoteIdent(sqlbase.DialectSQLServer, database) + "."
 	}
-	rows, err := d.db.QueryContext(ctx, fmt.Sprintf("SELECT name FROM %ssys.schemas WHERE principal_id = 1 OR name = 'dbo' ORDER BY CASE WHEN name='dbo' THEN 0 ELSE 1 END, name", prefix))
+	rows, err := sqlbase.Query(ctx, d.db, fmt.Sprintf("SELECT name FROM %ssys.schemas WHERE principal_id = 1 OR name = 'dbo' ORDER BY CASE WHEN name='dbo' THEN 0 ELSE 1 END, name", prefix))
 	if err != nil {
 		if sqlbase.IsAuthError("sqlserver", err) {
 			return nil, err
@@ -227,7 +225,7 @@ func (d *Driver) ListObjects(ctx context.Context, database, schema string) (driv
 	if database != "" {
 		prefix = sqlbase.QuoteIdent(sqlbase.DialectSQLServer, database) + "."
 	}
-	rows, err := d.db.QueryContext(ctx, fmt.Sprintf(`
+	rows, err := sqlbase.Query(ctx, d.db, fmt.Sprintf(`
 		SELECT TABLE_NAME, TABLE_TYPE FROM %sINFORMATION_SCHEMA.TABLES
 		WHERE TABLE_SCHEMA = @p1 ORDER BY TABLE_NAME
 	`, prefix), schema)
@@ -289,7 +287,7 @@ func (d *Driver) getPrimaryKeys(ctx context.Context, database, schema, table str
 	if database != "" {
 		prefix = sqlbase.QuoteIdent(sqlbase.DialectSQLServer, database) + "."
 	}
-	rows, err := d.db.QueryContext(ctx, fmt.Sprintf(`
+	rows, err := sqlbase.Query(ctx, d.db, fmt.Sprintf(`
 		SELECT c.name
 		FROM %ssys.indexes i
 		JOIN %ssys.tables t ON i.object_id = t.object_id
@@ -325,7 +323,7 @@ func (d *Driver) acquireConnForDB(ctx context.Context, database string) (*sql.Co
 	}
 	switched := false
 	if targetDB != "" {
-		if _, uErr := conn.ExecContext(ctx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectSQLServer, targetDB)); uErr != nil {
+		if uErr := sqlbase.Exec(ctx, conn, "USE "+sqlbase.QuoteIdent(sqlbase.DialectSQLServer, targetDB)); uErr != nil {
 			_ = conn.Close()
 			return nil, nil, uErr
 		}
@@ -336,7 +334,7 @@ func (d *Driver) acquireConnForDB(ctx context.Context, database string) (*sql.Co
 	cleanup := func() {
 		if switched {
 			rCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_, rErr := conn.ExecContext(rCtx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectSQLServer, defaultDB))
+			rErr := sqlbase.Exec(rCtx, conn, "USE "+sqlbase.QuoteIdent(sqlbase.DialectSQLServer, defaultDB))
 			cancel()
 			if rErr != nil {
 				_ = conn.Raw(func(_ any) error { return stdsql_driver.ErrBadConn })
@@ -357,19 +355,9 @@ func (d *Driver) execInDatabase(ctx context.Context, database string, stmts []st
 			return cErr
 		}
 		defer cleanup()
-		for _, s := range stmts {
-			if _, err := conn.ExecContext(ctx, s); err != nil {
-				return err
-			}
-		}
-		return nil
+		return sqlbase.ExecBatch(ctx, conn, stmts)
 	}
-	for _, s := range stmts {
-		if _, err := d.db.ExecContext(ctx, s); err != nil {
-			return err
-		}
-	}
-	return nil
+	return sqlbase.ExecBatch(ctx, d.db, stmts)
 }
 
 func (d *Driver) GetTableStructure(ctx context.Context, database, schema, table string) (driver.TableStructure, error) {
@@ -391,7 +379,7 @@ func (d *Driver) GetTableStructure(ctx context.Context, database, schema, table 
 	}
 
 	// Table comment
-	_ = d.db.QueryRowContext(ctx, fmt.Sprintf(`
+	_ = sqlbase.QueryRow(ctx, d.db, fmt.Sprintf(`
 		SELECT COALESCE(CAST(ep.value AS NVARCHAR(4000)), '')
 		FROM %ssys.tables t
 		JOIN %ssys.schemas s ON t.schema_id = s.schema_id
@@ -401,7 +389,7 @@ func (d *Driver) GetTableStructure(ctx context.Context, database, schema, table 
 
 	// Indexes + Primary Keys
 	pkSet := map[string]bool{}
-	idxRows, idxErr := d.db.QueryContext(ctx, fmt.Sprintf(`
+	idxRows, idxErr := sqlbase.Query(ctx, d.db, fmt.Sprintf(`
 		SELECT i.name, i.is_unique, i.is_primary_key, COALESCE(i.type_desc, ''), c.name
 		FROM %ssys.indexes i
 		JOIN %ssys.tables t ON i.object_id = t.object_id
@@ -442,7 +430,7 @@ func (d *Driver) GetTableStructure(ctx context.Context, database, schema, table 
 	}
 
 	// Columns (works for both tables and views via sys.objects)
-	cRows, cErr := d.db.QueryContext(ctx, fmt.Sprintf(`
+	cRows, cErr := sqlbase.Query(ctx, d.db, fmt.Sprintf(`
 		SELECT c.name,
 		       COALESCE(tp.name, ''),
 		       CAST(c.max_length AS BIGINT),
@@ -497,7 +485,7 @@ func (d *Driver) GetTableStructure(ctx context.Context, database, schema, table 
 	}
 
 	// Foreign Keys
-	fkRows, fkErr := d.db.QueryContext(ctx, fmt.Sprintf(`
+	fkRows, fkErr := sqlbase.Query(ctx, d.db, fmt.Sprintf(`
 		SELECT fk.name,
 		       pc.name,
 		       rt.name,
@@ -542,7 +530,7 @@ func (d *Driver) GetTableStructure(ctx context.Context, database, schema, table 
 	}
 
 	// Check Constraints
-	chkRows, chkErr := d.db.QueryContext(ctx, fmt.Sprintf(`
+	chkRows, chkErr := sqlbase.Query(ctx, d.db, fmt.Sprintf(`
 		SELECT cc.name, COALESCE(cc.definition, ''), cc.is_disabled
 		FROM %ssys.check_constraints cc
 		JOIN %ssys.tables t ON cc.parent_object_id = t.object_id
@@ -608,8 +596,7 @@ func (d *Driver) BrowseData(ctx context.Context, req driver.BrowseDataRequest) (
 	if err != nil {
 		return res, err
 	}
-	var total int64
-	if d.db.QueryRowContext(ctx, countSQL).Scan(&total) == nil {
+	if total, ok := sqlbase.QueryCount(ctx, d.db, countSQL); ok {
 		res.Total = total
 		res.HasTotal = true
 	}
@@ -648,6 +635,11 @@ func (d *Driver) CreateTable(ctx context.Context, req driver.CreateTableRequest)
 		return ddl, err
 	}
 	stmts := []string{ddl}
+	idxStmts, idxErr := sqlbase.BuildCreateTableIndexSQLs(sqlbase.DialectSQLServer, req)
+	if idxErr != nil {
+		return "", idxErr
+	}
+	stmts = append(stmts, idxStmts...)
 	if strings.TrimSpace(req.Comment) != "" {
 		stmts = append(stmts, sqlbase.BuildSQLServerExtendedPropertySQL(req.Schema, req.Table, "", req.Comment))
 	}
@@ -694,9 +686,9 @@ func (d *Driver) ExecuteSQL(ctx context.Context, database, query string, maxRows
 			return nil, cErr
 		}
 		defer cleanup()
-		return sqlbase.ExecuteMultiSQLConn(ctx, conn, query, maxRows)
+		return sqlbase.ExecuteMultiSQLConnForEngine(ctx, conn, "sqlserver", query, maxRows)
 	}
-	return sqlbase.ExecuteMultiSQL(ctx, d.db, query, maxRows)
+	return sqlbase.ExecuteMultiSQLForEngine(ctx, d.db, "sqlserver", query, maxRows)
 }
 
 func (d *Driver) StreamExport(ctx context.Context, req driver.ExportRequest, w io.Writer) error {
@@ -779,8 +771,8 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 	if strings.TrimSpace(database) != "" {
 		prefix = sqlbase.QuoteIdent(sqlbase.DialectSQLServer, database) + "."
 	}
-	rows, err := d.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT TABLE_NAME, COLUMN_NAME
+	rows, err := sqlbase.Query(ctx, d.db, fmt.Sprintf(`
+		SELECT TOP 25000 TABLE_NAME, COLUMN_NAME
 		FROM %sINFORMATION_SCHEMA.COLUMNS
 		ORDER BY TABLE_NAME, ORDINAL_POSITION
 	`, prefix))
@@ -790,10 +782,15 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 		}
 	} else {
 		defer rows.Close()
+		rowCount := 0
 		for rows.Next() {
+			if rowCount >= 25000 {
+				break
+			}
 			var tName, cName string
 			if rows.Scan(&tName, &cName) == nil {
 				meta.Tables[tName] = append(meta.Tables[tName], cName)
+				rowCount++
 			}
 		}
 	}
@@ -809,7 +806,7 @@ func (d *Driver) ListPartitions(ctx context.Context, database, schema, table str
 	if strings.TrimSpace(database) != "" {
 		prefix = sqlbase.QuoteIdent(sqlbase.DialectSQLServer, database) + "."
 	}
-	rows, err := d.db.QueryContext(ctx, fmt.Sprintf(`
+	rows, err := sqlbase.Query(ctx, d.db, fmt.Sprintf(`
 		SELECT CAST(p.partition_number AS NVARCHAR(32)),
 		       COALESCE(SUM(p.rows), 0),
 		       COALESCE(SUM(au.total_pages), 0) * 8192,

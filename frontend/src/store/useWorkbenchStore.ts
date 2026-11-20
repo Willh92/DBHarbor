@@ -49,6 +49,7 @@ interface WorkbenchState {
   }) => void;
   logout: (callBackend?: boolean) => void;
   toggleDarkMode: () => void;
+  setDarkModeFromSystem: (dark: boolean) => void;
   setLocale: (loc: AppLocale) => void;
   loadBootstrap: () => Promise<void>;
   reloadConnections: () => Promise<void>;
@@ -244,8 +245,18 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
 
   toggleDarkMode: () => {
     const next = !get().darkMode;
-    localStorage.setItem('dbharbor_theme', next ? 'dark' : 'light');
+    try {
+      localStorage.setItem('dbharbor_theme', next ? 'dark' : 'light');
+    } catch {
+      // Ignore storage errors in restricted webviews
+    }
     set({ darkMode: next });
+  },
+
+  setDarkModeFromSystem: (dark: boolean) => {
+    if (get().darkMode !== dark) {
+      set({ darkMode: dark });
+    }
   },
 
   setLocale: (loc) => {
@@ -259,7 +270,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     const wasBootstrapped = get().bootstrapped;
     const bootToken = get().token;
     const prevUsername = get().username;
-    let currentOwner = 'local';
+    let currentOwner: string;
     try {
       if (get().isDesktop) {
         const [drivers, connections] = await Promise.all([api.listDrivers(), api.listConnections()]);

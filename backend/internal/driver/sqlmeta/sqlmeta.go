@@ -35,13 +35,13 @@ func dialectForEngine(dbType string) sqlbase.Dialect {
 	switch normalizeDBType(dbType) {
 	case "mysql", "mariadb", "tidb", "oceanbase":
 		return sqlbase.DialectMySQL
-	case "postgres", "kingbase", "duckdb":
+	case "postgres", "postgresql", "kingbase", "duckdb":
 		return sqlbase.DialectPostgres
 	case "clickhouse":
 		return sqlbase.DialectClickHouse
 	case "sqlite":
 		return sqlbase.DialectSQLite
-	case "sqlserver":
+	case "sqlserver", "mssql":
 		return sqlbase.DialectSQLServer
 	case "oracle":
 		return sqlbase.DialectOracle

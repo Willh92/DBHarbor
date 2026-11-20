@@ -282,7 +282,6 @@ func (s *Server) handleOpenEphemeralDBFile(c *Context) {
 		c.JSON(http.StatusBadRequest, H{"error": "Please select a local SQLite 3 or DuckDB file to open"})
 		return
 	}
-	defer part.Close()
 
 	origBase := filepath.Base(strings.TrimSpace(fileName))
 	ext := strings.ToLower(filepath.Ext(origBase))
@@ -296,6 +295,20 @@ func (s *Server) handleOpenEphemeralDBFile(c *Context) {
 	if readErr != nil && !errors.Is(readErr, io.EOF) && !errors.Is(readErr, io.ErrUnexpectedEOF) {
 		c.JSON(http.StatusBadRequest, H{"error": "Failed to inspect database file header"})
 		return
+	}
+
+	earlyExplicitDriver := strings.TrimSpace(fields["driverType"])
+	if earlyExplicitDriver == "" {
+		earlyExplicitDriver = strings.TrimSpace(fields["engine"])
+	}
+	if earlyExplicitDriver == "" {
+		earlyExplicitDriver = strings.TrimSpace(c.Query("driverType"))
+	}
+	if magicN > 0 || earlyExplicitDriver != "" {
+		if _, _, vErr := detectAndValidateSingleFileDB(origBase, earlyExplicitDriver, magicBuf[:magicN], int64(magicN)); vErr != nil {
+			c.JSON(http.StatusBadRequest, H{"error": vErr.Error()})
+			return
+		}
 	}
 
 	if err := os.MkdirAll(connDir, 0o700); err != nil {

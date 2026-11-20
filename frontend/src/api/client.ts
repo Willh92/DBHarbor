@@ -306,6 +306,9 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
       !path.endsWith('/unlock')
     ) {
       const unlocked = await requestConnectionAuthPrompt(errConnId, errCode, msg);
+      if (opts.signal?.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
       if (unlocked) {
         return request<T>(path, { ...opts, _retriedDbAuth: true });
       }
@@ -475,17 +478,18 @@ export const api = {
     }),
 
   // System Runtime Stats, Version & GitHub Update Check
-  getVersion: (lang?: string) =>
+  getVersion: (lang?: string, signal?: AbortSignal) =>
     request<BuildVersionInfo>('/version', {
       params: lang ? { lang } : undefined,
       skipAuthRedirect: true,
+      signal,
     }),
   getChangelog: (lang?: string) =>
     request<{ lang: string; markdown: string }>('/version/changelog', {
       params: { lang: lang || detectInitialLocale() },
       skipAuthRedirect: true,
     }),
-  checkUpdate: (force = false, lang?: string, channel?: UpdateChannel) => {
+  checkUpdate: (force = false, lang?: string, channel?: UpdateChannel, signal?: AbortSignal) => {
     const locale = lang || detectInitialLocale();
     const resolvedChannel = channel || getSavedUpdateChannel();
     return request<UpdateCheckResult>(`/system/update-check?lang=${encodeURIComponent(locale)}`, {
@@ -493,9 +497,10 @@ export const api = {
         force: force ? 'true' : undefined,
         channel: resolvedChannel,
       },
+      signal,
     });
   },
-  getSystemStats: () => request<SystemStats>('/system/stats'),
+  getSystemStats: (signal?: AbortSignal) => request<SystemStats>('/system/stats', { signal }),
   releaseIdlePools: () =>
     request<{ released: number; message: string }>('/system/pools/release-idle', { method: 'POST' }),
   setDesktopWindowTheme: (darkMode: boolean) =>
@@ -990,9 +995,10 @@ export const api = {
     });
     return data.collections || [];
   },
-  docGetCollectionOptions: (connId: string, database: string, collection: string) =>
+  docGetCollectionOptions: (connId: string, database: string, collection: string, signal?: AbortSignal) =>
     request<CollectionSummary>(`/conn/${connId}/doc/collections/options`, {
       params: { database, collection },
+      signal,
     }),
   docCreateCollection: (
     connId: string,
@@ -1099,11 +1105,13 @@ export const api = {
       projectionJson: string;
       page: number;
       pageSize: number;
-    }
+    },
+    signal?: AbortSignal
   ) =>
     request<{ documents: Record<string, any>[]; total: number; elapsedMs: number }>(`/conn/${connId}/doc/find`, {
       method: 'POST',
       body: payload,
+      signal,
     }),
   docInsert: (connId: string, database: string, collection: string, document: string) =>
     request<{ message: string }>(`/conn/${connId}/doc/insert`, {
@@ -1143,9 +1151,10 @@ export const api = {
       method: 'POST',
       body: { database, collection, ids },
     }),
-  docListIndexes: async (connId: string, database: string, collection: string) => {
+  docListIndexes: async (connId: string, database: string, collection: string, signal?: AbortSignal) => {
     const data = await request<{ indexes: DocIndexInfo[] }>(`/conn/${connId}/doc/indexes`, {
       params: { database, collection },
+      signal,
     });
     return data.indexes || [];
   },

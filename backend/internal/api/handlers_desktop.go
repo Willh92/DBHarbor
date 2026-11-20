@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -63,6 +64,14 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 	written, err := cw.w.Write(p)
 	cw.n += int64(written)
 	return written, err
+}
+
+func closeAndFinalizeExportFile(f io.Closer, targetPath string) error {
+	if err := f.Close(); err != nil {
+		_ = os.Remove(targetPath)
+		return err
+	}
+	return nil
 }
 
 func (s *Server) handleDesktopSaveExport(c *Context) {
@@ -154,7 +163,12 @@ func (s *Server) handleDesktopSaveExport(c *Context) {
 		c.JSON(http.StatusInternalServerError, H{"error": "Failed to create export file: " + err.Error()})
 		return
 	}
-	defer f.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = f.Close()
+		}
+	}()
 
 	cw := &countingWriter{w: f}
 	expReq := driver.ExportRequest{
@@ -169,9 +183,15 @@ func (s *Server) handleDesktopSaveExport(c *Context) {
 		MaxRows:      body.MaxRows,
 	}
 	if err := sqlDrv.StreamExport(c.Request.Context(), expReq, cw); err != nil {
+		closed = true
 		_ = f.Close()
 		_ = os.Remove(targetPath)
 		s.respondConnError(c, cfg.ID, cfg.Type, err)
+		return
+	}
+	closed = true
+	if err := closeAndFinalizeExportFile(f, targetPath); err != nil {
+		c.JSON(http.StatusInternalServerError, H{"error": "Failed to finalize export file: " + err.Error()})
 		return
 	}
 
@@ -250,13 +270,24 @@ func (s *Server) handleDesktopSaveDocExport(c *Context) {
 		c.JSON(http.StatusInternalServerError, H{"error": "Failed to create export file: " + err.Error()})
 		return
 	}
-	defer f.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = f.Close()
+		}
+	}()
 
 	cw := &countingWriter{w: f}
 	if err := extDrv.StreamExportCollection(c.Request.Context(), body.Database, body.Collection, body.FilterJSON, body.SortJSON, format, body.MaxRows, cw); err != nil {
+		closed = true
 		_ = f.Close()
 		_ = os.Remove(targetPath)
 		s.respondConnError(c, cfg.ID, cfg.Type, err)
+		return
+	}
+	closed = true
+	if err := closeAndFinalizeExportFile(f, targetPath); err != nil {
+		c.JSON(http.StatusInternalServerError, H{"error": "Failed to finalize export file: " + err.Error()})
 		return
 	}
 
@@ -557,36 +588,25 @@ func isOtherUserLocalDBPath(targetPath, localDBDir, myBucket string) bool {
 	return isUserScopedLocalDBBucketName(firstSeg) && !strings.EqualFold(firstSeg, myBucket)
 }
 
-func verifyUploadedSingleFileDB(origBase, filePath string, written int64) error {
+func verifyUploadedFileHeader(origBase string, hdr []byte, totalSize int64) error {
 	ext := strings.ToLower(filepath.Ext(origBase))
 	if allowedEphemeralExts[ext] {
-		if written < 12 {
+		if totalSize == 0 {
+			return nil
+		}
+		if totalSize < 12 {
 			return errors.New("uploaded file is not a valid SQLite 3 or DuckDB binary database")
 		}
-		f, err := os.Open(filePath)
-		if err != nil {
-			return errors.New("failed to inspect uploaded database file")
-		}
-		var hdr [32]byte
-		n, _ := io.ReadFull(f, hdr[:])
-		_ = f.Close()
-		if _, _, vErr := detectAndValidateSingleFileDB(origBase, "auto", hdr[:n], written); vErr != nil {
+		if _, _, vErr := detectAndValidateSingleFileDB(origBase, "auto", hdr, totalSize); vErr != nil {
 			return vErr
 		}
 		return nil
 	}
 	if ext == ".parquet" {
-		if written < 4 {
+		if totalSize < 4 {
 			return errors.New("uploaded file is not a valid Apache Parquet file")
 		}
-		f, err := os.Open(filePath)
-		if err != nil {
-			return errors.New("failed to inspect uploaded Parquet file")
-		}
-		var hdr [4]byte
-		n, _ := io.ReadFull(f, hdr[:])
-		_ = f.Close()
-		if n < 4 || string(hdr[:4]) != "PAR1" {
+		if len(hdr) < 4 || string(hdr[:4]) != "PAR1" {
 			return errors.New("uploaded file header does not match Apache Parquet magic (PAR1)")
 		}
 	}
@@ -1016,13 +1036,25 @@ func (s *Server) handleUploadLocalDBFile(c *Context) {
 		c.JSON(http.StatusBadRequest, H{"error": "Please select a local database file to upload"})
 		return
 	}
-	defer part.Close()
 
 	origBase := filepath.Base(rawFilename)
 	ext := strings.ToLower(filepath.Ext(origBase))
 	if !allowedLocalDBExts[ext] {
 		c.JSON(http.StatusBadRequest, H{"error": "Unsupported database file extension; allowed: .db, .sqlite, .sqlite3, .duckdb, .ddb, .parquet, .csv"})
 		return
+	}
+
+	var magicBuf [32]byte
+	magicN, readErr := io.ReadFull(part, magicBuf[:])
+	if readErr != nil && !errors.Is(readErr, io.EOF) && !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		c.JSON(http.StatusBadRequest, H{"error": "Failed to inspect uploaded database file header"})
+		return
+	}
+	if magicN > 0 || ext == ".parquet" {
+		if vErr := verifyUploadedFileHeader(origBase, magicBuf[:magicN], int64(magicN)); vErr != nil {
+			c.JSON(http.StatusBadRequest, H{"error": vErr.Error()})
+			return
+		}
 	}
 
 	destDir := filepath.Join(s.resolveBaseDataDir(), "local_databases")
@@ -1040,18 +1072,26 @@ func (s *Server) handleUploadLocalDBFile(c *Context) {
 		return
 	}
 	tmpPath := tmpFile.Name()
-	written, copyErr := io.Copy(tmpFile, part)
-	_ = tmpFile.Close()
-	if copyErr != nil {
+	combinedReader := io.MultiReader(bytes.NewReader(magicBuf[:magicN]), part)
+	written, copyErr := io.Copy(tmpFile, combinedReader)
+	closeErr := tmpFile.Close()
+	_ = part.Close()
+	if copyErr != nil || closeErr != nil {
 		_ = os.Remove(tmpPath)
-		c.JSON(http.StatusInternalServerError, H{"error": "Failed while writing database file: " + copyErr.Error()})
+		errMsg := "Failed while writing database file: "
+		if copyErr != nil {
+			errMsg += copyErr.Error()
+		} else {
+			errMsg += closeErr.Error()
+		}
+		c.JSON(http.StatusInternalServerError, H{"error": errMsg})
 		return
 	}
 
 	// Drain any trailing form fields (e.g., overwrite appended after file in FormData)
 	c.DrainMultipartFields(fields)
 
-	if vErr := verifyUploadedSingleFileDB(origBase, tmpPath, written); vErr != nil {
+	if vErr := verifyUploadedFileHeader(origBase, magicBuf[:magicN], written); vErr != nil {
 		_ = os.Remove(tmpPath)
 		c.JSON(http.StatusBadRequest, H{"error": vErr.Error()})
 		return

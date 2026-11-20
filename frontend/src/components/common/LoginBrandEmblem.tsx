@@ -11,17 +11,29 @@ export const DEFAULT_LOGIN_BRANDING: LoginBrandingConfig = {
   subtitle: '',
 };
 
+export const SAFE_RASTER_BRANDING_DATA_URL_RE =
+  /^(data:image\/(?:png|jpeg|jpg|webp|gif|x-icon|vnd\.microsoft\.icon);base64,[A-Za-z0-9+/=]+)$/i;
+
+export function sanitizeRasterBrandingDataUrl(url?: string): string {
+  const trimmed = (url || '').trim();
+  const match = SAFE_RASTER_BRANDING_DATA_URL_RE.exec(trimmed);
+  return match ? match[1] : '';
+}
+
 export function readBrandingImageAsDataUrl(file: File, maxBytes = 128 * 1024): Promise<string> {
   return new Promise((resolve, reject) => {
     const allowed = new Set([
       'image/png',
       'image/jpeg',
+      'image/jpg',
       'image/webp',
       'image/gif',
-      'image/svg+xml',
+      'image/x-icon',
+      'image/vnd.microsoft.icon',
     ]);
-    if (!allowed.has(file.type)) {
-      reject(new Error('Unsupported image format (use PNG, JPG, WebP, GIF, or SVG)'));
+    const isIcoFallback = !file.type && /\.ico$/i.test(file.name);
+    if (!allowed.has(file.type.toLowerCase()) && !isIcoFallback) {
+      reject(new Error('Unsupported image format (use PNG, JPG, WebP, GIF, or ICO)'));
       return;
     }
     if (file.size > maxBytes) {
@@ -31,11 +43,12 @@ export function readBrandingImageAsDataUrl(file: File, maxBytes = 128 * 1024): P
     const reader = new FileReader();
     reader.onload = () => {
       const res = typeof reader.result === 'string' ? reader.result : '';
-      if (!res.startsWith('data:image/')) {
-        reject(new Error('Failed to encode image file'));
+      const safeUrl = sanitizeRasterBrandingDataUrl(res);
+      if (!safeUrl) {
+        reject(new Error('Unsupported image format (use PNG, JPG, WebP, GIF, or ICO)'));
         return;
       }
-      resolve(res);
+      resolve(safeUrl);
     };
     reader.onerror = () => reject(new Error('Failed to read image file'));
     reader.readAsDataURL(file);
@@ -59,7 +72,8 @@ export const LoginBrandEmblem: React.FC<EmblemProps> = ({
     return null;
   }
 
-  if (iconMode === 'custom' && customIconDataUrl) {
+  const safeCustomUrl = iconMode === 'custom' ? sanitizeRasterBrandingDataUrl(customIconDataUrl) : '';
+  if (iconMode === 'custom' && safeCustomUrl) {
     return (
       <div
         style={{
@@ -76,7 +90,7 @@ export const LoginBrandEmblem: React.FC<EmblemProps> = ({
         }}
       >
         <img
-          src={customIconDataUrl}
+          src={safeCustomUrl}
           alt=""
           style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
         />

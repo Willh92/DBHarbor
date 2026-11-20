@@ -155,19 +155,16 @@ export const WorkbenchLayout: React.FC = () => {
     requestSelectConnection,
   } = useWorkbenchStore();
   const { locale, setLocale, t } = useI18n();
-  const { isMobile, isTablet } = useResponsive();
+  const tRef = useRef(t);
+  tRef.current = t;
+  const { isMobile, isTablet, isNarrowViewport } = useResponsive();
   const maxMountedTabs = isMobile ? MAX_MOUNTED_TABS_MOBILE : MAX_MOUNTED_TABS_DESKTOP;
 
   const effectiveCanCreateConn = isDesktop || canCreateConn || role === 'admin';
   const canOpenEphemeralWeb = !isDesktop && effectiveCanCreateConn && role !== 'readonly';
   const isAdmin = isDesktop || role === 'admin';
 
-  const [isNarrowViewport, setIsNarrowViewport] = useState<boolean>(
-    () => typeof window !== 'undefined' && window.innerWidth < 760
-  );
-  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(
-    () => typeof window !== 'undefined' && window.innerWidth < 760
-  );
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => isNarrowViewport);
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
     const saved = Number(localStorage.getItem('dbharbor_sidebar_width'));
     return saved >= 210 && saved <= 480 ? saved : 272;
@@ -177,6 +174,7 @@ export const WorkbenchLayout: React.FC = () => {
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const isNarrowRef = useRef(isNarrowViewport);
   isNarrowRef.current = isNarrowViewport;
+  const prevNarrowRef = useRef(isNarrowViewport);
 
   useEffect(
     () => () => {
@@ -243,18 +241,48 @@ export const WorkbenchLayout: React.FC = () => {
   const [handleBindTick, setHandleBindTick] = useState(0);
 
   useEffect(() => {
-    if (!bootstrapped) {
-      loadBootstrap().catch((err) => message.error(err.message));
-    }
+    if (bootstrapped) return;
+    let cancelled = false;
+    loadBootstrap().catch((err) => {
+      if (!cancelled) message.error(err.message);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [bootstrapped, loadBootstrap]);
 
   useEffect(() => {
+    let cancelled = false;
+    const ctrl = new AbortController();
+    let statsInFlight = false;
+
     // Fetch runtime version, lightweight memory stats, and non-blocking GitHub update check
-    api.getVersion().then(setBuildInfo).catch(() => {});
-    api.getSystemStats().then(setSysStats).catch(() => {});
     api
-      .checkUpdate(false)
+      .getVersion(undefined, ctrl.signal)
+      .then((info) => {
+        if (!cancelled) setBuildInfo(info);
+      })
+      .catch(() => {});
+
+    const pollStats = () => {
+      if (cancelled || statsInFlight) return;
+      statsInFlight = true;
+      api
+        .getSystemStats(ctrl.signal)
+        .then((stats) => {
+          if (!cancelled) setSysStats(stats);
+        })
+        .catch(() => {})
+        .finally(() => {
+          statsInFlight = false;
+        });
+    };
+    pollStats();
+
+    api
+      .checkUpdate(false, undefined, undefined, ctrl.signal)
       .then((upd) => {
+        if (cancelled) return;
         setUpdateCheck(upd);
         if (
           upd.hasUpdate &&
@@ -263,11 +291,12 @@ export const WorkbenchLayout: React.FC = () => {
           getSkippedUpdateVersion() !== upd.latestVersion
         ) {
           const notifKey = `dbharbor-upd-${upd.latestVersion}`;
+          const tr = tRef.current;
           notification.info({
             key: notifKey,
             placement: 'bottomRight',
             duration: 10,
-            message: t('New version {ver} is available for upgrade!', { ver: upd.latestVersion }),
+            message: tr('New version {ver} is available for upgrade!', { ver: upd.latestVersion }),
             description: (
               <Space size={6} wrap style={{ marginTop: 6 }}>
                 <Button
@@ -275,20 +304,20 @@ export const WorkbenchLayout: React.FC = () => {
                   type="primary"
                   onClick={() => {
                     notification.destroy(notifKey);
-                    setVersionModalOpen(true);
+                    if (!cancelled) setVersionModalOpen(true);
                   }}
                 >
-                  {t('View Changelog & Download')}
+                  {tr('View Changelog & Download')}
                 </Button>
                 <Button
                   size="small"
                   onClick={() => {
                     setSkippedUpdateVersion(upd.latestVersion);
                     notification.destroy(notifKey);
-                    message.info(t('Skipped reminder for {ver}', { ver: upd.latestVersion }));
+                    message.info(tRef.current('Skipped reminder for {ver}', { ver: upd.latestVersion }));
                   }}
                 >
-                  {t('Skip This Version')}
+                  {tr('Skip This Version')}
                 </Button>
                 <Button
                   size="small"
@@ -296,10 +325,10 @@ export const WorkbenchLayout: React.FC = () => {
                   onClick={() => {
                     setAutoUpdateRemindEnabled(false);
                     notification.destroy(notifKey);
-                    message.info(t('Automatic update reminder disabled'));
+                    message.info(tRef.current('Automatic update reminder disabled'));
                   }}
                 >
-                  {t('Turn Off Reminders')}
+                  {tr('Turn Off Reminders')}
                 </Button>
               </Space>
             ),
@@ -308,30 +337,25 @@ export const WorkbenchLayout: React.FC = () => {
       })
       .catch(() => {});
 
-    const statsTimer = setInterval(() => {
+    const statsTimer = window.setInterval(() => {
       if (!document.hidden) {
-        api.getSystemStats().then(setSysStats).catch(() => {});
+        pollStats();
       }
     }, 30000);
-    return () => clearInterval(statsTimer);
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+      window.clearInterval(statsTimer);
+    };
   }, []);
 
   // Responsive viewport watcher: auto-collapse sidebar when window shrinks below 760px
   useEffect(() => {
-    let wasNarrow = window.innerWidth < 760;
-    const onResize = () => {
-      const narrow = window.innerWidth < 760;
-      setIsNarrowViewport(narrow);
-      if (narrow && !wasNarrow) {
-        setSidebarCollapsed(true);
-      } else if (!narrow && wasNarrow) {
-        setSidebarCollapsed(false);
-      }
-      wasNarrow = narrow;
-    };
-    window.addEventListener('resize', onResize, { passive: true });
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
+    if (prevNarrowRef.current !== isNarrowViewport) {
+      prevNarrowRef.current = isNarrowViewport;
+      setSidebarCollapsed(isNarrowViewport);
+    }
+  }, [isNarrowViewport]);
 
   // Track most-recently-visited tabs (capped at maxMountedTabs) so older background tabs unmount heavy DOM
   useEffect(() => {
@@ -751,7 +775,7 @@ export const WorkbenchLayout: React.FC = () => {
     [bootstrapped, tabs, activeTabKey, lruTabKeys, renderTabContent]
   );
 
-  const displayVersion = updateCheck?.currentVersion || buildInfo?.displayVersion || 'v1.0.3';
+  const displayVersion = updateCheck?.currentVersion || buildInfo?.displayVersion || 'v1.0.5';
   const hasNewVersion = Boolean(updateCheck?.hasUpdate);
 
   const handleSidebarSplitterPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -1019,7 +1043,8 @@ export const WorkbenchLayout: React.FC = () => {
           <Button
             type="text"
             size="middle"
-            style={isMobile ? { width: 36, height: 36 } : { width: 32, height: 32 }}
+            style={isMobile ? { width: 44, height: 44 } : { width: 32, height: 32 }}
+            aria-label={t('Toggle Sidebar')}
             icon={sidebarCollapsed ? <MenuUnfoldOutlined style={isMobile ? { fontSize: 17 } : undefined} /> : <MenuFoldOutlined style={isMobile ? { fontSize: 17 } : undefined} />}
             onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
           />
@@ -1075,9 +1100,10 @@ export const WorkbenchLayout: React.FC = () => {
             {effectiveCanCreateConn && (
               <Button
                 type="primary"
-                style={{ width: 36, height: 36, padding: 0 }}
+                style={{ width: 44, height: 44, padding: 0 }}
                 icon={<PlusOutlined style={{ fontSize: 16 }} />}
                 title={t('New Connection')}
+                aria-label={t('New Connection')}
                 onClick={() => {
                   setEditingConn(null);
                   setConnModalOpen(true);
@@ -1251,7 +1277,11 @@ export const WorkbenchLayout: React.FC = () => {
                         ],
                 }}
               >
-                <Button style={{ width: 36, height: 36, padding: 0 }} icon={<MoreOutlined style={{ fontSize: 17 }} />} />
+                <Button
+                  style={{ width: 44, height: 44, padding: 0 }}
+                  aria-label={t('More Actions')}
+                  icon={<MoreOutlined style={{ fontSize: 17 }} />}
+                />
               </Dropdown>
             </Badge>
           </Space>
@@ -1318,6 +1348,7 @@ export const WorkbenchLayout: React.FC = () => {
               icon={darkMode ? <SunOutlined /> : <MoonOutlined />}
               onClick={toggleDarkMode}
               title={t('Toggle Light / Dark Theme')}
+              aria-label={t('Toggle Light / Dark Theme')}
             />
             {!isDesktop && (
               <Dropdown
@@ -1409,8 +1440,8 @@ export const WorkbenchLayout: React.FC = () => {
         isMobile ? (
           <div
             style={{
-              height: 30,
-              padding: '0 10px',
+              minHeight: 36,
+              padding: '2px 10px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
@@ -1437,8 +1468,12 @@ export const WorkbenchLayout: React.FC = () => {
               >
                 {t('Harden')}
               </a>
-              <CloseOutlined
-                style={{ fontSize: 11, opacity: 0.65, cursor: 'pointer' }}
+              <Button
+                type="text"
+                size="small"
+                aria-label={t('Close')}
+                icon={<CloseOutlined style={{ fontSize: 12 }} />}
+                style={{ width: 34, height: 34, padding: 0, opacity: 0.7 }}
                 onClick={() => setSecurityHintDismissed(true)}
               />
             </Space>
@@ -1616,6 +1651,7 @@ export const WorkbenchLayout: React.FC = () => {
                   icon={<DownloadOutlined />}
                   loading={downloadingEphemeralId === activeTabConn.id}
                   title={t('Download DB File')}
+                  aria-label={t('Download DB File')}
                   onClick={() => handleDownloadEphemeral(activeTabConn)}
                 >
                   {isMobile ? (hasActiveDirectHandle ? undefined : t('Download')) : t('Download DB File')}
@@ -1627,6 +1663,7 @@ export const WorkbenchLayout: React.FC = () => {
                   ghost={!isMobile}
                   icon={<DeleteOutlined />}
                   title={t('Close Temp DB & Clean Up')}
+                  aria-label={t('Close Temp DB & Clean Up')}
                   onClick={() => handleCloseEphemeral(activeTabConn)}
                 >
                   {!isMobile && !isTablet ? t('Close & Clean Up') : undefined}
@@ -1798,11 +1835,11 @@ export const WorkbenchLayout: React.FC = () => {
               {/* Mobile Single-Pill Tab Switcher Bar (touch-sized, anti-mis-tap) */}
               <div
                 style={{
-                  height: 42,
+                  height: 48,
                   padding: '0 8px',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 6,
+                  gap: 10,
                   borderBottom: '1px solid rgba(128,128,128,0.16)',
                   background: darkMode ? '#14161c' : '#fafafa',
                   flexShrink: 0,
@@ -1851,25 +1888,24 @@ export const WorkbenchLayout: React.FC = () => {
                               <Typography.Text type="secondary" style={{ fontSize: 11 }}>
                                 #{idx + 1}
                               </Typography.Text>
-                              <span
-                                role="button"
+                              <Button
+                                type="text"
+                                size="small"
+                                aria-label={t('Close Tab')}
                                 title={t('Close Tab')}
+                                icon={<CloseOutlined style={{ fontSize: 12 }} />}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   closeTab(tb.key);
                                 }}
                                 style={{
-                                  width: 28,
-                                  height: 28,
+                                  width: 40,
+                                  height: 40,
+                                  padding: 0,
                                   borderRadius: 6,
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  justifyContent: 'center',
-                                  opacity: 0.72,
+                                  opacity: 0.75,
                                 }}
-                              >
-                                <CloseOutlined style={{ fontSize: 12 }} />
-                              </span>
+                              />
                             </Space>
                           </div>
                         ),
@@ -1920,9 +1956,10 @@ export const WorkbenchLayout: React.FC = () => {
                 </Dropdown>
                 {activeTabObj.dbType !== 'redis' && activeTabObj.dbType !== 'mongodb' && (
                   <Button
-                    style={{ width: 34, height: 34, padding: 0, flexShrink: 0 }}
+                    style={{ width: 44, height: 44, padding: 0, flexShrink: 0 }}
                     icon={<CodeOutlined />}
                     title={t('New SQL Console')}
+                    aria-label={t('New SQL Console')}
                     onClick={() =>
                       openTab({
                         key: `sql:${activeTabObj.connectionId}:${Date.now()}`,
@@ -1943,9 +1980,10 @@ export const WorkbenchLayout: React.FC = () => {
                   menu={{ items: buildTabContextMenuItems(activeTabObj, activeTabIdx >= 0 ? activeTabIdx : 0) }}
                 >
                   <Button
-                    style={{ width: 34, height: 34, padding: 0, flexShrink: 0 }}
+                    style={{ width: 44, height: 44, padding: 0, flexShrink: 0 }}
                     icon={<MoreOutlined style={{ fontSize: 16 }} />}
                     title={t('Tab Actions')}
+                    aria-label={t('Tab Actions')}
                   />
                 </Dropdown>
               </div>
@@ -2006,7 +2044,7 @@ export const WorkbenchLayout: React.FC = () => {
                       menu={{ items: buildTabContextMenuItems(activeObj, activeIdx >= 0 ? activeIdx : 0) }}
                     >
                       <Tooltip title={t('Tab Actions')}>
-                        <Button type="text" size="small" icon={<MoreOutlined />} style={{ marginLeft: 4 }} />
+                        <Button type="text" size="small" aria-label={t('Tab Actions')} icon={<MoreOutlined />} style={{ marginLeft: 4 }} />
                       </Tooltip>
                     </Dropdown>
                   );

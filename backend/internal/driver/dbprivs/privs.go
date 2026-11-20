@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"dbharbor/backend/internal/driver"
@@ -680,7 +681,7 @@ func ListUsers(ctx context.Context, dbType string, drv driver.Driver, database s
 		if !ok {
 			return nil, fmt.Errorf("driver is not a Redis KeyValueDriver")
 		}
-		res, err := kv.ExecuteCommand(ctx, 0, "ACL LIST")
+		res, err := kv.ExecuteCommandArgs(ctx, 0, "ACL", "LIST")
 		if err != nil {
 			return nil, err
 		}
@@ -987,7 +988,7 @@ func GetUserGrants(ctx context.Context, dbType string, drv driver.Driver, userna
 		if !ok {
 			return nil, fmt.Errorf("driver is not a Redis KeyValueDriver")
 		}
-		res, err := kv.ExecuteCommand(ctx, 0, "ACL LIST")
+		res, err := kv.ExecuteCommandArgs(ctx, 0, "ACL", "LIST")
 		if err != nil {
 			return nil, err
 		}
@@ -1251,7 +1252,8 @@ func BuildStatements(dbType string, req ActionRequest) ([]string, error) {
 	}
 
 	if t == "redis" {
-		return buildRedisACLCommands(action, uname, req)
+		_, stmts, err := buildRedisACLCommandPlan(action, uname, req)
+		return stmts, err
 	}
 	if t == "mongodb" {
 		return buildMongoPrivilegeCommands(action, uname, req)
@@ -1632,17 +1634,31 @@ func validateRedisACLRules(rawRules string) (string, error) {
 	return strings.Join(tokens, " "), nil
 }
 
-func buildRedisACLCommands(action, uname string, req ActionRequest) ([]string, error) {
-	if strings.ContainsAny(uname, " \t\r\n\"'") {
-		return nil, fmt.Errorf("Redis ACL username cannot contain whitespace or quotes")
+func formatRedisPreviewCommand(args []any) string {
+	parts := make([]string, len(args))
+	for i, arg := range args {
+		s := fmt.Sprintf("%v", arg)
+		if s == "" || strings.ContainsAny(s, " \t\r\n\"'\\") {
+			parts[i] = strconv.Quote(s)
+		} else {
+			parts[i] = s
+		}
 	}
+	return strings.Join(parts, " ")
+}
+
+func buildRedisACLCommandPlan(action, uname string, req ActionRequest) ([][]any, []string, error) {
+	if strings.ContainsAny(uname, " \t\r\n\"'") {
+		return nil, nil, fmt.Errorf("Redis ACL username cannot contain whitespace or quotes")
+	}
+	var argLists [][]any
 	switch action {
 	case "CREATE_USER", "GRANT":
 		rules := strings.TrimSpace(req.ACLRules)
 		if rules != "" {
 			cleanRules, err := validateRedisACLRules(rules)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			rules = cleanRules
 		}
@@ -1659,47 +1675,56 @@ func buildRedisACLCommands(action, uname string, req ActionRequest) ([]string, e
 		if len(req.Privileges) > 0 && req.ACLRules == "" && req.ACLPreset == "" {
 			for _, p := range req.Privileges {
 				if strings.ContainsAny(p, " \t\r\n") {
-					return nil, fmt.Errorf("invalid Redis ACL privilege token %q", p)
+					return nil, nil, fmt.Errorf("invalid Redis ACL privilege token %q", p)
 				}
 			}
 			cleanPrivs, err := validateRedisACLRules(strings.Join(req.Privileges, " "))
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			rules = cleanPrivs
 		}
-		pwdPart := ""
+		args := []any{"ACL", "SETUSER", uname, "on"}
 		if req.Password != "" {
-			if strings.ContainsAny(req.Password, " \t\r\n") {
-				return nil, fmt.Errorf("Redis ACL password token cannot contain whitespace")
+			if strings.ContainsAny(req.Password, "\r\n\x00") {
+				return nil, nil, fmt.Errorf("Redis ACL password cannot contain line breaks or null bytes")
 			}
-			pwdPart = " >" + req.Password
+			args = append(args, ">"+req.Password)
 		} else if action == "CREATE_USER" {
-			pwdPart = " nopass"
+			args = append(args, "nopass")
 		}
-		return []string{fmt.Sprintf("ACL SETUSER %s on%s %s", uname, pwdPart, rules)}, nil
+		for _, tok := range strings.Fields(rules) {
+			args = append(args, tok)
+		}
+		argLists = [][]any{args}
 	case "ALTER_USER":
 		if req.Password == "" {
-			return nil, fmt.Errorf("new password is required")
+			return nil, nil, fmt.Errorf("new password is required")
 		}
-		if strings.ContainsAny(req.Password, " \t\r\n") {
-			return nil, fmt.Errorf("Redis ACL password token cannot contain whitespace")
+		if strings.ContainsAny(req.Password, "\r\n\x00") {
+			return nil, nil, fmt.Errorf("Redis ACL password cannot contain line breaks or null bytes")
 		}
-		return []string{fmt.Sprintf("ACL SETUSER %s resetpass >%s", uname, req.Password)}, nil
+		argLists = [][]any{{"ACL", "SETUSER", uname, "resetpass", ">" + req.Password}}
 	case "LOCK_USER":
-		return []string{fmt.Sprintf("ACL SETUSER %s off", uname)}, nil
+		argLists = [][]any{{"ACL", "SETUSER", uname, "off"}}
 	case "UNLOCK_USER":
-		return []string{fmt.Sprintf("ACL SETUSER %s on", uname)}, nil
+		argLists = [][]any{{"ACL", "SETUSER", uname, "on"}}
 	case "DROP_USER":
 		if uname == "default" {
-			return nil, fmt.Errorf("the built-in Redis 'default' ACL user cannot be deleted")
+			return nil, nil, fmt.Errorf("the built-in Redis 'default' ACL user cannot be deleted")
 		}
-		return []string{fmt.Sprintf("ACL DELUSER %s", uname)}, nil
+		argLists = [][]any{{"ACL", "DELUSER", uname}}
 	case "REVOKE":
-		return []string{fmt.Sprintf("ACL SETUSER %s resetkeys resetchannels -@all", uname)}, nil
+		argLists = [][]any{{"ACL", "SETUSER", uname, "resetkeys", "resetchannels", "-@all"}}
 	default:
-		return nil, fmt.Errorf("unsupported Redis ACL action %q", action)
+		return nil, nil, fmt.Errorf("unsupported Redis ACL action %q", action)
 	}
+
+	previewStmts := make([]string, len(argLists))
+	for i, args := range argLists {
+		previewStmts[i] = formatRedisPreviewCommand(args)
+	}
+	return argLists, previewStmts, nil
 }
 
 func isValidMongoRoleOrDBName(s string) bool {
@@ -1836,23 +1861,35 @@ func buildMongoPrivilegeCommands(action, uname string, req ActionRequest) ([]str
 
 // ExecuteAction builds and executes user/privilege governance statements against the target database driver.
 func ExecuteAction(ctx context.Context, dbType string, drv driver.Driver, req ActionRequest) ([]string, error) {
+	t := strings.ToLower(strings.TrimSpace(dbType))
+	if t == "redis" {
+		action := strings.ToUpper(strings.TrimSpace(req.Action))
+		uname := strings.TrimSpace(req.Username)
+		if uname == "" {
+			return nil, fmt.Errorf("username is required")
+		}
+		if strings.ContainsRune(uname, 0) || strings.ContainsRune(req.Password, 0) {
+			return nil, fmt.Errorf("null bytes are not allowed in account credentials")
+		}
+		argLists, previewStmts, err := buildRedisACLCommandPlan(action, uname, req)
+		if err != nil {
+			return nil, err
+		}
+		kv, ok := drv.(driver.KeyValueDriver)
+		if !ok {
+			return previewStmts, fmt.Errorf("driver is not a Redis KeyValueDriver")
+		}
+		for _, args := range argLists {
+			if _, err := kv.ExecuteCommandArgs(ctx, 0, args...); err != nil {
+				return previewStmts, err
+			}
+		}
+		return previewStmts, nil
+	}
+
 	stmts, err := BuildStatements(dbType, req)
 	if err != nil {
 		return nil, err
-	}
-	t := strings.ToLower(strings.TrimSpace(dbType))
-
-	if t == "redis" {
-		kv, ok := drv.(driver.KeyValueDriver)
-		if !ok {
-			return stmts, fmt.Errorf("driver is not a Redis KeyValueDriver")
-		}
-		for _, cmd := range stmts {
-			if _, err := kv.ExecuteCommand(ctx, 0, cmd); err != nil {
-				return stmts, err
-			}
-		}
-		return stmts, nil
 	}
 
 	if t == "mongodb" {

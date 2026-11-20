@@ -187,11 +187,6 @@ func lexSQLiteSandboxTokens(s string) []sqliteSandboxToken {
 			j := i + 1
 			for j < n {
 				if s[j] == ']' {
-					if j+1 < n && s[j+1] == ']' {
-						b.WriteByte(']')
-						j += 2
-						continue
-					}
 					j++
 					break
 				}
@@ -238,7 +233,7 @@ var forbiddenSQLiteSandboxFunctions = map[string]bool{
 }
 
 func validateSQLiteWebSandbox(script string) error {
-	for _, stmt := range sqlbase.SplitStatements(script) {
+	for _, stmt := range sqlbase.SplitStatementsForEngine("sqlite", script) {
 		tokens := lexSQLiteSandboxTokens(stmt)
 		if len(tokens) == 0 {
 			continue
@@ -300,7 +295,7 @@ func unquoteSQLiteIdent(tok string) (name string, wasQuoted bool) {
 			return strings.ReplaceAll(t[1:len(t)-1], "``", "`"), true
 		}
 		if t[0] == '[' && t[len(t)-1] == ']' {
-			return strings.ReplaceAll(t[1:len(t)-1], "]]", "]"), true
+			return t[1 : len(t)-1], true
 		}
 		if t[0] == '\'' && t[len(t)-1] == '\'' {
 			return strings.ReplaceAll(t[1:len(t)-1], "''", "'"), true
@@ -362,10 +357,6 @@ func nextSQLiteTopToken(s string, start int) (tok string, nextPos int) {
 		j := i + 1
 		for j < n {
 			if s[j] == ']' {
-				if j+1 < n && s[j+1] == ']' {
-					j += 2
-					continue
-				}
 				j++
 				break
 			}
@@ -820,7 +811,7 @@ func (d *SQLiteDriver) GetTableStructure(ctx context.Context, database, _, table
 	st.Diagnostics = d.readDiagnostics(ctx, ddlMeta)
 
 	qTbl := sqlbase.QuoteIdent(sqlbase.DialectSQLite, table)
-	cRows, err := d.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_xinfo(%s)", qTbl))
+	cRows, err := sqlbase.Query(ctx, d.db, fmt.Sprintf("PRAGMA table_xinfo(%s)", qTbl))
 	if err != nil {
 		return st, err
 	}
@@ -863,7 +854,7 @@ func (d *SQLiteDriver) GetTableStructure(ctx context.Context, database, _, table
 	}
 
 	// Indexes
-	iRows, err := d.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_list(%s)", qTbl))
+	iRows, err := sqlbase.Query(ctx, d.db, fmt.Sprintf("PRAGMA index_list(%s)", qTbl))
 	if err == nil {
 		type rawIdx struct {
 			name   string
@@ -882,7 +873,7 @@ func (d *SQLiteDriver) GetTableStructure(ctx context.Context, database, _, table
 
 		for _, ri := range rawList {
 			var cols []string
-			infoRows, err := d.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_info(%s)", sqlbase.QuoteIdent(sqlbase.DialectSQLite, ri.name)))
+			infoRows, err := sqlbase.Query(ctx, d.db, fmt.Sprintf("PRAGMA index_info(%s)", sqlbase.QuoteIdent(sqlbase.DialectSQLite, ri.name)))
 			if err == nil {
 				for infoRows.Next() {
 					var seqno, cid int
@@ -904,7 +895,7 @@ func (d *SQLiteDriver) GetTableStructure(ctx context.Context, database, _, table
 	}
 
 	// Foreign Keys (grouped by id for composite foreign keys)
-	fkRows, err := d.db.QueryContext(ctx, fmt.Sprintf("PRAGMA foreign_key_list(%s)", qTbl))
+	fkRows, err := sqlbase.Query(ctx, d.db, fmt.Sprintf("PRAGMA foreign_key_list(%s)", qTbl))
 	if err == nil {
 		defer fkRows.Close()
 		fkMap := map[int]*driver.ForeignKeyDef{}
@@ -937,7 +928,7 @@ func (d *SQLiteDriver) GetTableStructure(ctx context.Context, database, _, table
 
 func (d *SQLiteDriver) getPrimaryKeysFast(ctx context.Context, table string) []string {
 	qTbl := sqlbase.QuoteIdent(sqlbase.DialectSQLite, table)
-	rows, err := d.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", qTbl))
+	rows, err := sqlbase.Query(ctx, d.db, fmt.Sprintf("PRAGMA table_info(%s)", qTbl))
 	if err != nil {
 		return nil
 	}
@@ -1000,8 +991,7 @@ func (d *SQLiteDriver) BrowseData(ctx context.Context, req driver.BrowseDataRequ
 			return res, err
 		}
 	}
-	var total int64
-	if d.db.QueryRowContext(ctx, countSQL).Scan(&total) == nil {
+	if total, ok := sqlbase.QueryCount(ctx, d.db, countSQL); ok {
 		res.Total = total
 		res.HasTotal = true
 	}
@@ -1062,7 +1052,7 @@ func buildSQLiteVirtualTableDDL(req driver.CreateTableRequest) (string, error) {
 		}
 	}
 	if vArgs := strings.TrimSpace(req.VirtualArgs); vArgs != "" {
-		if err := sqlbase.ValidateSQLExpression("virtual table arguments", vArgs); err != nil {
+		if err := sqlbase.ValidateSQLExpressionForEngine("sqlite", "virtual table arguments", vArgs); err != nil {
 			return "", err
 		}
 		parts = append(parts, vArgs)
@@ -1122,25 +1112,16 @@ func (d *SQLiteDriver) CreateTable(ctx context.Context, req driver.CreateTableRe
 				return ddl, sbErr
 			}
 		}
-		_, err = d.db.ExecContext(ctx, ddl)
+		err = sqlbase.Exec(ctx, d.db, ddl)
 		return ddl, err
 	}
 	ddl, err := sqlbase.BuildCreateTableDDL(sqlbase.DialectSQLite, req)
 	if err != nil {
 		return "", err
 	}
-	var idxStmts []string
-	if len(req.Indexes) > 0 {
-		alterActions := make([]driver.AlterAction, 0, len(req.Indexes))
-		for _, idx := range req.Indexes {
-			if len(idx.Columns) > 0 {
-				alterActions = append(alterActions, driver.AlterAction{Action: "ADD_INDEX", Index: idx})
-			}
-		}
-		idxStmts, _ = sqlbase.BuildAlterTableSQLs(sqlbase.DialectSQLite, driver.AlterTableRequest{
-			Table:   req.Table,
-			Actions: alterActions,
-		})
+	idxStmts, idxErr := sqlbase.BuildCreateTableIndexSQLs(sqlbase.DialectSQLite, req)
+	if idxErr != nil {
+		return "", idxErr
 	}
 
 	fullScript := ddl
@@ -1155,13 +1136,11 @@ func (d *SQLiteDriver) CreateTable(ctx context.Context, req driver.CreateTableRe
 	if req.PreviewOnly {
 		return fullScript, nil
 	}
-	if _, err := d.db.ExecContext(ctx, ddl); err != nil {
+	if err := sqlbase.Exec(ctx, d.db, ddl); err != nil {
 		return fullScript, err
 	}
-	for _, s := range idxStmts {
-		if _, err := d.db.ExecContext(ctx, s); err != nil {
-			return fullScript, err
-		}
+	if err := sqlbase.ExecBatch(ctx, d.db, idxStmts); err != nil {
+		return fullScript, err
 	}
 	return fullScript, nil
 }
@@ -1185,10 +1164,8 @@ func (d *SQLiteDriver) AlterTable(ctx context.Context, req driver.AlterTableRequ
 		if req.PreviewOnly {
 			return pragmaStmts, nil
 		}
-		for _, ps := range pragmaStmts {
-			if _, err := d.db.ExecContext(ctx, ps); err != nil {
-				return pragmaStmts, err
-			}
+		if err := sqlbase.ExecBatch(ctx, d.db, pragmaStmts); err != nil {
+			return pragmaStmts, err
 		}
 		return pragmaStmts, nil
 	}
@@ -1196,7 +1173,7 @@ func (d *SQLiteDriver) AlterTable(ctx context.Context, req driver.AlterTableRequ
 	// Block schema-altering column/constraint operations on Virtual Tables (except RENAME_TABLE)
 	if strings.TrimSpace(req.Table) != "" {
 		var rawDDL string
-		_ = d.db.QueryRowContext(ctx, `SELECT COALESCE(sql, '') FROM sqlite_master WHERE name = ?`, req.Table).Scan(&rawDDL)
+		_ = sqlbase.QueryRow(ctx, d.db, `SELECT COALESCE(sql, '') FROM sqlite_master WHERE name = ?`, req.Table).Scan(&rawDDL)
 		if mod, isVirt := parseSQLiteVirtualModule(rawDDL); isVirt {
 			for _, act := range tableActions {
 				if !strings.EqualFold(strings.TrimSpace(act.Action), "RENAME_TABLE") {
@@ -1219,10 +1196,8 @@ func (d *SQLiteDriver) AlterTable(ctx context.Context, req driver.AlterTableRequ
 		if req.PreviewOnly {
 			return append(pragmaStmts, stmts...), nil
 		}
-		for _, ps := range pragmaStmts {
-			if _, pErr := d.db.ExecContext(ctx, ps); pErr != nil {
-				return append(pragmaStmts, stmts...), pErr
-			}
+		if pErr := sqlbase.ExecBatch(ctx, d.db, pragmaStmts); pErr != nil {
+			return append(pragmaStmts, stmts...), pErr
 		}
 		return append(pragmaStmts, stmts...), nil
 	}
@@ -1241,13 +1216,11 @@ func (d *SQLiteDriver) AlterTable(ctx context.Context, req driver.AlterTableRequ
 	if req.PreviewOnly {
 		return append(pragmaStmts, stmts...), nil
 	}
-	for _, ps := range pragmaStmts {
-		if _, pErr := d.db.ExecContext(ctx, ps); pErr != nil {
-			return append(pragmaStmts, stmts...), pErr
-		}
+	if pErr := sqlbase.ExecBatch(ctx, d.db, pragmaStmts); pErr != nil {
+		return append(pragmaStmts, stmts...), pErr
 	}
 	for _, s := range stmts {
-		if _, execErr := d.db.ExecContext(ctx, s); execErr != nil {
+		if execErr := sqlbase.Exec(ctx, d.db, s); execErr != nil {
 			// Fallback to safe transactional table rebuild when SQLite rejects native ALTER
 			rbStmts, rbErr := d.alterTableWithRebuild(ctx, subReq)
 			return append(pragmaStmts, rbStmts...), rbErr
@@ -1267,7 +1240,7 @@ func (d *SQLiteDriver) ManageObject(ctx context.Context, req driver.ObjectAction
 				return err
 			}
 		}
-		if _, err := d.db.ExecContext(ctx, s); err != nil {
+		if err := sqlbase.Exec(ctx, d.db, s); err != nil {
 			return err
 		}
 	}
@@ -1280,7 +1253,7 @@ func (d *SQLiteDriver) ExecuteSQL(ctx context.Context, _, query string, maxRows 
 			return nil, err
 		}
 	}
-	return sqlbase.ExecuteMultiSQL(ctx, d.db, query, maxRows)
+	return sqlbase.ExecuteMultiSQLForEngine(ctx, d.db, "sqlite", query, maxRows)
 }
 
 func (d *SQLiteDriver) StreamExport(ctx context.Context, req driver.ExportRequest, w io.Writer) error {
@@ -1366,14 +1339,14 @@ func (d *SQLiteDriver) BatchImport(ctx context.Context, req driver.ImportRequest
 			}
 		}()
 
-		err := sqlbase.StreamStatements(req.Reader, func(stmt string) error {
+		err := sqlbase.StreamStatementsForEngine("sqlite", req.Reader, func(stmt string) error {
 			if cErr := ctx.Err(); cErr != nil {
 				return cErr
 			}
 			if sbErr := validateSQLiteWebSandbox(stmt); sbErr != nil {
 				return sbErr
 			}
-			trimmed := strings.TrimSpace(sqlbase.StripLeadingSQLComments(stmt))
+			trimmed := strings.TrimSpace(sqlbase.StripLeadingSQLCommentsForEngine("sqlite", stmt))
 			upperKw := strings.ToUpper(trimmed)
 			for i, r := range upperKw {
 				if r == ' ' || r == '\t' || r == '\r' || r == '\n' || r == '(' {

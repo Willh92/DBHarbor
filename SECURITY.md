@@ -6,7 +6,7 @@ Security updates are provided for the latest minor release series on the `releas
 
 | Version | Supported | Notes |
 | :--- | :---: | :--- |
-| `1.0.x` (Latest: `v1.0.4`) | ✅ | Active security patches and hardening updates |
+| `1.0.x` (Latest: `v1.0.5`) | ✅ | Active security patches and hardening updates |
 | `preview` channel | ✅ | Rolling pre-release builds tracking `main` / `preview` |
 | `< 1.0.0` | ❌ | Pre-GA versions; please upgrade to the latest `1.0.x` release |
 
@@ -43,7 +43,7 @@ DBHarbor is distributed in two editions with distinct trust models:
 
 ### 1. Web Server Edition (`dbharbor`)
 Designed for self-hosted, multi-user browser access over HTTPS or Unix domain sockets:
-- **Authentication & Session Protection**: First-run administrator bootstrap, `bcrypt` password hashing, optional **RFC 6238 TOTP 2FA** with single-use hashed recovery codes, adaptive IP/account brute-force lockout + offline CAPTCHA, revocable server-side sessions, and short-lived single-use download tickets.
+- **Authentication & Session Protection**: First-run administrator bootstrap (unified `>= 8`-character password minimum across setup, user creation, and resets), `bcrypt` password hashing, optional **RFC 6238 TOTP 2FA** with single-use hashed recovery codes, adaptive IP/account brute-force lockout + offline CAPTCHA, revocable server-side sessions, short-lived single-use export download tickets (scoped strictly to export endpoints), and raster-only login branding validation (rejecting SVG data URLs).
 - **Credential Storage Policy**:
   - New database connections default to **Session-Only Credentials** (`RememberPassword = false`): database passwords and embedded URI secrets are kept only in server session memory (`sessionCreds`) and wiped upon sign-out, session revocation, or server shutdown.
   - When **Remember Password** is explicitly enabled by an authorized connection owner/administrator, secrets are encrypted at rest using **AES-256-GCM** backed by a `0600` `.master.key`.

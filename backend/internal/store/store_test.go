@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"dbharbor/backend/internal/crypto"
 	"dbharbor/backend/internal/driver"
@@ -22,8 +23,8 @@ func TestOpenCustomAdminBootstrapAndValidation(t *testing.T) {
 	if _, err := Open(invalidDir, vault1, "a", "StrongPass123"); err == nil {
 		t.Fatal("expected 1-char admin username to fail validation")
 	}
-	if _, err := Open(invalidDir, vault1, "ops_admin", "123"); err == nil {
-		t.Fatal("expected <6 char custom admin password to fail validation")
+	if _, err := Open(invalidDir, vault1, "ops_admin", "1234567"); err == nil {
+		t.Fatal("expected <8 char custom admin password to fail validation")
 	}
 
 	validDir := t.TempDir()
@@ -91,12 +92,12 @@ func TestDeferredWebSetupAndLoginBranding(t *testing.T) {
 		t.Fatal("expected <8 char password to be rejected by SetupInitialAdmin")
 	}
 
-	// Valid SVG icon without scripts
-	safeSVG := `data:image/svg+xml;base64,` + base64.StdEncoding.EncodeToString([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#2563eb"/></svg>`))
+	// Valid 1x1 raster PNG icon
+	safePNG := `data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=`
 	initialBranding := &LoginBrandingConfig{
 		PageTitle:         "Internal Data Console",
 		IconMode:          "custom",
-		CustomIconDataURL: safeSVG,
+		CustomIconDataURL: safePNG,
 		Heading:           "Data Gateway",
 		Subtitle:          "Authorized personnel only",
 	}
@@ -122,13 +123,79 @@ func TestDeferredWebSetupAndLoginBranding(t *testing.T) {
 		t.Fatalf("unexpected saved branding: %+v", gotBranding)
 	}
 
-	// Reject malicious SVG XSS payloads in SaveLoginBranding
-	evilSVG := `data:image/svg+xml;base64,` + base64.StdEncoding.EncodeToString([]byte(`<svg onload="alert(1)"><script>alert(1)</script></svg>`))
-	if _, err := st.SaveLoginBranding(LoginBrandingConfig{
+	// Valid ICO (vnd.microsoft.icon) raster header must be accepted
+	validICO := `data:image/vnd.microsoft.icon;base64,` + base64.StdEncoding.EncodeToString([]byte{0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x01})
+	if savedICO, err := st.SaveLoginBranding(LoginBrandingConfig{
 		IconMode:          "custom",
-		CustomIconDataURL: evilSVG,
+		CustomIconDataURL: validICO,
+	}); err != nil || savedICO.CustomIconDataURL != validICO {
+		t.Fatalf("expected valid vnd.microsoft.icon branding to succeed, err=%v", err)
+	}
+
+	// Reject all SVG variants (including benign SVG, XSS bypass variants, uppercase data URI) and spoofed raster headers
+	rejectedIcons := []string{
+		`data:image/svg+xml;base64,` + base64.StdEncoding.EncodeToString([]byte(`<svg xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10"/></svg>`)),
+		`data:image/svg+xml;base64,` + base64.StdEncoding.EncodeToString([]byte(`<svg onload="alert(1)"><script>alert(1)</script></svg>`)),
+		`data:image/svg+xml;base64,` + base64.StdEncoding.EncodeToString([]byte(`<svg onload = "alert(1)">`)),
+		`data:image/svg+xml;base64,` + base64.StdEncoding.EncodeToString([]byte(`<svg onmouseover="alert(1)">`)),
+		`data:image/svg+xml;base64,` + base64.StdEncoding.EncodeToString([]byte(`<svg><animate onbegin="alert(1)"/></svg>`)),
+		`DATA:IMAGE/SVG+XML;BASE64,` + base64.StdEncoding.EncodeToString([]byte(`<svg/>`)),
+		`data:image/svg+xml;utf8,<svg/>`,
+		`data:image/png;base64,` + base64.StdEncoding.EncodeToString([]byte(`<script>alert(1)</script>`)),
+		`data:image/png;base64,iVBOR w0KGgoAAAANSUhEUg==`,
+		`data:image/png;base64,` + base64.StdEncoding.EncodeToString(append([]byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}, make([]byte, 129*1024)...)),
+	}
+	for idx, badIcon := range rejectedIcons {
+		if _, err := st.SaveLoginBranding(LoginBrandingConfig{
+			IconMode:          "custom",
+			CustomIconDataURL: badIcon,
+		}); err == nil {
+			t.Fatalf("expected branding payload #%d to be rejected", idx)
+		}
+	}
+}
+
+func TestUserPasswordMinLength(t *testing.T) {
+	tmpDir := t.TempDir()
+	vault, err := crypto.NewVaultFromDataDir(tmpDir, "")
+	if err != nil {
+		t.Fatalf("NewVaultFromDataDir failed: %v", err)
+	}
+	st, err := Open(tmpDir, vault, "root_admin", "RootPass123!")
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer st.Close()
+
+	if _, err := st.CreateUser(CreateUserInput{
+		Username: "bob_user",
+		Password: "short77",
+		Role:     RoleReadWrite,
 	}); err == nil {
-		t.Fatal("expected SVG containing <script>/onload to be rejected")
+		t.Fatal("expected CreateUser to reject 7-character password")
+	}
+
+	created, err := st.CreateUser(CreateUserInput{
+		Username: "bob_user",
+		Password: "Valid888",
+		Role:     RoleReadWrite,
+	})
+	if err != nil {
+		t.Fatalf("expected CreateUser to accept 8-character password, got %v", err)
+	}
+
+	if err := st.UpdatePassword(created.ID, "Valid888", "seven77"); err == nil {
+		t.Fatal("expected UpdatePassword to reject 7-character new password")
+	}
+	if err := st.UpdatePassword(created.ID, "Valid888", "Eight888"); err != nil {
+		t.Fatalf("expected UpdatePassword to accept 8-character new password, got %v", err)
+	}
+
+	if _, err := st.AdminResetPassword(created.ID, "seven77", false); err == nil {
+		t.Fatal("expected AdminResetPassword to reject 7-character password")
+	}
+	if _, err := st.AdminResetPassword(created.ID, "Reset888", false); err != nil {
+		t.Fatalf("expected AdminResetPassword to accept 8-character password, got %v", err)
 	}
 }
 
@@ -376,11 +443,29 @@ func TestConnectionRememberPasswordPersistenceAndWipe(t *testing.T) {
 			if c.RememberPassword {
 				t.Fatalf("expected Imported PG to default to RememberPassword=false")
 			}
+			if !strings.HasSuffix(c.CreatedAt, "Z") || !strings.HasSuffix(c.UpdatedAt, "Z") {
+				t.Fatalf("expected UTC RFC3339 timestamps for Imported PG, got created=%q updated=%q", c.CreatedAt, c.UpdatedAt)
+			}
+			if _, pErr := time.Parse(time.RFC3339, c.CreatedAt); pErr != nil {
+				t.Fatalf("CreatedAt not RFC3339: %q (%v)", c.CreatedAt, pErr)
+			}
+			if _, pErr := time.Parse(time.RFC3339, c.UpdatedAt); pErr != nil {
+				t.Fatalf("UpdatedAt not RFC3339: %q (%v)", c.UpdatedAt, pErr)
+			}
 		}
 		if c.Name == "Imported SQLite" {
 			foundSQLite = true
 			if !c.RememberPassword {
 				t.Fatalf("expected Imported SQLite (passwordless file engine) to have RememberPassword=true")
+			}
+			if !strings.HasSuffix(c.CreatedAt, "Z") || !strings.HasSuffix(c.UpdatedAt, "Z") {
+				t.Fatalf("expected UTC RFC3339 timestamps for Imported SQLite, got created=%q updated=%q", c.CreatedAt, c.UpdatedAt)
+			}
+			if _, pErr := time.Parse(time.RFC3339, c.CreatedAt); pErr != nil {
+				t.Fatalf("CreatedAt not RFC3339: %q (%v)", c.CreatedAt, pErr)
+			}
+			if _, pErr := time.Parse(time.RFC3339, c.UpdatedAt); pErr != nil {
+				t.Fatalf("UpdatedAt not RFC3339: %q (%v)", c.UpdatedAt, pErr)
 			}
 		}
 	}

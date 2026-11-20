@@ -193,110 +193,6 @@ type duckLexToken struct {
 	upper string
 }
 
-func hasDuckDBDotCommandOutsideStrings(s string) bool {
-	if strings.HasPrefix(strings.TrimSpace(s), ".") {
-		return true
-	}
-	atLineStart := true
-	n := len(s)
-	for i := 0; i < n; i++ {
-		ch := s[i]
-		if ch == '-' && i+1 < n && s[i+1] == '-' {
-			i += 2
-			for i < n && s[i] != '\n' {
-				i++
-			}
-			atLineStart = true
-			continue
-		}
-		if ch == '/' && i+1 < n && s[i+1] == '*' {
-			wasAtLineStart := atLineStart
-			sawNewline := false
-			commentLineStart := false
-			depth := 1
-			i += 2
-			for i < n && depth > 0 {
-				if i+1 < n && s[i] == '/' && s[i+1] == '*' {
-					commentLineStart = false
-					depth++
-					i += 2
-					continue
-				}
-				if i+1 < n && s[i] == '*' && s[i+1] == '/' {
-					depth--
-					i += 2
-					continue
-				}
-				if s[i] == '\n' || s[i] == '\r' {
-					sawNewline = true
-					commentLineStart = true
-					i++
-					continue
-				}
-				if commentLineStart {
-					if s[i] == ' ' || s[i] == '\t' {
-						i++
-						continue
-					}
-					if s[i] == '.' {
-						return true
-					}
-					commentLineStart = false
-				}
-				i++
-			}
-			if sawNewline {
-				atLineStart = commentLineStart
-			} else {
-				atLineStart = wasAtLineStart
-			}
-			i--
-			continue
-		}
-		if ch == '\'' || ch == '"' || ch == '`' {
-			atLineStart = false
-			q := ch
-			i++
-			for i < n {
-				if s[i] == q {
-					if i+1 < n && s[i+1] == q {
-						i += 2
-						continue
-					}
-					break
-				}
-				i++
-			}
-			continue
-		}
-		if ch == '$' {
-			if tag, ok := matchDuckDollarTag(s[i:]); ok {
-				atLineStart = false
-				endIdx := strings.Index(s[i+len(tag):], tag)
-				if endIdx < 0 {
-					return false
-				}
-				i = i + len(tag) + endIdx + len(tag) - 1
-				continue
-			}
-		}
-		if ch == '\n' || ch == '\r' {
-			atLineStart = true
-			continue
-		}
-		if atLineStart {
-			if ch == ' ' || ch == '\t' {
-				continue
-			}
-			if ch == '.' {
-				return true
-			}
-			atLineStart = false
-		}
-	}
-	return false
-}
-
 func matchDuckDollarTag(s string) (string, bool) {
 	if len(s) < 2 || s[0] != '$' {
 		return "", false
@@ -304,7 +200,7 @@ func matchDuckDollarTag(s string) (string, bool) {
 	if s[1] == '$' {
 		return "$$", true
 	}
-	if !((s[1] >= 'a' && s[1] <= 'z') || (s[1] >= 'A' && s[1] <= 'Z') || s[1] == '_') {
+	if !((s[1] >= 'a' && s[1] <= 'z') || (s[1] >= 'A' && s[1] <= 'Z') || s[1] == '_' || s[1] >= 0x80) {
 		return "", false
 	}
 	for i := 2; i < len(s); i++ {
@@ -312,7 +208,7 @@ func matchDuckDollarTag(s string) (string, bool) {
 		if ch == '$' {
 			return s[:i+1], true
 		}
-		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_') {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch >= 0x80) {
 			return "", false
 		}
 	}
@@ -323,9 +219,14 @@ func lexDuckDBTokens(s string) []duckLexToken {
 	var tokens []duckLexToken
 	n := len(s)
 	i := 0
+	prevIsIdentChar := false
+	isIdentByte := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '$' || b >= 0x80
+	}
 	for i < n {
 		ch := s[i]
 		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
+			prevIsIdentChar = false
 			i++
 			continue
 		}
@@ -334,6 +235,7 @@ func lexDuckDBTokens(s string) []duckLexToken {
 			for i < n && s[i] != '\n' {
 				i++
 			}
+			prevIsIdentChar = false
 			continue
 		}
 		if ch == '/' && i+1 < n && s[i+1] == '*' {
@@ -352,11 +254,25 @@ func lexDuckDBTokens(s string) []duckLexToken {
 				}
 				i++
 			}
+			prevIsIdentChar = false
 			continue
 		}
-		if ch == '\'' {
+		if ch == '\'' || (!prevIsIdentChar && (ch == 'E' || ch == 'e') && i+1 < n && s[i+1] == '\'') {
+			escMode := false
 			j := i + 1
+			if ch != '\'' {
+				escMode = true
+				j = i + 2
+			}
 			for j < n {
+				if escMode && s[j] == '\\' {
+					if j+1 < n {
+						j += 2
+					} else {
+						j++
+					}
+					continue
+				}
 				if s[j] == '\'' {
 					if j+1 < n && s[j+1] == '\'' {
 						j += 2
@@ -368,10 +284,11 @@ func lexDuckDBTokens(s string) []duckLexToken {
 				j++
 			}
 			tokens = append(tokens, duckLexToken{kind: "string"})
+			prevIsIdentChar = false
 			i = j
 			continue
 		}
-		if ch == '$' {
+		if !prevIsIdentChar && ch == '$' {
 			if tag, ok := matchDuckDollarTag(s[i:]); ok {
 				endIdx := strings.Index(s[i+len(tag):], tag)
 				if endIdx < 0 {
@@ -379,6 +296,7 @@ func lexDuckDBTokens(s string) []duckLexToken {
 					break
 				}
 				tokens = append(tokens, duckLexToken{kind: "string"})
+				prevIsIdentChar = false
 				i = i + len(tag) + endIdx + len(tag)
 				continue
 			}
@@ -401,6 +319,7 @@ func lexDuckDBTokens(s string) []duckLexToken {
 				j++
 			}
 			tokens = append(tokens, duckLexToken{kind: "ident", upper: strings.ToUpper(strings.TrimSpace(b.String()))})
+			prevIsIdentChar = false
 			i = j
 			continue
 		}
@@ -415,93 +334,19 @@ func lexDuckDBTokens(s string) []duckLexToken {
 				}
 			}
 			tokens = append(tokens, duckLexToken{kind: "word", upper: strings.ToUpper(s[i:j])})
+			prevIsIdentChar = true
 			i = j
 			continue
 		}
 		tokens = append(tokens, duckLexToken{kind: "punct", upper: s[i : i+1]})
+		prevIsIdentChar = isIdentByte(ch)
 		i++
 	}
 	return tokens
 }
 
-var blockedDuckDBIdents = map[string]bool{
-	"READ_CSV":                      true,
-	"READ_CSV_AUTO":                 true,
-	"READ_PARQUET":                  true,
-	"READ_JSON":                     true,
-	"READ_JSON_AUTO":                true,
-	"READ_JSON_OBJECTS":             true,
-	"READ_NDJSON":                   true,
-	"READ_NDJSON_AUTO":              true,
-	"READ_NDJSON_OBJECTS":           true,
-	"READ_TEXT":                     true,
-	"READ_BLOB":                     true,
-	"PARQUET_SCAN":                  true,
-	"CSV_SCAN":                      true,
-	"JSON_SCAN":                     true,
-	"SQLITE_SCAN":                   true,
-	"SQLITE_ATTACH":                 true,
-	"POSTGRES_SCAN":                 true,
-	"POSTGRES_ATTACH":               true,
-	"MYSQL_SCAN":                    true,
-	"MYSQL_ATTACH":                  true,
-	"ICEBERG_SCAN":                  true,
-	"DELTA_SCAN":                    true,
-	"ENABLE_EXTERNAL_ACCESS":        true,
-	"LOCK_CONFIGURATION":            true,
-	"AUTOINSTALL_KNOWN_EXTENSIONS":  true,
-	"AUTOLOAD_KNOWN_EXTENSIONS":     true,
-	"CUSTOM_EXTENSION_REPOSITORY":   true,
-	"EXTENSION_DIRECTORY":           true,
-	"ALLOWED_DIRECTORIES":           true,
-	"ALLOWED_PATHS":                 true,
-	"DISABLED_FILESYSTEMS":          true,
-	"HTTPFS":                        true,
-	"GETENV":                        true,
-	"CURRENT_SETTING":               true,
-	"DUCKDB_SECRETS":                true,
-}
-
 func validateDuckDBWebSandbox(script string) error {
-	if hasDuckDBDotCommandOutsideStrings(script) {
-		return errors.New("DuckDB CLI dot-commands are disabled in Web Server mode for host sandbox isolation")
-	}
-	for _, stmt := range sqlbase.SplitStatements(script) {
-		trimmed := strings.TrimSpace(sqlbase.StripLeadingSQLComments(stmt))
-		if trimmed == "" {
-			continue
-		}
-		if strings.HasPrefix(trimmed, ".") {
-			return errors.New("DuckDB CLI dot-commands are disabled in Web Server mode for host sandbox isolation")
-		}
-		tokens := lexDuckDBTokens(stmt)
-		if len(tokens) == 0 {
-			continue
-		}
-		if tokens[0].kind == "punct" && tokens[0].upper == "." {
-			return errors.New("DuckDB CLI dot-commands are disabled in Web Server mode for host sandbox isolation")
-		}
-		for idx, tok := range tokens {
-			if tok.kind == "word" {
-				switch tok.upper {
-				case "ATTACH", "DETACH", "COPY", "INSTALL", "LOAD":
-					return fmt.Errorf("%s is disabled in Web Server mode for host sandbox isolation", tok.upper)
-				case "EXPORT", "IMPORT":
-					if idx == 0 || (idx+1 < len(tokens) && tokens[idx+1].kind == "word" && tokens[idx+1].upper == "DATABASE") {
-						return fmt.Errorf("%s is disabled in Web Server mode for host sandbox isolation", tok.upper)
-					}
-				case "FROM", "JOIN":
-					if idx+1 < len(tokens) && tokens[idx+1].kind == "string" {
-						return errors.New("direct file path table scans are disabled in Web Server mode for host sandbox isolation")
-					}
-				}
-			}
-			if (tok.kind == "word" || tok.kind == "ident") && blockedDuckDBIdents[tok.upper] {
-				return fmt.Errorf("%s is disabled in Web Server mode for host sandbox isolation", tok.upper)
-			}
-		}
-	}
-	return nil
+	return sqlbase.ValidateDuckDBRestrictedWebSQL(script)
 }
 
 func formatDuckDBStdinSQL(sqlStmt string) string {
@@ -1271,7 +1116,7 @@ func (d *DuckDBDriver) ExecuteSQL(ctx context.Context, _, query string, maxRows 
 			return nil, err
 		}
 	}
-	stmts := sqlbase.SplitStatements(query)
+	stmts := sqlbase.SplitStatementsForEngine("duckdb", query)
 	if len(stmts) == 0 {
 		return []driver.QueryResult{}, nil
 	}
@@ -1303,35 +1148,150 @@ func (d *DuckDBDriver) ExecuteSQL(ctx context.Context, _, query string, maxRows 
 		if err != nil {
 			return out, err
 		}
-		out = append(out, buildDuckQueryResult(stmt, recs, maxRows, time.Since(start).Milliseconds(), sqlbase.IsQueryStatement(stmt)))
+		out = append(out, buildDuckQueryResult(stmt, recs, maxRows, time.Since(start).Milliseconds(), sqlbase.IsQueryStatementForEngine("duckdb", stmt)))
 	}
 	return out, nil
+}
+
+type limitedDuckStderrBuffer struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (l *limitedDuckStderrBuffer) Write(p []byte) (int, error) {
+	if l.buf.Len() < l.max {
+		rem := l.max - l.buf.Len()
+		if len(p) > rem {
+			_, _ = l.buf.Write(p[:rem])
+		} else {
+			_, _ = l.buf.Write(p)
+		}
+	}
+	return len(p), nil
+}
+
+func (l *limitedDuckStderrBuffer) String() string {
+	return l.buf.String()
+}
+
+func normalizeDuckJSONNumber(v any) any {
+	if num, ok := v.(json.Number); ok {
+		if i, err := num.Int64(); err == nil {
+			return i
+		}
+		if f, err := num.Float64(); err == nil {
+			return f
+		}
+		return num.String()
+	}
+	return v
+}
+
+func decodeOrderedDuckJSONObject(dec *json.Decoder) ([]string, map[string]any, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, nil, err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return nil, nil, fmt.Errorf("expected JSON object in DuckDB stream, got %v", tok)
+	}
+	cols := make([]string, 0, 16)
+	row := make(map[string]any, 16)
+	for dec.More() {
+		kTok, err := dec.Token()
+		if err != nil {
+			return nil, nil, err
+		}
+		key, ok := kTok.(string)
+		if !ok {
+			return nil, nil, fmt.Errorf("expected JSON object key string, got %T", kTok)
+		}
+		var val any
+		if err := dec.Decode(&val); err != nil {
+			return nil, nil, err
+		}
+		cols = append(cols, key)
+		row[key] = val
+	}
+	endTok, err := dec.Token()
+	if err != nil {
+		return nil, nil, err
+	}
+	if endDelim, ok := endTok.(json.Delim); !ok || endDelim != '}' {
+		return nil, nil, fmt.Errorf("expected closing '}' in DuckDB JSON object, got %v", endTok)
+	}
+	return cols, row, nil
+}
+
+func (d *DuckDBDriver) verifyExportCLI(ctx context.Context) error {
+	if d.webMode || sqlbase.IsRestrictedWebContext(ctx) {
+		return verifyDuckDBExecutable(d.cliBin)
+	}
+	if _, err := exec.LookPath(d.cliBin); err != nil {
+		if _, statErr := os.Stat(d.cliBin); statErr != nil {
+			return fmt.Errorf("duckdb executable (%s) not found; please install DuckDB CLI into system PATH or specify cliPath in connection options", d.cliBin)
+		}
+	}
+	return nil
 }
 
 func (d *DuckDBDriver) StreamExport(ctx context.Context, req driver.ExportRequest, w io.Writer) error {
 	sc := normalizeDuckSchema(req.Schema)
 	query := strings.TrimSpace(req.CustomSQL)
-	if query == "" {
-		if strings.TrimSpace(req.Table) == "" || len(req.Tables) > 0 {
-			targetNames := req.Tables
-			if len(targetNames) == 0 {
-				objs, err := d.ListObjects(ctx, "main", sc)
-				if err != nil {
+	if (d.webMode || sqlbase.IsRestrictedWebContext(ctx)) && query != "" {
+		if err := validateDuckDBWebSandbox(query); err != nil {
+			return err
+		}
+	}
+	if sqlbase.IsRestrictedWebContext(ctx) {
+		if err := verifyDuckDBExecutable(d.cliBin); err != nil {
+			return err
+		}
+	}
+
+	format := strings.ToLower(strings.TrimSpace(req.Format))
+	if format == "" {
+		format = "json"
+	}
+
+	if query == "" && (strings.TrimSpace(req.Table) == "" || len(req.Tables) > 0) {
+		multiFormat := strings.ToLower(strings.TrimSpace(req.Format))
+		if multiFormat == "" {
+			multiFormat = "sql"
+		}
+		switch multiFormat {
+		case "sql", "json", "jsonl":
+		default:
+			return errors.New("full-database or multi-table export requires SQL, JSON, or JSONL format (CSV/Markdown apply only to single tables or custom SQL)")
+		}
+
+		targetNames := req.Tables
+		if len(targetNames) == 0 {
+			objs, err := d.ListObjects(ctx, "main", sc)
+			if err != nil {
+				return err
+			}
+			for _, t := range objs.Tables {
+				targetNames = append(targetNames, t.Name)
+			}
+		}
+
+		bw := bufio.NewWriterSize(w, 64*1024)
+		switch multiFormat {
+		case "sql":
+			_, _ = bw.WriteString("-- DBHarbor DuckDB SQL Dump\n\n")
+			for _, tName := range targetNames {
+				if err := ctx.Err(); err != nil {
 					return err
 				}
-				for _, t := range objs.Tables {
-					targetNames = append(targetNames, t.Name)
-				}
-			}
-			_, _ = io.WriteString(w, "-- DBHarbor DuckDB SQL Dump\n\n")
-			for _, tName := range targetNames {
 				if req.DropIfExists {
-					_, _ = fmt.Fprintf(w, "DROP TABLE IF EXISTS %s;\n", sqlbase.QualifyTable(sqlbase.DialectPostgres, "", sc, tName))
+					_, _ = fmt.Fprintf(bw, "DROP TABLE IF EXISTS %s;\n", sqlbase.QualifyTable(sqlbase.DialectPostgres, "", sc, tName))
 				}
 				if req.IncludeDDL {
 					if st, sErr := d.GetTableStructure(ctx, "main", sc, tName); sErr == nil && st.DDL != "" {
 						ddlTxt := strings.TrimRight(strings.TrimSpace(st.DDL), ";")
-						_, _ = io.WriteString(w, ddlTxt+";\n\n")
+						_, _ = bw.WriteString(ddlTxt + ";\n\n")
 					}
 				}
 				subReq := req
@@ -1341,170 +1301,372 @@ func (d *DuckDBDriver) StreamExport(ctx context.Context, req driver.ExportReques
 				subReq.Format = "sql"
 				subReq.IncludeDDL = false
 				subReq.DropIfExists = false
-				if err := d.StreamExport(ctx, subReq, w); err != nil {
+				subQuery := "SELECT * FROM " + sqlbase.QualifyTable(sqlbase.DialectPostgres, "", sc, tName)
+				if req.MaxRows > 0 {
+					subQuery += fmt.Sprintf(" LIMIT %d", req.MaxRows)
+				}
+				if err := d.streamDuckDBQueryExport(ctx, subQuery, subReq, sc, bw); err != nil {
 					return err
 				}
 			}
-			return nil
+			return bw.Flush()
+
+		case "json":
+			dbName := strings.TrimSpace(req.Database)
+			if dbName == "" {
+				dbName = "main"
+			}
+			dbJSON, _ := json.Marshal(dbName)
+			_, _ = bw.WriteString("{\n  \"database\": ")
+			_, _ = bw.Write(dbJSON)
+			_, _ = bw.WriteString(",\n  \"tables\": {\n")
+			for idx, tName := range targetNames {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if idx > 0 {
+					_, _ = bw.WriteString(",\n")
+				}
+				tblJSON, _ := json.Marshal(tName)
+				_, _ = bw.WriteString("    ")
+				_, _ = bw.Write(tblJSON)
+				_, _ = bw.WriteString(": ")
+				subReq := req
+				subReq.Schema = sc
+				subReq.Table = tName
+				subReq.Tables = nil
+				subReq.Format = "json"
+				subReq.IncludeDDL = false
+				subReq.DropIfExists = false
+				subQuery := "SELECT * FROM " + sqlbase.QualifyTable(sqlbase.DialectPostgres, "", sc, tName)
+				if req.MaxRows > 0 {
+					subQuery += fmt.Sprintf(" LIMIT %d", req.MaxRows)
+				}
+				if err := d.streamDuckDBQueryExport(ctx, subQuery, subReq, sc, bw); err != nil {
+					return err
+				}
+			}
+			_, _ = bw.WriteString("\n  }\n}\n")
+			return bw.Flush()
+
+		case "jsonl":
+			for _, tName := range targetNames {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				subReq := req
+				subReq.Schema = sc
+				subReq.Table = tName
+				subReq.Tables = nil
+				subReq.Format = "jsonl"
+				subReq.IncludeDDL = false
+				subReq.DropIfExists = false
+				subQuery := "SELECT * FROM " + sqlbase.QualifyTable(sqlbase.DialectPostgres, "", sc, tName)
+				if req.MaxRows > 0 {
+					subQuery += fmt.Sprintf(" LIMIT %d", req.MaxRows)
+				}
+				if err := d.streamDuckDBQueryExport(ctx, subQuery, subReq, sc, bw); err != nil {
+					return err
+				}
+			}
+			return bw.Flush()
 		}
-		query = "SELECT * FROM " + sqlbase.QualifyTable(sqlbase.DialectPostgres, "", sc, req.Table)
 	}
-	resList, err := d.ExecuteSQL(ctx, req.Database, query, req.MaxRows)
-	if err != nil || len(resList) == 0 {
-		return err
-	}
-	res := resList[0]
-	format := strings.ToLower(strings.TrimSpace(req.Format))
+
 	switch format {
-	case "csv", "csv_bom":
-		if format == "csv_bom" {
-			_, _ = w.Write([]byte{0xEF, 0xBB, 0xBF})
-		}
-		cw := csv.NewWriter(w)
-		headers := make([]string, len(res.Columns))
-		for i, c := range res.Columns {
-			headers[i] = c.Name
-		}
-		_ = cw.Write(headers)
-		for _, r := range res.Rows {
-			rec := make([]string, len(r))
-			for i, v := range r {
-				if v != nil {
-					rec[i] = fmt.Sprintf("%v", v)
-				}
-			}
-			_ = cw.Write(rec)
-		}
-		cw.Flush()
-		return cw.Error()
-	case "sql":
-		if req.DropIfExists && req.Table != "" {
-			_, _ = fmt.Fprintf(w, "DROP TABLE IF EXISTS %s;\n", sqlbase.QualifyTable(sqlbase.DialectPostgres, "", sc, req.Table))
-		}
-		if req.IncludeDDL && req.Table != "" {
-			if st, sErr := d.GetTableStructure(ctx, "main", sc, req.Table); sErr == nil && st.DDL != "" {
-				ddlTxt := strings.TrimRight(strings.TrimSpace(st.DDL), ";")
-				_, _ = io.WriteString(w, ddlTxt+";\n\n")
-			}
-		}
-		targetTbl := `"exported_table"`
-		if req.Table != "" {
-			targetTbl = sqlbase.QualifyTable(sqlbase.DialectPostgres, "", sc, req.Table)
-		}
-		qCols := make([]string, len(res.Columns))
-		for i, c := range res.Columns {
-			qCols[i] = sqlbase.QuoteIdent(sqlbase.DialectPostgres, c.Name)
-		}
-		for _, r := range res.Rows {
-			vals := make([]string, len(r))
-			for i, v := range r {
-				vals[i] = sqlbase.FormatLiteralForDialect(sqlbase.DialectPostgres, v)
-			}
-			_, _ = fmt.Fprintf(w, "INSERT INTO %s (%s) VALUES (%s);\n", targetTbl, strings.Join(qCols, ", "), strings.Join(vals, ", "))
-		}
-		return nil
-	case "jsonl":
-		bw := bufio.NewWriter(w)
-		rowMap := make(map[string]any, len(res.Columns)+1)
-		for _, r := range res.Rows {
-			clear(rowMap)
-			if req.Table != "" {
-				rowMap["__table__"] = req.Table
-			}
-			for i, c := range res.Columns {
-				if i < len(r) {
-					rowMap[c.Name] = r[i]
-				} else {
-					rowMap[c.Name] = nil
-				}
-			}
-			b, mErr := json.Marshal(rowMap)
-			if mErr != nil {
-				return mErr
-			}
-			if _, wErr := bw.Write(b); wErr != nil {
-				return wErr
-			}
-			if wErr := bw.WriteByte('\n'); wErr != nil {
-				return wErr
-			}
-		}
-		return bw.Flush()
-	case "markdown":
-		escapeCell := func(s string) string {
-			s = strings.ReplaceAll(s, "\r\n", " ")
-			s = strings.ReplaceAll(s, "\n", " ")
-			s = strings.ReplaceAll(s, `\`, `\\`)
-			s = strings.ReplaceAll(s, "|", `\|`)
-			return s
-		}
-		bw := bufio.NewWriter(w)
-		_, _ = bw.WriteString("| ")
-		for i, c := range res.Columns {
-			if i > 0 {
-				_, _ = bw.WriteString(" | ")
-			}
-			_, _ = bw.WriteString(escapeCell(c.Name))
-		}
-		_, _ = bw.WriteString(" |\n| ")
-		for i := range res.Columns {
-			if i > 0 {
-				_, _ = bw.WriteString(" | ")
-			}
-			_, _ = bw.WriteString("---")
-		}
-		_, _ = bw.WriteString(" |\n")
-		for _, r := range res.Rows {
-			_, _ = bw.WriteString("| ")
-			for i := range res.Columns {
-				if i > 0 {
-					_, _ = bw.WriteString(" | ")
-				}
-				var v any
-				if i < len(r) {
-					v = r[i]
-				}
-				if v == nil {
-					_, _ = bw.WriteString("`NULL`")
-				} else {
-					_, _ = bw.WriteString(escapeCell(fmt.Sprintf("%v", v)))
-				}
-			}
-			_, _ = bw.WriteString(" |\n")
-		}
-		return bw.Flush()
-	case "json", "":
-		bw := bufio.NewWriter(w)
-		if _, err := bw.WriteString("["); err != nil {
-			return err
-		}
-		enc := json.NewEncoder(bw)
-		rowMap := make(map[string]any, len(res.Columns))
-		for rIdx, r := range res.Rows {
-			if rIdx > 0 {
-				if _, err := bw.WriteString(","); err != nil {
-					return err
-				}
-			}
-			clear(rowMap)
-			for i, c := range res.Columns {
-				if i < len(r) {
-					rowMap[c.Name] = r[i]
-				} else {
-					rowMap[c.Name] = nil
-				}
-			}
-			if err := enc.Encode(rowMap); err != nil {
-				return err
-			}
-		}
-		if _, err := bw.WriteString("]\n"); err != nil {
-			return err
-		}
-		return bw.Flush()
+	case "csv", "csv_bom", "csv-bom", "sql", "jsonl", "markdown", "json":
 	default:
 		return fmt.Errorf("unsupported export format: %s", req.Format)
 	}
+
+	if query == "" {
+		if strings.TrimSpace(req.Table) == "" {
+			return errors.New("export requires specifying a table or custom SQL")
+		}
+		query = "SELECT * FROM " + sqlbase.QualifyTable(sqlbase.DialectPostgres, "", sc, req.Table)
+		if req.MaxRows > 0 {
+			query += fmt.Sprintf(" LIMIT %d", req.MaxRows)
+		}
+	}
+
+	bw := bufio.NewWriterSize(w, 64*1024)
+	if format == "sql" {
+		if req.DropIfExists && req.Table != "" {
+			_, _ = fmt.Fprintf(bw, "DROP TABLE IF EXISTS %s;\n", sqlbase.QualifyTable(sqlbase.DialectPostgres, "", sc, req.Table))
+		}
+		if req.IncludeDDL && req.Table != "" {
+			// Fetch DDL before acquiring duckFileLock inside streamDuckDBQueryExport to avoid re-entrant file locking.
+			if st, sErr := d.GetTableStructure(ctx, "main", sc, req.Table); sErr == nil && st.DDL != "" {
+				ddlTxt := strings.TrimRight(strings.TrimSpace(st.DDL), ";")
+				_, _ = bw.WriteString(ddlTxt + ";\n\n")
+			}
+		}
+	}
+	if err := d.streamDuckDBQueryExport(ctx, query, req, sc, bw); err != nil {
+		return err
+	}
+	return bw.Flush()
+}
+
+func (d *DuckDBDriver) streamDuckDBQueryExport(ctx context.Context, query string, req driver.ExportRequest, sc string, w io.Writer) error {
+	if err := d.verifyExportCLI(ctx); err != nil {
+		return err
+	}
+	if lk := duckFileLock(d.filePath); lk != nil {
+		lk.Lock()
+		defer lk.Unlock()
+	}
+
+	cmd := exec.CommandContext(ctx, d.cliBin, d.buildDuckDBArgs()...)
+	cmd.Stdin = strings.NewReader(formatDuckDBStdinSQL(query))
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr := &limitedDuckStderrBuffer{max: 64 * 1024}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	format := strings.ToLower(strings.TrimSpace(req.Format))
+	if format == "" {
+		format = "json"
+	}
+
+	bw := bufio.NewWriterSize(w, 64*1024)
+	var cw *csv.Writer
+	switch format {
+	case "csv", "csv_bom", "csv-bom":
+		if format == "csv_bom" || format == "csv-bom" {
+			if _, err := bw.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+				_ = stdoutPipe.Close()
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				_ = cmd.Wait()
+				return err
+			}
+		}
+		cw = csv.NewWriter(bw)
+	case "json":
+		if err := bw.WriteByte('['); err != nil {
+			_ = stdoutPipe.Close()
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = cmd.Wait()
+			return err
+		}
+	}
+
+	escapeCell := func(s string) string {
+		s = strings.ReplaceAll(s, "\r\n", " ")
+		s = strings.ReplaceAll(s, "\n", " ")
+		s = strings.ReplaceAll(s, `\`, `\\`)
+		s = strings.ReplaceAll(s, "|", `\|`)
+		return s
+	}
+
+	targetTbl := `"exported_table"`
+	if req.Table != "" {
+		targetTbl = sqlbase.QualifyTable(sqlbase.DialectPostgres, "", sc, req.Table)
+	}
+
+	br := bufio.NewReaderSize(stdoutPipe, 64*1024)
+	dec := json.NewDecoder(br)
+	dec.UseNumber()
+
+	var (
+		colNames     []string
+		qColList     string
+		rowMap       map[string]any
+		rowCount     int
+		stoppedEarly bool
+		streamErr    error
+	)
+
+	firstTok, tokErr := dec.Token()
+	if tokErr != nil {
+		if !errors.Is(tokErr, io.EOF) {
+			streamErr = tokErr
+		}
+	} else {
+		delim, ok := firstTok.(json.Delim)
+		if !ok || delim != '[' {
+			streamErr = fmt.Errorf("expected DuckDB JSON array output, got %v", firstTok)
+		} else {
+			var csvRec []string
+			var sqlVals []string
+			var enc *json.Encoder
+			if format == "json" {
+				enc = json.NewEncoder(bw)
+			}
+
+			for dec.More() {
+				if req.MaxRows > 0 && rowCount >= req.MaxRows {
+					stoppedEarly = true
+					break
+				}
+				if rowCount == 0 {
+					cols, firstRow, decErr := decodeOrderedDuckJSONObject(dec)
+					if decErr != nil {
+						streamErr = decErr
+						break
+					}
+					colNames = cols
+					rowMap = firstRow
+					csvRec = make([]string, len(colNames))
+					sqlVals = make([]string, len(colNames))
+
+					switch format {
+					case "csv", "csv_bom", "csv-bom":
+						if wErr := cw.Write(colNames); wErr != nil {
+							streamErr = wErr
+						}
+					case "sql":
+						qCols := make([]string, len(colNames))
+						for i, c := range colNames {
+							qCols[i] = sqlbase.QuoteIdent(sqlbase.DialectPostgres, c)
+						}
+						qColList = strings.Join(qCols, ", ")
+					case "markdown":
+						_, _ = bw.WriteString("| ")
+						for i, c := range colNames {
+							if i > 0 {
+								_, _ = bw.WriteString(" | ")
+							}
+							_, _ = bw.WriteString(escapeCell(c))
+						}
+						_, _ = bw.WriteString(" |\n| ")
+						for i := range colNames {
+							if i > 0 {
+								_, _ = bw.WriteString(" | ")
+							}
+							_, _ = bw.WriteString("---")
+						}
+						_, streamErr = bw.WriteString(" |\n")
+					}
+					if streamErr != nil {
+						break
+					}
+				} else {
+					clear(rowMap)
+					if decErr := dec.Decode(&rowMap); decErr != nil {
+						streamErr = decErr
+						break
+					}
+				}
+
+				switch format {
+				case "csv", "csv_bom", "csv-bom":
+					for i, c := range colNames {
+						v := rowMap[c]
+						if v == nil {
+							csvRec[i] = ""
+						} else {
+							csvRec[i] = fmt.Sprintf("%v", v)
+						}
+					}
+					if wErr := cw.Write(csvRec); wErr != nil {
+						streamErr = wErr
+					}
+				case "sql":
+					for i, c := range colNames {
+						sqlVals[i] = sqlbase.FormatLiteralForDialect(sqlbase.DialectPostgres, normalizeDuckJSONNumber(rowMap[c]))
+					}
+					_, streamErr = fmt.Fprintf(bw, "INSERT INTO %s (%s) VALUES (%s);\n", targetTbl, qColList, strings.Join(sqlVals, ", "))
+				case "jsonl":
+					if req.Table != "" {
+						rowMap["__table__"] = req.Table
+					}
+					b, mErr := json.Marshal(rowMap)
+					if mErr != nil {
+						streamErr = mErr
+					} else if _, wErr := bw.Write(b); wErr != nil {
+						streamErr = wErr
+					} else {
+						streamErr = bw.WriteByte('\n')
+					}
+				case "markdown":
+					_, _ = bw.WriteString("| ")
+					for i, c := range colNames {
+						if i > 0 {
+							_, _ = bw.WriteString(" | ")
+						}
+						v := rowMap[c]
+						if v == nil {
+							_, _ = bw.WriteString("`NULL`")
+						} else {
+							_, _ = bw.WriteString(escapeCell(fmt.Sprintf("%v", v)))
+						}
+					}
+					_, streamErr = bw.WriteString(" |\n")
+				case "json":
+					if rowCount > 0 {
+						if err := bw.WriteByte(','); err != nil {
+							streamErr = err
+							break
+						}
+					}
+					streamErr = enc.Encode(rowMap)
+				}
+				if streamErr != nil {
+					break
+				}
+				rowCount++
+				if rowCount%500 == 0 {
+					if cw != nil {
+						cw.Flush()
+						if cw.Error() != nil {
+							streamErr = cw.Error()
+							break
+						}
+					}
+					if fErr := bw.Flush(); fErr != nil {
+						streamErr = fErr
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if stoppedEarly || streamErr != nil {
+		_ = stdoutPipe.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+		if streamErr != nil {
+			return streamErr
+		}
+	} else {
+		if tokErr == nil {
+			_, _ = dec.Token() // consume closing ']'
+		}
+		waitErr := cmd.Wait()
+		if waitErr != nil {
+			msg := strings.TrimSpace(stderr.String())
+			if msg == "" {
+				msg = waitErr.Error()
+			}
+			return errors.New(msg)
+		}
+	}
+
+	if format == "json" {
+		if _, err := bw.WriteString("]\n"); err != nil {
+			return err
+		}
+	}
+	if cw != nil {
+		cw.Flush()
+		if err := cw.Error(); err != nil {
+			return err
+		}
+	}
+	return bw.Flush()
 }
 
 func (d *DuckDBDriver) BatchImport(ctx context.Context, req driver.ImportRequest) (driver.ImportResult, error) {
@@ -1526,7 +1688,7 @@ func (d *DuckDBDriver) BatchImport(ctx context.Context, req driver.ImportRequest
 			batchedStmts = batchedStmts[:0]
 			return nil
 		}
-		err := sqlbase.StreamStatements(req.Reader, func(stmt string) error {
+		err := sqlbase.StreamStatementsForEngine("duckdb", req.Reader, func(stmt string) error {
 			if d.webMode || sqlbase.IsRestrictedWebContext(ctx) {
 				if sbErr := validateDuckDBWebSandbox(stmt); sbErr != nil {
 					return sbErr

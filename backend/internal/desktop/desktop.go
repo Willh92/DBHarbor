@@ -1,13 +1,15 @@
 package desktop
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
-	"time"
+	"syscall"
 )
 
 // WindowConfig holds parameters for launching the native DBHarbor desktop window.
@@ -97,10 +99,15 @@ func runChromelessAppWindowFallback(cfg WindowConfig) error {
 	if err := openSystemDefaultURL(cfg.BootURL); err != nil {
 		return fmt.Errorf("no desktop WebView runtime or browser found: %w", err)
 	}
-	// Keep engine alive while user interacts in fallback browser
-	for {
-		time.Sleep(time.Hour)
-	}
+	// Keep engine alive while user interacts in fallback browser until interrupted
+	waitForShutdownSignal(context.Background())
+	return nil
+}
+
+func waitForShutdownSignal(ctx context.Context) {
+	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	<-sigCtx.Done()
 }
 
 func findChromiumExecutables() []string {

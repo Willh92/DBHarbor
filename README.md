@@ -3,7 +3,7 @@
 **Language**: **English** | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | [日本語](./README.ja.md)
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.4-1677ff.svg)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-v1.0.5-1677ff.svg)](./CHANGELOG.md)
 [![CGO_ENABLED=0](https://img.shields.io/badge/Go-CGO__ENABLED%3D0-00ADD8.svg)](https://github.com/Willh92/DBHarbor.git)
 
 A zero-dependency, single-binary cross-platform Web Database Workbench combining **phpMyAdmin's intuitive visual table & data operations** with **modern multi-engine IDE power**.
@@ -25,7 +25,7 @@ A zero-dependency, single-binary cross-platform Web Database Workbench combining
   - **Browser Ephemeral Local Single-File DBs (`SQLite 3` & `DuckDB`), Navicat-Style Data Grid & Smart SQL Console**: Drag-and-drop or pick local `.db`/`.sqlite`/`.duckdb` files directly in Web Server Edition (**`Open Local DB`**) with Chromium File System Access API **direct save-back to the local file** and one-click binary snapshot downloads; full-height data grid (`CellStateHub` low-memory rendering) with click-to-insert blank rows, batch column editing, single/multi-row TSV clipboard copy & paste (`Ctrl+C` / `Ctrl+V` compatible with Notepad & Excel), plus an embedded tree-shaken Monaco Editor with schema-aware autocomplete, `Ctrl/Cmd + Enter` execution, `EXPLAIN` query plans, SQL formatting, query cancellation (`AbortController`), execution history, and saved snippets.
   - **Streaming Import, Export & SQL Runner**: Full-database & multi-table SQL Dump, single-table/filtered/custom-query/MongoDB/Redis/DuckDB streaming exports & `< 64 KiB` RAM streaming multipart uploads (`SQL`, `CSV-BOM`, `CSV`, `JSON`, `JSONL`, `Markdown`), memory-capped streaming result readers, batched transactional file imports, and direct paste-to-execute multi-statement SQL scripts.
 - **Enterprise Web Server Security, RBAC, Login Branding & Emergency Recovery *(Web Server Edition Only)***:
-  - **Zero-Default-Credential Setup, Login Branding & Anti-Indexing**: First-run **Initial Administrator Setup** wizard (`>= 8` char password, no weak default `admin123`), zero-leakage Sign-In page, customizable browser `<title>`, top emblem (`<= 128 KB` custom logo synced to Favicon), heading & subtitle, plus triple anti-search-engine indexing (`/robots.txt`, `X-Robots-Tag`, `<meta name="robots">`).
+  - **Zero-Default-Credential Setup, Login Branding & Anti-Indexing**: First-run **Initial Administrator Setup** wizard (`>= 8` char password, no weak default `admin123`), zero-leakage Sign-In page, customizable browser `<title>`, top emblem (`<= 128 KB` raster-only logo synced to Favicon), heading & subtitle, plus triple anti-search-engine indexing (`/robots.txt`, `X-Robots-Tag`, `<meta name="robots">`).
   - **Session-First Database Credential Policy & Auth-Failure Re-Prompt**: New credentialed database connections default to **not remembering passwords on disk** (`Remember password` unchecked — credentials stay strictly in per-session memory and prompt on next login, while checking `Remember password` persists them with `AES-256-GCM` encryption; existing remembered connections can also turn off `Remember password` via Edit Connection to immediately wipe stored secrets from disk). Whenever a connection or query fails due to a changed or invalid database username/password, DBHarbor automatically evicts the stale pool and prompts to re-enter credentials with transparent request retry.
   - **Multi-User RBAC, TOTP 2FA & Hardened Sandboxing**: 3-tier RBAC (`Admin` / `Read-Write` / `Read-Only`) with per-user workspace/tab isolation, vault-derived single-use CAPTCHA tokens, `trustedProxies`-aware rate limiting (`HTTP 429`), offline SVG QR code RFC 6238 TOTP 2FA + 8 single-use recovery codes + bounded 2FA attempt limits, verified TLS certificate modes, per-user `<DataDir>/local_databases/u_<hash>/` & `<DataDir>/ephemeral_workspaces/` sandboxing (with lexical SQLite `ATTACH`/file-IO blocking, DuckDB `-safe` mode + `stdin` piping + `enable_external_access = false`, and MariaDB `/*M!...*/` read-only SQL unwrapping), dial-time DNS-rebinding SSRF guard across all remote drivers, reference-counted concurrent connection pool leases, connection-pinned SQL Server `USE [db]`, and persistent `<DataDir>/config.json` with auto-disarming **Emergency Admin Recovery**.
 - **Native Dark Window Theme, Mobile Touch Workbench & Multi-Language UI**:
@@ -64,7 +64,7 @@ npm test
 
 ## Default OS Data Directories, CLI Flags & Persistent `config.json`
 
-DBHarbor **never** writes runtime state into the current startup directory unless explicitly requested via `-data-dir`. By default, internal metadata (`dbharbor.db`) and the AES-256-GCM master key (`.secret.key`) are stored in standard OS application directories:
+DBHarbor **never** writes runtime state into the current startup directory unless explicitly requested via `-data-dir`. By default, internal metadata (`dbharbor.db`) and the AES-256-GCM master key (`.master.key`) are stored in standard OS application directories:
 
 | Platform | User / Desktop Launch | System Service / Daemon |
 | :--- | :--- | :--- |
@@ -84,7 +84,7 @@ Configuration precedence: **`Explicit CLI flags > DBHARBOR_* environment variabl
 | `-unix-socket` | `DBHARBOR_UNIX_SOCKET` | *(empty)* | Listen on Unix Domain Socket instead of TCP (e.g. `/run/dbharbor/dbharbor.sock`) |
 | `-unix-socket-perm` | `DBHARBOR_UNIX_SOCKET_PERM` | `0660` | Octal file mode applied to the Unix Domain Socket |
 | `-unix-socket-group` | `DBHARBOR_UNIX_SOCKET_GROUP` | *(empty)* | POSIX group name or GID assigned to the Unix Domain Socket (e.g. `www-data`, `nginx`) |
-| `-data-dir` | `DBHARBOR_DATA_DIR` | *(OS standard)* | Custom directory for SQLite metadata store, `config.json`, & `.secret.key` |
+| `-data-dir` | `DBHARBOR_DATA_DIR` | *(OS standard)* | Custom directory for SQLite metadata store, `config.json`, & `.master.key` |
 | `-admin-user` | `DBHARBOR_ADMIN_USER` | *(empty — Web Setup)* | Optional headless initial admin username (only used when users table is empty) |
 | `-admin-pass` | `DBHARBOR_ADMIN_PASS` | *(empty — Web Setup)* | Optional headless initial admin password (**min 8 chars**; omit to use Web Setup Wizard) |
 | `-idle-ttl` | `DBHARBOR_IDLE_TTL` | `30` | Idle database connection pool eviction timeout (minutes) |
@@ -138,7 +138,7 @@ If an administrator forgets their password or loses their 2FA device & recovery 
    dbharbor -data-dir /var/lib/dbharbor -recover-admin -recover-pass auto -reset-2fa
    ```
 
-> **Web Server Local File & Network Security Boundary**: DBHarbor's internal metadata (`dbharbor.db`), `config.json`, and encryption keys (`.secret.key`) are always hidden and blocked from database connections. In **Web Server Edition**, non-admin (`Read-Write`) accounts are strictly isolated per user within `<DataDir>/local_databases/u_<hash>/` when browsing or creating server-stored SQLite / DuckDB files, and browser-opened **`Open Local DB`** single-file workspaces are isolated per user in `0700` `<DataDir>/ephemeral_workspaces/` with binary magic-header verification and 12h idle auto-cleanup (with lexical SQLite `ATTACH`/file-IO blocking, DuckDB `-safe` mode + `stdin` SQL piping + `enable_external_access = false` & server-controlled `security.duckdbCliPath`, and dial-time private-network SSRF protection unless `security.allowPrivateNetworkForNonAdmin` is enabled). **Desktop GUI Edition** operates in pure zero-login local mode with full host file access.
+> **Web Server Local File & Network Security Boundary**: DBHarbor's internal metadata (`dbharbor.db`), `config.json`, and encryption keys (`.master.key`) are always hidden and blocked from database connections. In **Web Server Edition**, non-admin (`Read-Write`) accounts are strictly isolated per user within `<DataDir>/local_databases/u_<hash>/` when browsing or creating server-stored SQLite / DuckDB files, and browser-opened **`Open Local DB`** single-file workspaces are isolated per user in `0700` `<DataDir>/ephemeral_workspaces/` with binary magic-header verification and 12h idle auto-cleanup (with lexical SQLite `ATTACH`/file-IO blocking, DuckDB `-safe` mode + `stdin` SQL piping + `enable_external_access = false` & server-controlled `security.duckdbCliPath`, and dial-time private-network SSRF protection unless `security.allowPrivateNetworkForNonAdmin` is enabled). **Desktop GUI Edition** operates in pure zero-login local mode with full host file access.
 
 ---
 

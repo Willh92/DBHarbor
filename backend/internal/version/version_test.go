@@ -1,11 +1,14 @@
 package version
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -282,5 +285,45 @@ func TestMatchPlatformAssetBundlesAndMacApp(t *testing.T) {
 	deskName, _ := matchPlatformAssetForEdition(&rel, "darwin", "arm64", "desktop")
 	if deskName != "DBHarbor-darwin-arm64.app.zip" {
 		t.Fatalf("expected macOS desktop .app.zip asset, got %q", deskName)
+	}
+}
+
+func TestEmbeddedChangelogsInSyncWithVersionAndRoot(t *testing.T) {
+	expectedVersion := NormalizeTag(Version)
+	locales := []string{"en-US", "zh-CN", "zh-TW", "ja-JP"}
+	for _, loc := range locales {
+		md := EmbeddedChangelogForLocale(loc)
+		if strings.TrimSpace(md) == "" {
+			t.Fatalf("EmbeddedChangelogForLocale(%q) returned empty markdown", loc)
+		}
+		if got := parseFirstVersionHeading(md); got != expectedVersion {
+			t.Fatalf("EmbeddedChangelogForLocale(%q) first version heading = %q, want %q", loc, got, expectedVersion)
+		}
+	}
+
+	changelogFiles := []string{
+		"CHANGELOG.md",
+		"CHANGELOG.zh-CN.md",
+		"CHANGELOG.zh-TW.md",
+		"CHANGELOG.ja.md",
+	}
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	for _, fname := range changelogFiles {
+		embeddedPath := fname
+		rootPath := filepath.Join(repoRoot, fname)
+		rootBytes, err := os.ReadFile(rootPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			t.Fatalf("read root %s: %v", rootPath, err)
+		}
+		embeddedBytes, err := os.ReadFile(embeddedPath)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", embeddedPath, err)
+		}
+		if !bytes.Equal(embeddedBytes, rootBytes) {
+			t.Fatalf("embedded %s differs from root %s; run scripts/build.mjs or sync changelogs", embeddedPath, rootPath)
+		}
 	}
 }

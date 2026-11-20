@@ -53,6 +53,7 @@ import type {
   KVStreamInfo,
   WorkspaceTab,
 } from '../../types';
+import { triggerBlobDownload } from '../../utils/download';
 import { formatRawCellText } from '../../utils/tableClipboard';
 import { ResizableTable, calcSmartColumnWidth } from '../common/ResizableTable';
 
@@ -498,14 +499,7 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
         maxKeys: 2000,
       });
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `redis_db${dbIndex}_keys_${new Date().toISOString().slice(0, 10)}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 1500);
+      triggerBlobDownload(blob, `redis_db${dbIndex}_keys_${new Date().toISOString().slice(0, 10)}.json`);
       message.success(t('Exported {count} Redis keys', { count: data.entries?.length || 0 }));
     } catch (err: any) {
       if (!isAuthPromptCancelledError(err)) {
@@ -604,18 +598,20 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
         ? [
             {
               title: t('Actions'),
-              width: detailType === 'stream' ? 68 : 96,
+              width: detailType === 'stream' ? 68 : isMobile ? 112 : 96,
               resizable: false,
               onHeaderCell: () => ({ 'data-copy-skip': 'true' } as any),
               render: (_: any, r: KVCollectionItem) => (
-                <Space size={6} data-copy-skip="true">
+                <Space size={isMobile ? 12 : 6} data-copy-skip="true">
                   {detailType !== 'stream' && (
                     <Button
                       size="small"
                       type="text"
+                      className="dbharbor-touch-target"
                       style={isMobile ? { minWidth: 32, minHeight: 32 } : undefined}
                       icon={<EditOutlined />}
                       title={t('Edit')}
+                      aria-label={t('Edit')}
                       onClick={() => {
                         setEditingItem(r);
                         itemForm.setFieldsValue({
@@ -650,9 +646,11 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
                       size="small"
                       type="text"
                       danger
+                      className="dbharbor-touch-target"
                       style={isMobile ? { minWidth: 32, minHeight: 32 } : undefined}
                       icon={<DeleteOutlined />}
                       title={t('Delete')}
+                      aria-label={t('Delete')}
                     />
                   </Popconfirm>
                 </Space>
@@ -684,7 +682,7 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
           className="dbharbor-redis-left"
           style={isMobile ? { display: mobilePane === 'keys' ? 'flex' : 'none', flex: 1, maxHeight: 'none' } : undefined}
         >
-          <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap', flexShrink: 0, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: isMobile ? 12 : 6, marginBottom: 8, flexWrap: 'wrap', flexShrink: 0, alignItems: 'center' }}>
             <Select
               size={isMobile ? 'middle' : 'small'}
               style={{ width: 108, height: isMobile ? 34 : undefined }}
@@ -713,8 +711,10 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
             <Tooltip title={t('Refresh')}>
               <Button
                 size="small"
+                className="dbharbor-touch-target"
                 style={isMobile ? { width: 34, height: 34, padding: 0 } : undefined}
                 icon={<ReloadOutlined />}
+                aria-label={t('Refresh')}
                 onClick={() => loadKeys()}
               />
             </Tooltip>
@@ -722,9 +722,11 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
               <Tooltip title={t('New Redis Key (DB{db})', { db: dbIndex })}>
                 <Button
                   size="small"
+                  className="dbharbor-touch-target"
                   style={isMobile ? { width: 34, height: 34, padding: 0 } : undefined}
                   type="primary"
                   icon={<PlusOutlined />}
+                  aria-label={t('New Redis Key (DB{db})', { db: dbIndex })}
                   onClick={() => setNewKeyOpen(true)}
                 />
               </Tooltip>
@@ -732,8 +734,10 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
             <Tooltip title={t('Server Tools')}>
               <Button
                 size="small"
+                className="dbharbor-touch-target"
                 style={isMobile ? { width: 34, height: 34, padding: 0 } : undefined}
                 icon={<ToolOutlined />}
+                aria-label={t('Server Tools')}
                 onClick={() => setToolsOpen(true)}
               />
             </Tooltip>
@@ -799,8 +803,10 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
             >
               <Button
                 size="small"
+                className="dbharbor-touch-target"
                 style={isMobile ? { width: 34, height: 34, padding: 0 } : undefined}
                 icon={<MoreOutlined />}
+                aria-label={t('More Actions')}
               />
             </Dropdown>
             {canWrite && (
@@ -808,8 +814,10 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
                 <Tooltip title={t('Import Keys (.json)')}>
                   <Button
                     size="small"
+                    className="dbharbor-touch-target"
                     style={isMobile ? { width: 34, height: 34, padding: 0 } : undefined}
                     icon={<UploadOutlined />}
+                    aria-label={t('Import Keys (.json)')}
                   />
                 </Tooltip>
               </Upload>
@@ -1448,6 +1456,7 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
                       rowKey="name"
                       size="small"
                       pagination={false}
+                      scroll={{ x: 'max-content' }}
                       dataSource={grp.consumerList}
                       columns={[
                         { title: t('Consumer'), dataIndex: 'name', width: 180 },
@@ -1476,7 +1485,7 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
                                       }
                                     }}
                                   >
-                                    <Button size="small" danger type="text" icon={<DeleteOutlined />} />
+                                    <Button size="small" danger type="text" className="dbharbor-touch-target" aria-label={t('Delete')} icon={<DeleteOutlined />} />
                                   </Popconfirm>
                                 ),
                               },
@@ -1505,7 +1514,7 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
                       title: t('Actions'),
                       width: 130,
                       render: (_: any, grp: KVStreamGroup) => (
-                        <Space size={4}>
+                        <Space size={isMobile ? 10 : 4}>
                           <Button
                             size="small"
                             type="link"
@@ -1529,7 +1538,7 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
                               }
                             }}
                           >
-                            <Button size="small" danger type="text" icon={<DeleteOutlined />} />
+                            <Button size="small" danger type="text" className="dbharbor-touch-target" aria-label={t('Delete')} icon={<DeleteOutlined />} />
                           </Popconfirm>
                         </Space>
                       ),
@@ -1714,6 +1723,8 @@ export const RedisBrowserTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
                                 <Button
                                   size="small"
                                   type="text"
+                                  className="dbharbor-touch-target"
+                                  aria-label={t('Edit')}
                                   icon={<EditOutlined />}
                                   onClick={() => setEditingConfig({ key: item.key, value: item.value })}
                                 />

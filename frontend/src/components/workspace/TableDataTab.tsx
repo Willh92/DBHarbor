@@ -45,6 +45,12 @@ import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
 import type { QueryColumn, WorkspaceTab } from '../../types';
 import {
+  escapeSqlFilterValForEngine,
+  formatSqlLiteralForEngine,
+  qualifyTableForEngine,
+  quoteIdentForEngine,
+} from '../../utils/sqlFormat';
+import {
   coercePastedCellValue,
   formatRawCellText,
   parseClipboardTabular,
@@ -80,29 +86,12 @@ const SEARCH_OPS = [
   { value: 'IS NOT NULL', label: 'IS NOT NULL' },
 ];
 
-function escapeSQLVal(raw: string): string {
-  const trimmed = raw.trim();
-  if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
-    return trimmed;
-  }
-  return `'${raw.replace(/'/g, "''")}'`;
-}
-
-function quoteIdentForEngine(dbType: string, ident: string): string {
-  if (['mysql', 'mariadb', 'tidb', 'oceanbase', 'clickhouse'].includes(dbType)) {
-    return `\`${ident.replace(/`/g, '``')}\``;
-  }
-  if (dbType === 'sqlserver') {
-    return `[${ident.replace(/\]/g, ']]')}]`;
-  }
-  return `"${ident.replace(/"/g, '""')}"`;
-}
-
 function formatSelectedRows(
   selectedRows: Record<string, any>[],
   cols: string[],
   mode: 'tsv' | 'tsv_header' | 'csv' | 'json' | 'sql',
-  tableName: string
+  tableName: string,
+  dbType: string
 ): string {
   if (mode === 'tsv') {
     return serializeRowsToTsv(cols, selectedRows, false);
@@ -121,18 +110,12 @@ function formatSelectedRows(
     return JSON.stringify(clean, null, 2);
   }
   if (mode === 'sql') {
-    const colList = cols.map((c) => `"${c}"`).join(', ');
+    const colList = cols.map((c) => quoteIdentForEngine(dbType, c)).join(', ');
+    const qTable = quoteIdentForEngine(dbType, tableName);
     return selectedRows
       .map((r) => {
-        const vals = cols
-          .map((c) => {
-            const v = r[c];
-            if (v === null || v === undefined) return 'NULL';
-            if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-            return `'${String(v).replace(/'/g, "''")}'`;
-          })
-          .join(', ');
-        return `INSERT INTO "${tableName}" (${colList}) VALUES (${vals});`;
+        const vals = cols.map((c) => formatSqlLiteralForEngine(dbType, r[c])).join(', ');
+        return `INSERT INTO ${qTable} (${colList}) VALUES (${vals});`;
       })
       .join('\r\n');
   }
@@ -339,7 +322,7 @@ const GridDataCell = React.memo<{
 
 export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }) => {
   const { t } = useI18n();
-  const { isMobile } = useResponsive();
+  const { isMobile, isCompactHeight } = useResponsive();
   const isActiveTab = useWorkbenchStore((s) => s.activeTabKey === tab.key);
   const isDesktop = useWorkbenchStore((s) => s.isDesktop);
   const role = useWorkbenchStore((s) => s.role);
@@ -723,6 +706,8 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
     [canWrite, displayedColumns, primaryKeys, visibleColumns, updateEditingCell, updateFocusedCell]
   );
 
+  const dissolveTimersRef = useRef<Map<string, number>>(new Map());
+
   const checkDissolveFillerRow = useCallback(
     (rowKey: string, relatedTarget?: EventTarget | null) => {
       if (!rowKey.startsWith('new_')) return;
@@ -734,7 +719,12 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
       if (relatedTarget instanceof Element && checkSameRow(relatedTarget)) {
         return;
       }
-      window.setTimeout(() => {
+      const prevTimer = dissolveTimersRef.current.get(rowKey);
+      if (prevTimer !== undefined) {
+        window.clearTimeout(prevTimer);
+      }
+      const timerId = window.setTimeout(() => {
+        dissolveTimersRef.current.delete(rowKey);
         if (checkSameRow(document.activeElement)) return;
         setNewRows((prev) =>
           prev.filter((r) => {
@@ -744,6 +734,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
           })
         );
       }, 0);
+      dissolveTimersRef.current.set(rowKey, timerId);
     },
     [visibleColumns]
   );
@@ -782,10 +773,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
   const handleExportFiltered = useCallback(() => {
     if (!tab.table) return;
     const q = (ident: string) => quoteIdentForEngine(tab.dbType, ident);
-    const useSchema =
-      Boolean(tab.schema) &&
-      ['postgres', 'kingbase', 'sqlserver', 'oracle', 'dameng'].includes(tab.dbType);
-    const qualified = useSchema ? `${q(tab.schema!)}.${q(tab.table)}` : q(tab.table);
+    const qualified = qualifyTableForEngine(tab.dbType, tab.table, tab.schema);
     let sql = `SELECT * FROM ${qualified}`;
     if (appliedFilter.trim()) {
       sql += ` WHERE ${appliedFilter.trim()}`;
@@ -1036,10 +1024,10 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
             .split(',')
             .map((s) => s.trim())
             .filter(Boolean)
-            .map(escapeSQLVal);
+            .map((s) => escapeSqlFilterValForEngine(tab.dbType, s));
           return items.length > 0 ? `${qCol} IN (${items.join(', ')})` : '';
         }
-        return `${qCol} ${c.op} ${escapeSQLVal(c.value)}`;
+        return `${qCol} ${c.op} ${escapeSqlFilterValForEngine(tab.dbType, c.value)}`;
       })
       .filter(Boolean);
 
@@ -1142,12 +1130,12 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
       const targetRows = explicitRows ?? getRowsForCopy();
       if (targetRows.length === 0) return;
       const colNames = displayedColumns.map((c) => c.name);
-      const out = formatSelectedRows(targetRows, colNames, mode, tab.table || 'table_name');
+      const out = formatSelectedRows(targetRows, colNames, mode, tab.table || 'table_name', tab.dbType);
       writeTextToClipboard(out);
       const label = mode === 'tsv' || mode === 'tsv_header' ? 'TSV' : mode.toUpperCase();
       message.success(t('Copied {count} rows as {mode}', { count: targetRows.length, mode: label }));
     },
-    [getRowsForCopy, displayedColumns, tab.table, t]
+    [getRowsForCopy, displayedColumns, tab.table, tab.dbType, t]
   );
 
   // Fallback copy handler when no DOM range is highlighted (e.g. checkbox-selected rows + Ctrl+C)
@@ -1281,6 +1269,8 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
       if (cellLongPressTimerRef.current !== null) {
         window.clearTimeout(cellLongPressTimerRef.current);
       }
+      dissolveTimersRef.current.forEach((id) => window.clearTimeout(id));
+      dissolveTimersRef.current.clear();
     };
   }, []);
 
@@ -1291,21 +1281,27 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
     const measure = () => {
       if ((window as any).__DBHARBOR_LAYOUT_DRAGGING__) return;
       if (el.clientHeight <= 0) return;
-      el.style.setProperty('--dbharbor-grid-total-h', `${Math.max(180, el.clientHeight - 2)}px`);
+      const availH = Math.max(0, el.clientHeight - 2);
+      const minFloor = isMobile || isCompactHeight ? 84 : 140;
+      const totalGridH = availH > 0 ? Math.max(Math.min(availH, minFloor), availH) : minFloor;
+      el.style.setProperty('--dbharbor-grid-total-h', `${totalGridH}px`);
       const thead = el.querySelector('.ant-table-thead') as HTMLElement | null;
       const headH = thead && thead.offsetHeight > 0 ? thead.offsetHeight : 38;
-      const nextH = Math.max(56, Math.floor(el.clientHeight - headH - 2));
+      const nextH = Math.max(40, Math.floor(el.clientHeight - headH - 2));
       setGridBodyHeight((prev) => (Math.abs(prev - nextH) >= heightThreshold ? nextH : prev));
     };
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     window.addEventListener('dbharbor-layout-settled', measure);
+    const vv = typeof window !== 'undefined' ? window.visualViewport : null;
+    vv?.addEventListener('resize', measure);
     return () => {
       ro.disconnect();
       window.removeEventListener('dbharbor-layout-settled', measure);
+      vv?.removeEventListener('resize', measure);
     };
-  }, [displayedColumns.length, showSearchBuilder, mobileFilterOpen, isMobile]);
+  }, [displayedColumns.length, showSearchBuilder, mobileFilterOpen, isMobile, isCompactHeight]);
 
   const fillerRows = useMemo(() => {
     if (loading || displayedColumns.length === 0) return [];
@@ -1331,7 +1327,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
   const maxRowNum = Math.max(1, (page - 1) * pageSize + rows.length);
   const rowIndexDigits = Math.max(2, String(maxRowNum).length);
   const rowIndexColWidth = isMobile
-    ? (newRows.length > 0 ? 92 : 66) + Math.max(0, rowIndexDigits - 2) * 7
+    ? (newRows.length > 0 ? 104 : 66) + Math.max(0, rowIndexDigits - 2) * 7
     : 76 + Math.max(0, rowIndexDigits - 4) * 7;
 
   const displayedColsRef = useRef(displayedColumns);
@@ -1395,14 +1391,14 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
           ({
             'data-copy-skip': 'true',
             className: 'dbharbor-row-index-cell',
-            style: { paddingInline: 5, overflow: 'hidden' },
+            style: { paddingInline: 5 },
           } as any),
         onCell: (record: Record<string, any>) =>
           record.__isFillerRow
             ? {
                 'data-copy-skip': 'true',
                 className: 'dbharbor-row-index-cell',
-                style: { paddingInline: 5, overflow: 'hidden' },
+                style: { paddingInline: 5 },
                 onClick: () => {
                   if (canWrite) materializeFillerRow();
                 },
@@ -1410,7 +1406,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
             : ({
                 'data-copy-skip': 'true',
                 className: 'dbharbor-row-index-cell',
-                style: { paddingInline: 5, overflow: 'hidden' },
+                style: { paddingInline: 5 },
               } as any),
         render: (_: any, record: Record<string, any>, idx: number) => {
           if (record.__isFillerRow) {
@@ -1439,7 +1435,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
           const rowNumber = (page - 1) * pageSize + (idx - topNewRows.length) + 1;
 
           if (isNew) {
-            const btnDim = isMobile ? 28 : 20;
+            const btnDim = isMobile ? 32 : 20;
             return (
               <div
                 data-copy-skip="true"
@@ -1447,7 +1443,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                   display: 'inline-flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  gap: isMobile ? 4 : 3,
+                  gap: isMobile ? 12 : 3,
                   minHeight: btnDim,
                   whiteSpace: 'nowrap',
                 }}
@@ -1458,9 +1454,10 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                   </Tag>
                 )}
                 <Tooltip title={t('Edit Row in Form / Inspector')}>
-                  <span
-                    role="button"
-                    tabIndex={-1}
+                  <button
+                    type="button"
+                    aria-label={t('Edit Row in Form / Inspector')}
+                    className="dbharbor-touch-target"
                     onClick={(e) => {
                       e.stopPropagation();
                       setInspectSearch('');
@@ -1470,6 +1467,8 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                       width: btnDim,
                       height: btnDim,
                       borderRadius: 6,
+                      border: 'none',
+                      padding: 0,
                       display: 'inline-flex',
                       alignItems: 'center',
                       justifyContent: 'center',
@@ -1484,12 +1483,13 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                     ) : (
                       <ExpandOutlined style={{ fontSize: 11 }} />
                     )}
-                  </span>
+                  </button>
                 </Tooltip>
                 <Tooltip title={t('Remove staged row')}>
-                  <span
-                    role="button"
-                    tabIndex={-1}
+                  <button
+                    type="button"
+                    aria-label={t('Remove staged row')}
+                    className="dbharbor-touch-target"
                     onClick={(e) => {
                       e.stopPropagation();
                       setNewRows((prev) => prev.filter((r) => r.__rowKey !== rk));
@@ -1499,6 +1499,8 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                       width: btnDim,
                       height: btnDim,
                       borderRadius: 6,
+                      border: 'none',
+                      padding: 0,
                       display: 'inline-flex',
                       alignItems: 'center',
                       justifyContent: 'center',
@@ -1509,7 +1511,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                     }}
                   >
                     <CloseOutlined style={{ fontSize: isMobile ? 12 : 10 }} />
-                  </span>
+                  </button>
                 </Tooltip>
               </div>
             );
@@ -1542,9 +1544,9 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                 {rowNumber}
               </span>
               <Tooltip title={t('Inspect Row & JSON')}>
-                <span
-                  role="button"
-                  tabIndex={-1}
+                <button
+                  type="button"
+                  aria-label={t('Inspect Row & JSON')}
                   onClick={(e) => {
                     e.stopPropagation();
                     setInspectSearch('');
@@ -1554,6 +1556,10 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                     width: isMobile ? 26 : 18,
                     height: isMobile ? 26 : 18,
                     borderRadius: isMobile ? 6 : 4,
+                    border: 'none',
+                    background: 'transparent',
+                    color: 'inherit',
+                    padding: 0,
                     display: 'inline-flex',
                     alignItems: 'center',
                     justifyContent: 'center',
@@ -1565,7 +1571,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                   className="dbharbor-row-inspect-btn"
                 >
                   <ExpandOutlined style={{ fontSize: isMobile ? 12 : 11, display: 'block' }} />
-                </span>
+                </button>
               </Tooltip>
             </div>
           );
@@ -1879,7 +1885,9 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
           : `${t('Filter')}: ${col.name} = ${String(cellVal).slice(0, 24)}`,
         onClick: () => {
           const qCol = quoteIdentForEngine(tab.dbType, col.name);
-          applyQuickWhereClause(isNull ? `${qCol} IS NULL` : `${qCol} = ${escapeSQLVal(String(cellVal))}`);
+          applyQuickWhereClause(
+            isNull ? `${qCol} IS NULL` : `${qCol} = ${escapeSqlFilterValForEngine(tab.dbType, String(cellVal))}`
+          );
         },
       },
       {
@@ -1891,7 +1899,9 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
         onClick: () => {
           const qCol = quoteIdentForEngine(tab.dbType, col.name);
           applyQuickWhereClause(
-            isNull ? `${qCol} IS NOT NULL` : `${qCol} != ${escapeSQLVal(String(cellVal))}`
+            isNull
+              ? `${qCol} IS NOT NULL`
+              : `${qCol} != ${escapeSqlFilterValForEngine(tab.dbType, String(cellVal))}`
           );
         },
       },
@@ -2112,12 +2122,12 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
             overflowX: 'auto',
           }}
         >
-          <Space size={6} style={{ flexShrink: 0 }}>
+          <Space size={8} style={{ flexShrink: 0 }}>
             {canWrite && (
               <Space.Compact size="middle">
                 <Button
                   type="primary"
-                  style={{ height: 34, padding: '0 10px' }}
+                  style={{ height: 36, padding: '0 10px' }}
                   icon={<PlusOutlined />}
                   onClick={openFormInsertModal}
                 >
@@ -2165,7 +2175,13 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                     ],
                   }}
                 >
-                  <Button type="primary" style={{ height: 34, width: 28, padding: 0 }} icon={<MoreOutlined />} />
+                  <Button
+                    type="primary"
+                    className="dbharbor-touch-target-y"
+                    style={{ height: 36, width: 42, padding: 0 }}
+                    icon={<MoreOutlined />}
+                    aria-label={t('More Actions')}
+                  />
                 </Dropdown>
               </Space.Compact>
             )}
@@ -2183,6 +2199,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
             {visibleColumns.length > 0 && (
               <Popover trigger="click" placement="bottom" content={columnVisibilityPopoverContent}>
                 <Button
+                  className="dbharbor-touch-target"
                   style={{
                     height: 34,
                     width: hiddenCols.length > 0 ? undefined : 34,
@@ -2190,6 +2207,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                   }}
                   icon={<SettingOutlined />}
                   title={t('Columns')}
+                  aria-label={t('Columns')}
                 >
                   {hiddenCols.length > 0 ? `${displayedColumns.length}/${visibleColumns.length}` : null}
                 </Button>
@@ -2197,25 +2215,35 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
             )}
           </Space>
 
-          <Space size={6} style={{ flexShrink: 0 }}>
+          <Space size={12} style={{ flexShrink: 0 }}>
             {hasActiveFilterOrSort && (
               <Button
+                className="dbharbor-touch-target"
                 style={{ width: 34, height: 34, padding: 0 }}
                 icon={<DownloadOutlined />}
                 onClick={handleExportFiltered}
                 title={t('Export Filtered')}
+                aria-label={t('Export Filtered')}
               />
             )}
             {combinedDataSource.length > 0 && (
               <Dropdown trigger={['click']} menu={{ items: copyMenuItems }} placement="bottomRight">
-                <Button style={{ width: 34, height: 34, padding: 0 }} icon={<CopyOutlined />} title={t('Copy')} />
+                <Button
+                  className="dbharbor-touch-target"
+                  style={{ width: 34, height: 34, padding: 0 }}
+                  icon={<CopyOutlined />}
+                  title={t('Copy')}
+                  aria-label={t('Copy')}
+                />
               </Dropdown>
             )}
             <Button
+              className="dbharbor-touch-target"
               style={{ width: 34, height: 34, padding: 0 }}
               icon={<ReloadOutlined />}
               onClick={() => loadData()}
               title={t('Refresh Data')}
+              aria-label={t('Refresh Data')}
             />
           </Space>
         </div>
@@ -2356,7 +2384,13 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
               </>
             )}
 
-            <Button size="small" icon={<ReloadOutlined />} onClick={() => loadData()} title={t('Refresh Data')} />
+            <Button
+              size="small"
+              icon={<ReloadOutlined />}
+              onClick={() => loadData()}
+              title={t('Refresh Data')}
+              aria-label={t('Refresh Data')}
+            />
           </Space>
 
           <Space.Compact style={{ minWidth: 0, flex: '1 1 240px', maxWidth: 'min(440px, 100%)' }}>
@@ -2525,6 +2559,8 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                     size="small"
                     type="text"
                     danger
+                    className="dbharbor-touch-target"
+                    aria-label={t('Delete')}
                     icon={<DeleteOutlined />}
                     onClick={() => setSearchConds((prev) => prev.filter((x) => x.id !== cond.id))}
                   />
@@ -2701,7 +2737,13 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                   }
                 }}
               >
-                <Button danger style={{ height: 36, minWidth: 40, padding: '0 10px' }} icon={<DeleteOutlined />} />
+                <Button
+                  danger
+                  className="dbharbor-touch-target"
+                  aria-label={t('Delete')}
+                  style={{ height: 36, minWidth: 40, padding: '0 10px' }}
+                  icon={<DeleteOutlined />}
+                />
               </Popconfirm>
             </div>
           )}
@@ -2716,14 +2758,15 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'center',
-          flexWrap: 'nowrap',
+          flexWrap: isMobile ? 'wrap' : 'nowrap',
+          rowGap: 4,
           gap: 8,
           minWidth: 0,
           borderTop: '1px solid rgba(128,128,128,0.15)',
         }}
       >
         {isMobile ? (
-          <Typography.Text type="secondary" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+          <Typography.Text type="secondary" style={{ fontSize: 11, minWidth: 0 }}>
             {t('Total {count} rows', { count: total.toLocaleString() })}
           </Typography.Text>
         ) : (
@@ -2736,7 +2779,18 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
             {t('Tip: Ctrl+C copies clean TSV rows for Notepad/Excel; Ctrl+V pastes single or multiple rows; right-click any cell for quick actions.')}
           </Typography.Text>
         )}
-        <div style={{ flexShrink: 0, marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div
+          style={{
+            flexShrink: 0,
+            marginLeft: 'auto',
+            maxWidth: '100%',
+            display: 'flex',
+            alignItems: 'center',
+            flexWrap: isMobile ? 'wrap' : 'nowrap',
+            justifyContent: isMobile ? 'flex-end' : 'flex-start',
+            gap: 6,
+          }}
+        >
           <Pagination
             size="small"
             simple={isMobile}
@@ -3054,7 +3108,7 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                         ({c.type})
                       </Typography.Text>
                     </Typography.Text>
-                    <Space size={4} style={{ flexShrink: 0 }}>
+                    <Space size={isMobile ? 8 : 4} style={{ flexShrink: 0 }}>
                       {!String(inspectRow.__rowKey || '').startsWith('new_') && (
                         <>
                           <Tag
@@ -3067,7 +3121,9 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                             onClick={() => {
                               const qCol = quoteIdentForEngine(tab.dbType, c.name);
                               applyQuickWhereClause(
-                                isNullVal ? `${qCol} IS NULL` : `${qCol} = ${escapeSQLVal(strVal)}`
+                                isNullVal
+                                  ? `${qCol} IS NULL`
+                                  : `${qCol} = ${escapeSqlFilterValForEngine(tab.dbType, strVal)}`
                               );
                               setInspectRow(null);
                             }}
@@ -3084,7 +3140,9 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                             onClick={() => {
                               const qCol = quoteIdentForEngine(tab.dbType, c.name);
                               applyQuickWhereClause(
-                                isNullVal ? `${qCol} IS NOT NULL` : `${qCol} != ${escapeSQLVal(strVal)}`
+                                isNullVal
+                                  ? `${qCol} IS NOT NULL`
+                                  : `${qCol} != ${escapeSqlFilterValForEngine(tab.dbType, strVal)}`
                               );
                               setInspectRow(null);
                             }}
@@ -3109,6 +3167,8 @@ export const TableDataTab: React.FC<Props> = React.memo(({ tab, onOpenTransfer }
                       <Button
                         type="text"
                         size="small"
+                        className="dbharbor-touch-target"
+                        aria-label={t('Copy')}
                         icon={<CopyOutlined style={{ fontSize: 11 }} />}
                         onClick={() => {
                           writeTextToClipboard(isNullVal ? 'NULL' : strVal);

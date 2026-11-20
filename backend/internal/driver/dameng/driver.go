@@ -142,13 +142,11 @@ func (d *Driver) ListDatabases(ctx context.Context) ([]driver.DatabaseSummary, e
 }
 
 func (d *Driver) CreateDatabase(ctx context.Context, name, _ string) error {
-	_, err := d.db.ExecContext(ctx, "CREATE SCHEMA "+sqlbase.QuoteIdent(sqlbase.DialectDameng, name))
-	return err
+	return sqlbase.Exec(ctx, d.db, "CREATE SCHEMA "+sqlbase.QuoteIdent(sqlbase.DialectDameng, name))
 }
 
 func (d *Driver) CreateSchema(ctx context.Context, _, schema string) error {
-	_, err := d.db.ExecContext(ctx, "CREATE SCHEMA "+sqlbase.QuoteIdent(sqlbase.DialectDameng, schema))
-	return err
+	return sqlbase.Exec(ctx, d.db, "CREATE SCHEMA "+sqlbase.QuoteIdent(sqlbase.DialectDameng, schema))
 }
 
 func (d *Driver) DropSchema(ctx context.Context, _, schema string, cascade bool) error {
@@ -160,8 +158,7 @@ func (d *Driver) DropSchema(ctx context.Context, _, schema string, cascade bool)
 	if cascade {
 		mode = " CASCADE"
 	}
-	_, err := d.db.ExecContext(ctx, "DROP SCHEMA "+sqlbase.QuoteIdent(sqlbase.DialectDameng, schema)+mode)
-	return err
+	return sqlbase.Exec(ctx, d.db, "DROP SCHEMA "+sqlbase.QuoteIdent(sqlbase.DialectDameng, schema)+mode)
 }
 
 func (d *Driver) ListSchemas(ctx context.Context, _ string) ([]string, error) {
@@ -433,8 +430,7 @@ func (d *Driver) BrowseData(ctx context.Context, req driver.BrowseDataRequest) (
 	if err != nil {
 		return res, err
 	}
-	var total int64
-	if d.db.QueryRowContext(ctx, countSQL).Scan(&total) == nil {
+	if total, ok := sqlbase.QueryCount(ctx, d.db, countSQL); ok {
 		res.Total = total
 		res.HasTotal = true
 	}
@@ -453,11 +449,32 @@ func (d *Driver) ApplyRowMutations(ctx context.Context, req driver.RowMutationRe
 
 func (d *Driver) CreateTable(ctx context.Context, req driver.CreateTableRequest) (string, error) {
 	ddl, err := sqlbase.BuildCreateTableDDL(sqlbase.DialectDameng, req)
-	if err != nil || req.PreviewOnly {
+	if err != nil {
 		return ddl, err
 	}
-	_, err = d.db.ExecContext(ctx, ddl)
-	return ddl, err
+	stmts := []string{ddl}
+	idxStmts, idxErr := sqlbase.BuildCreateTableIndexSQLs(sqlbase.DialectDameng, req)
+	if idxErr != nil {
+		return "", idxErr
+	}
+	stmts = append(stmts, idxStmts...)
+
+	tbl := sqlbase.QualifyTable(sqlbase.DialectDameng, "", req.Schema, req.Table)
+	if req.Comment != "" {
+		stmts = append(stmts, fmt.Sprintf("COMMENT ON TABLE %s IS %s", tbl, sqlbase.FormatLiteralForDialect(sqlbase.DialectDameng, req.Comment)))
+	}
+	for _, col := range req.Columns {
+		if col.Comment != "" && strings.TrimSpace(col.Name) != "" {
+			stmts = append(stmts, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s", tbl, sqlbase.QuoteIdent(sqlbase.DialectDameng, col.Name), sqlbase.FormatLiteralForDialect(sqlbase.DialectDameng, col.Comment)))
+		}
+	}
+
+	fullScript := strings.Join(stmts, ";\n")
+	if req.PreviewOnly {
+		return fullScript, nil
+	}
+	err = sqlbase.ExecBatch(ctx, d.db, stmts)
+	return fullScript, err
 }
 
 func (d *Driver) AlterTable(ctx context.Context, req driver.AlterTableRequest) ([]string, error) {
@@ -465,10 +482,8 @@ func (d *Driver) AlterTable(ctx context.Context, req driver.AlterTableRequest) (
 	if err != nil || req.PreviewOnly {
 		return stmts, err
 	}
-	for _, s := range stmts {
-		if _, err := d.db.ExecContext(ctx, s); err != nil {
-			return stmts, err
-		}
+	if err := sqlbase.ExecBatch(ctx, d.db, stmts); err != nil {
+		return stmts, err
 	}
 	return stmts, nil
 }
@@ -483,16 +498,11 @@ func (d *Driver) ManageObject(ctx context.Context, req driver.ObjectActionReques
 	if err != nil {
 		return err
 	}
-	for _, s := range sqls {
-		if _, err := d.db.ExecContext(ctx, s); err != nil {
-			return err
-		}
-	}
-	return nil
+	return sqlbase.ExecBatch(ctx, d.db, sqls)
 }
 
 func (d *Driver) ExecuteSQL(ctx context.Context, _, query string, maxRows int) ([]driver.QueryResult, error) {
-	return sqlbase.ExecuteMultiSQL(ctx, d.db, query, maxRows)
+	return sqlbase.ExecuteMultiSQLForEngine(ctx, d.db, "dameng", query, maxRows)
 }
 
 func (d *Driver) StreamExport(ctx context.Context, req driver.ExportRequest, w io.Writer) error {
@@ -549,15 +559,17 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 	if owner == "" || owner == "DAMENG" {
 		owner = defaultOwner
 	}
+	const maxDamengAutocompleteCols = 25000
 	loadCols := func(targetOwner string) error {
 		if targetOwner == "" {
 			return nil
 		}
-		rows, err := d.db.QueryContext(ctx, `
+		rows, err := sqlbase.Query(ctx, d.db, `
 			SELECT TABLE_NAME, COLUMN_NAME
 			FROM ALL_TAB_COLUMNS
 			WHERE OWNER = ?
 			ORDER BY TABLE_NAME, COLUMN_ID
+			LIMIT 25000
 		`, targetOwner)
 		if err != nil {
 			if sqlbase.IsAuthError("dameng", err) {
@@ -566,10 +578,15 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 			return nil
 		}
 		defer rows.Close()
+		rowCount := 0
 		for rows.Next() {
+			if rowCount >= maxDamengAutocompleteCols {
+				break
+			}
 			var tName, cName string
 			if rows.Scan(&tName, &cName) == nil {
 				meta.Tables[tName] = append(meta.Tables[tName], cName)
+				rowCount++
 			}
 		}
 		return nil
@@ -649,7 +666,7 @@ func (d *Driver) ManagePartition(ctx context.Context, req driver.PartitionAction
 	if req.PreviewOnly {
 		return stmt, nil
 	}
-	_, err := d.db.ExecContext(ctx, stmt)
+	err := sqlbase.Exec(ctx, d.db, stmt)
 	return stmt, err
 }
 

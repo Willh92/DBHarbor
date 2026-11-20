@@ -214,13 +214,11 @@ func (d *Driver) CreateDatabase(ctx context.Context, name, charset string) error
 	if !reValidMySQLCharset.MatchString(charset) {
 		return fmt.Errorf("invalid database charset %q", charset)
 	}
-	_, err := d.db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s CHARACTER SET %s", sqlbase.QuoteIdent(sqlbase.DialectMySQL, name), charset))
-	return err
+	return sqlbase.Exec(ctx, d.db, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s CHARACTER SET %s", sqlbase.QuoteIdent(sqlbase.DialectMySQL, name), charset))
 }
 
 func (d *Driver) DropDatabase(ctx context.Context, name string) error {
-	_, err := d.db.ExecContext(ctx, "DROP DATABASE "+sqlbase.QuoteIdent(sqlbase.DialectMySQL, name))
-	return err
+	return sqlbase.Exec(ctx, d.db, "DROP DATABASE "+sqlbase.QuoteIdent(sqlbase.DialectMySQL, name))
 }
 
 func (d *Driver) ListSchemas(_ context.Context, _ string) ([]string, error) {
@@ -316,7 +314,7 @@ func (d *Driver) GetTableStructure(ctx context.Context, database, _, table strin
 	// DDL
 	var tblName, createDDL string
 	qTbl := sqlbase.QualifyTable(sqlbase.DialectMySQL, database, "", table)
-	if err := d.db.QueryRowContext(ctx, "SHOW CREATE TABLE "+qTbl).Scan(&tblName, &createDDL); err == nil {
+	if err := sqlbase.QueryRow(ctx, d.db, "SHOW CREATE TABLE "+qTbl).Scan(&tblName, &createDDL); err == nil {
 		st.DDL = createDDL
 	}
 
@@ -506,8 +504,7 @@ func (d *Driver) BrowseData(ctx context.Context, req driver.BrowseDataRequest) (
 	if err != nil {
 		return res, err
 	}
-	var total int64
-	if d.db.QueryRowContext(ctx, countSQL).Scan(&total) == nil {
+	if total, ok := sqlbase.QueryCount(ctx, d.db, countSQL); ok {
 		res.Total = total
 		res.HasTotal = true
 	}
@@ -537,7 +534,7 @@ func (d *Driver) CreateTable(ctx context.Context, req driver.CreateTableRequest)
 	if req.PreviewOnly {
 		return ddl, nil
 	}
-	_, err = d.db.ExecContext(ctx, ddl)
+	err = sqlbase.Exec(ctx, d.db, ddl)
 	return ddl, err
 }
 
@@ -549,10 +546,8 @@ func (d *Driver) AlterTable(ctx context.Context, req driver.AlterTableRequest) (
 	if req.PreviewOnly {
 		return stmts, nil
 	}
-	for _, s := range stmts {
-		if _, err := d.db.ExecContext(ctx, s); err != nil {
-			return stmts, err
-		}
+	if err := sqlbase.ExecBatch(ctx, d.db, stmts); err != nil {
+		return stmts, err
 	}
 	return stmts, nil
 }
@@ -566,7 +561,7 @@ func (d *Driver) acquireConnForDB(ctx context.Context, targetDB string) (*sql.Co
 	defaultDB := strings.TrimSpace(d.cfg.Database)
 	switched := false
 	if targetDB != "" {
-		if _, uErr := conn.ExecContext(ctx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectMySQL, targetDB)); uErr != nil {
+		if uErr := sqlbase.Exec(ctx, conn, "USE "+sqlbase.QuoteIdent(sqlbase.DialectMySQL, targetDB)); uErr != nil {
 			_ = conn.Close()
 			return nil, nil, uErr
 		}
@@ -580,7 +575,7 @@ func (d *Driver) acquireConnForDB(ctx context.Context, targetDB string) (*sql.Co
 				_ = conn.Raw(func(_ any) error { return stdsql_driver.ErrBadConn })
 			} else {
 				rCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				_, rErr := conn.ExecContext(rCtx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectMySQL, defaultDB))
+				rErr := sqlbase.Exec(rCtx, conn, "USE "+sqlbase.QuoteIdent(sqlbase.DialectMySQL, defaultDB))
 				cancel()
 				if rErr != nil {
 					_ = conn.Raw(func(_ any) error { return stdsql_driver.ErrBadConn })
@@ -593,7 +588,7 @@ func (d *Driver) acquireConnForDB(ctx context.Context, targetDB string) (*sql.Co
 }
 
 func (d *Driver) ManageObject(ctx context.Context, req driver.ObjectActionRequest) error {
-	sqls, err := sqlbase.BuildObjectActionSQLs(sqlbase.DialectMySQL, req)
+	sqls, err := sqlbase.BuildObjectActionSQLsForEngine(d.variantType, sqlbase.DialectMySQL, req)
 	if err != nil {
 		return err
 	}
@@ -603,19 +598,9 @@ func (d *Driver) ManageObject(ctx context.Context, req driver.ObjectActionReques
 			return cErr
 		}
 		defer cleanup()
-		for _, s := range sqls {
-			if _, err := conn.ExecContext(ctx, s); err != nil {
-				return err
-			}
-		}
-		return nil
+		return sqlbase.ExecBatch(ctx, conn, sqls)
 	}
-	for _, s := range sqls {
-		if _, err := d.db.ExecContext(ctx, s); err != nil {
-			return err
-		}
-	}
-	return nil
+	return sqlbase.ExecBatch(ctx, d.db, sqls)
 }
 
 // PartitionManager implementation for MySQL / MariaDB / TiDB / OceanBase
@@ -678,7 +663,7 @@ func (d *Driver) ManagePartition(ctx context.Context, req driver.PartitionAction
 		stmt = fmt.Sprintf("ALTER TABLE %s OPTIMIZE PARTITION %s", tbl, qPart)
 	case "ADD":
 		expr := strings.TrimSpace(req.Expression)
-		if err := sqlbase.ValidateSQLExpression("partition bound expression", expr); err != nil {
+		if err := sqlbase.ValidateSQLExpressionForEngine(d.variantType, "partition bound expression", expr); err != nil {
 			return "", err
 		}
 		upperExpr := strings.ToUpper(expr)
@@ -695,7 +680,7 @@ func (d *Driver) ManagePartition(ctx context.Context, req driver.PartitionAction
 	if req.PreviewOnly {
 		return stmt, nil
 	}
-	_, err := d.db.ExecContext(ctx, stmt)
+	err := sqlbase.Exec(ctx, d.db, stmt)
 	return stmt, err
 }
 
@@ -705,7 +690,7 @@ func (d *Driver) ExecuteSQL(ctx context.Context, database, query string, maxRows
 		return nil, err
 	}
 	defer cleanup()
-	return sqlbase.ExecuteMultiSQLConn(ctx, conn, query, maxRows)
+	return sqlbase.ExecuteMultiSQLConnForEngine(ctx, conn, d.variantType, query, maxRows)
 }
 
 func (d *Driver) StreamExport(ctx context.Context, req driver.ExportRequest, w io.Writer) error {
@@ -773,9 +758,10 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 	if database == "" {
 		return meta, nil
 	}
-	rows, err := d.db.QueryContext(ctx, `
+	rows, err := sqlbase.Query(ctx, d.db, `
 		SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS
 		WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, ORDINAL_POSITION
+		LIMIT 25000
 	`, database)
 	if err != nil {
 		if sqlbase.IsAuthError(d.variantType, err) {
@@ -784,10 +770,15 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 		return meta, nil
 	}
 	defer rows.Close()
+	rowCount := 0
 	for rows.Next() {
+		if rowCount >= 25000 {
+			break
+		}
 		var t, c string
 		if rows.Scan(&t, &c) == nil {
 			meta.Tables[t] = append(meta.Tables[t], c)
+			rowCount++
 		}
 	}
 	return meta, nil

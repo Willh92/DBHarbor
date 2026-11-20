@@ -23,6 +23,18 @@ export function isDesktopRuntime(): boolean {
   return meta.edition === 'desktop' || meta.authEnabled === false;
 }
 
+export function hasSavedThemeOverride(): boolean {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const saved = localStorage.getItem('dbharbor_theme');
+      return saved === 'dark' || saved === 'light';
+    }
+  } catch {
+    // Ignore storage access errors in restricted webviews
+  }
+  return false;
+}
+
 export function resolveInitialDarkMode(): boolean {
   try {
     if (typeof localStorage !== 'undefined') {

@@ -437,8 +437,7 @@ export const JA_JP_DICT: Record<string, string> = {
   'Regenerated 8 one-time recovery codes (previous codes invalidated)':
     '8個の新しいリカバリコードを生成しました（古いコードは無効化されました）',
   'Current Password': '現在のパスワード',
-  'New Password (min 6 chars, mix case, digits & symbols)': '新しいパスワード（6文字以上、大小英数字・記号の混在推奨）',
-  'Min 6 characters': '6文字以上入力してください',
+  'New Password (min 8 chars, mix case, digits & symbols)': '新しいパスワード（8文字以上、大小英数字・記号の混在推奨）',
   'Confirm New Password': '新しいパスワード（確認）',
   'New passwords do not match': '新しいパスワードが一致しません',
   'Empty': '未入力',
@@ -697,7 +696,6 @@ export const JA_JP_DICT: Record<string, string> = {
   'Apply Paste': '貼り付けを適用',
   'Assign Privileges': '権限を割り当て',
   'Assign or Revoke Database Privileges': 'データベース権限の付与・剥奪',
-  'At least 6 characters': '6 文字以上入力してください',
   'Auth DB': '認証 DB',
   'CASCADE (also drop contained objects)': 'CASCADE（内部オブジェクトも一括削除）',
   'Cannot disable your own active administrator account': '現在ログイン中の自身の管理者アカウントは無効化できません',
@@ -1114,7 +1112,6 @@ export const JA_JP_DICT: Record<string, string> = {
   'Change Account Password': 'アカウントパスワードの変更',
   'Password Security Checklist': 'パスワード安全基準と強度チェック',
   'Password Strength': 'パスワード強度',
-  'At least 8 characters recommended (min 6)': '8文字以上を推奨（最低6文字）',
   'Mix uppercase & lowercase letters': '英大文字と小文字を混在させる',
   'Include numbers & special symbols': '数字と記号を含める',
   'Bcrypt salted hash & multi-device session revocation': 'Bcrypt ソルト付きハッシュ保存・他端末セッション一括失効対応',
@@ -1529,8 +1526,8 @@ export const JA_JP_DICT: Record<string, string> = {
   'UPDATE (SQL Console)': 'UPDATE（SQL コンソールで開く）',
   'CREATE TABLE DDL (Copy)': 'CREATE TABLE DDL（コピー）',
   'Optional': '任意',
-  'Unsupported image format (use PNG, JPG, WebP, GIF, or SVG)':
-    '未対応の画像形式です（PNG、JPG、WebP、GIF、または SVG を使用してください）',
+  'Unsupported image format (use PNG, JPG, WebP, GIF, or ICO)':
+    '未対応の画像形式です（PNG、JPG、WebP、GIF、または ICO を使用してください）',
   'Image file must not exceed 128 KB': '画像ファイルは 128 KB 以下にしてください',
   'Failed to encode image file': '画像ファイルのエンコードに失敗しました',
   'Failed to read image file': '画像ファイルの読み込みに失敗しました',
@@ -1582,4 +1579,5 @@ export const JA_JP_DICT: Record<string, string> = {
   'Embedded file-based database engines do not use server-level user accounts or SQL GRANT tables.':
     '組み込み単一ファイル型データベースエンジンはサーバーレベルのユーザーアカウントや SQL GRANT テーブルを使用しません。',
   'Optional or enter password': '任意、またはパスワードを入力',
+  'Toggle Sidebar': 'サイドバーを切り替え',
 };

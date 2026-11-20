@@ -97,18 +97,6 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
   const reqSeqRef = useRef(0);
   const needsUnlockReloadRef = useRef(false);
 
-  // Sync external database / schema updates when Users & Grants is opened from another database
-  useEffect(() => {
-    if (tab.database && tab.database !== selectedUserDB) {
-      setSelectedUserDB(tab.database);
-      setTargetDB(tab.database);
-      setTargetTable('');
-    }
-    if (tab.schema && tab.schema !== targetSchema) {
-      setTargetSchema(tab.schema);
-    }
-  }, [tab.database, tab.schema]);
-
   // Create User Modal
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -138,6 +126,18 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
   const [redisRules, setRedisRules] = useState('~* +@read +@write -@dangerous');
   const [previewStmts, setPreviewStmts] = useState<string[]>([]);
   const [executingGrant, setExecutingGrant] = useState(false);
+
+  // Sync external database / schema updates when Users & Grants is opened from another database
+  useEffect(() => {
+    if (tab.database) {
+      setSelectedUserDB((prev) => (prev !== tab.database ? tab.database : prev));
+      setTargetDB((prev) => (prev !== tab.database ? tab.database : prev));
+      setTargetTable('');
+    }
+    if (tab.schema) {
+      setTargetSchema((prev) => (prev !== tab.schema ? tab.schema! : prev));
+    }
+  }, [tab.database, tab.schema]);
 
   const loadUsersAndCaps = useCallback(async () => {
     const seq = ++reqSeqRef.current;
@@ -201,7 +201,7 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
     let active = true;
     (async () => {
       try {
-        if (tab.dbType === 'postgres' || tab.dbType === 'kingbase' || tab.dbType === 'sqlserver') {
+        if (tab.dbType === 'postgres' || tab.dbType === 'kingbase' || tab.dbType === 'sqlserver' || tab.dbType === 'mssql') {
           const scList = await api.listSchemas(tab.connectionId, targetDB);
           if (!active) return;
           setAvailableSchemas(scList);
@@ -568,9 +568,9 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
     cols.push({
       title: t('Actions'),
       key: 'actions',
-      width: 280,
+      width: isMobile ? 310 : 280,
       render: (_, rec) => (
-        <Space size={4} wrap>
+        <Space size={isMobile ? [12, 12] : 4} wrap>
           <Button
             size="small"
             type="primary"
@@ -585,6 +585,8 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
               <Tooltip title={t('Change Password')}>
                 <Button
                   size="small"
+                  className="dbharbor-touch-target"
+                  aria-label={t('Change Password')}
                   icon={<KeyOutlined />}
                   onClick={() => {
                     setPwdTarget(rec);
@@ -596,6 +598,8 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
                 <Tooltip title={rec.locked ? t('Unlock Account') : t('Lock Account')}>
                   <Button
                     size="small"
+                    className="dbharbor-touch-target"
+                    aria-label={rec.locked ? t('Unlock Account') : t('Lock Account')}
                     icon={rec.locked ? <UnlockOutlined /> : <LockOutlined />}
                     onClick={() => handleToggleLock(rec)}
                   />
@@ -606,7 +610,13 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
                 okButtonProps={{ danger: true }}
                 onConfirm={() => handleDropUser(rec)}
               >
-                <Button size="small" danger icon={<DeleteOutlined />} />
+                <Button
+                  size="small"
+                  danger
+                  className="dbharbor-touch-target"
+                  aria-label={t('Delete')}
+                  icon={<DeleteOutlined />}
+                />
               </Popconfirm>
             </>
           )}
@@ -652,7 +662,7 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
           <Tag color="geekblue" style={{ margin: 0 }}>
             {tab.connName} ({tab.dbType.toUpperCase()})
           </Tag>
-          {(tab.dbType === 'mongodb' || tab.dbType === 'sqlserver') && databases.length > 0 && (
+          {(tab.dbType === 'mongodb' || tab.dbType === 'sqlserver' || tab.dbType === 'mssql') && databases.length > 0 && (
             <Select
               size="small"
               style={{ minWidth: 150 }}
@@ -663,22 +673,29 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
           )}
         </Space>
 
-        <Space size={6} wrap>
+        <Space size={isMobile ? [12, 10] : 6} wrap style={isMobile ? { width: '100%' } : undefined}>
           <Input
-            size="small"
+            size={isMobile ? 'middle' : 'small'}
             allowClear
             prefix={<SearchOutlined />}
             placeholder={t('Search database accounts or roles...')}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            style={{ width: 220 }}
+            style={{ width: isMobile ? '100%' : 220, maxWidth: '100%' }}
           />
-          <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={loadUsersAndCaps}>
+          <Button
+            size={isMobile ? 'middle' : 'small'}
+            className="dbharbor-touch-target"
+            icon={<ReloadOutlined />}
+            loading={loading}
+            onClick={loadUsersAndCaps}
+          >
             {t('Refresh')}
           </Button>
           {canWrite && (
             <Button
-              size="small"
+              size={isMobile ? 'middle' : 'small'}
+              className="dbharbor-touch-target"
               type="primary"
               icon={<PlusOutlined />}
               onClick={() => {
@@ -704,9 +721,11 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
           size="small"
           bordered
           loading={loading}
+          wrapClassName={isMobile ? 'dbharbor-mobile-table' : undefined}
           rowKey="identity"
           columns={columns}
           dataSource={filteredUsers}
+          scroll={{ x: 'max-content' }}
           pagination={{ pageSize: 50, simple: isMobile, showSizeChanger: !isMobile }}
           locale={{ emptyText: <Empty description={t('No database accounts returned')} /> }}
         />
@@ -890,6 +909,8 @@ export const DbUsersTab: React.FC<Props> = ({ tab }) => {
                           <Button
                             size="small"
                             type="text"
+                            className="dbharbor-touch-target"
+                            aria-label={t('Copy')}
                             icon={<CopyOutlined />}
                             onClick={() => {
                               writeTextToClipboard(g.statement);

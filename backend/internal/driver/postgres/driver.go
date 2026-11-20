@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,13 +65,28 @@ func init() {
 	}
 }
 
+const (
+	maxPGPoolsSoft           = 4
+	maxPGPoolsHard           = 16
+	maxPGAutocompleteColumns = 25000
+)
+
+type pgPoolEntry struct {
+	db      *sql.DB
+	seq     uint64
+	active  int
+	evicted bool
+}
+
 type Driver struct {
 	cfg         driver.ConnectionConfig
 	variantType string
 	productName string
 	defaultPort int
 	mu          sync.Mutex
-	pools       map[string]*sql.DB
+	pools       map[string]*pgPoolEntry
+	poolSeq     uint64
+	openDBFn    func(dbName string) (*sql.DB, error)
 }
 
 func New(cfg driver.ConnectionConfig, variantType, productName string, defaultPort int) (driver.Driver, error) {
@@ -79,60 +95,80 @@ func New(cfg driver.ConnectionConfig, variantType, productName string, defaultPo
 		variantType: variantType,
 		productName: productName,
 		defaultPort: defaultPort,
-		pools:       make(map[string]*sql.DB),
+		pools:       make(map[string]*pgPoolEntry),
 	}
 	initDB := cfg.Database
 	if initDB == "" {
 		initDB = "postgres"
 	}
-	if _, err := d.poolForDB(initDB); err != nil {
+	_, release, err := d.acquirePool(initDB)
+	if err != nil {
 		return nil, err
 	}
+	release()
 	return d, nil
 }
 
-func (d *Driver) poolForDB(dbName string) (*sql.DB, error) {
-	if dbName == "" {
-		dbName = d.cfg.Database
+func (d *Driver) effectiveDefaultDB() string {
+	if strings.TrimSpace(d.cfg.Database) != "" {
+		return d.cfg.Database
 	}
-	if dbName == "" {
-		dbName = "postgres"
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if existing, ok := d.pools[dbName]; ok {
-		return existing, nil
-	}
+	return "postgres"
+}
 
-	if len(d.pools) >= 4 {
-		defaultDB := d.cfg.Database
-		if defaultDB == "" {
-			defaultDB = "postgres"
+func (d *Driver) evictIdlePoolsLocked(defaultDB string, targetCap int, allowDefault bool) {
+	if len(d.pools) <= targetCap {
+		return
+	}
+	type idleItem struct {
+		key   string
+		seq   uint64
+		entry *pgPoolEntry
+	}
+	var secondaryIdle []idleItem
+	var defaultIdle *idleItem
+	for k, entry := range d.pools {
+		if entry == nil || entry.db == nil {
+			delete(d.pools, k)
+			continue
 		}
-		evicted := false
-		for k, oldPool := range d.pools {
-			if k != defaultDB && oldPool.Stats().InUse == 0 {
-				_ = oldPool.Close()
-				delete(d.pools, k)
-				evicted = true
-				break
-			}
+		if entry.active > 0 || entry.db.Stats().InUse != 0 {
+			continue
 		}
-		if !evicted {
-			for k, oldPool := range d.pools {
-				if oldPool.Stats().InUse == 0 {
-					_ = oldPool.Close()
-					delete(d.pools, k)
-					evicted = true
-					break
-				}
-			}
-		}
-		if !evicted && len(d.pools) >= 16 {
-			return nil, errors.New("too many concurrent active PostgreSQL database pools; please retry shortly")
+		if k == defaultDB {
+			defaultIdle = &idleItem{key: k, seq: entry.seq, entry: entry}
+		} else {
+			secondaryIdle = append(secondaryIdle, idleItem{key: k, seq: entry.seq, entry: entry})
 		}
 	}
+	sort.Slice(secondaryIdle, func(i, j int) bool {
+		return secondaryIdle[i].seq < secondaryIdle[j].seq
+	})
+	for _, item := range secondaryIdle {
+		if len(d.pools) <= targetCap {
+			break
+		}
+		item.entry.evicted = true
+		if item.entry.active == 0 && item.entry.db != nil {
+			_ = item.entry.db.Close()
+			item.entry.db = nil
+		}
+		delete(d.pools, item.key)
+	}
+	if allowDefault && len(d.pools) > targetCap && defaultIdle != nil {
+		defaultIdle.entry.evicted = true
+		if defaultIdle.entry.active == 0 && defaultIdle.entry.db != nil {
+			_ = defaultIdle.entry.db.Close()
+			defaultIdle.entry.db = nil
+		}
+		delete(d.pools, defaultIdle.key)
+	}
+}
 
+func (d *Driver) openDBForName(dbName string) (*sql.DB, error) {
+	if d.openDBFn != nil {
+		return d.openDBFn(dbName)
+	}
 	restrictIP := d.cfg.Option("__restrict_internal_ip", "") == "1"
 	host := strings.TrimSpace(d.cfg.Host)
 	if host == "" && !restrictIP {
@@ -161,7 +197,7 @@ func (d *Driver) poolForDB(dbName string) (*sql.DB, error) {
 		db  *sql.DB
 		err error
 	)
-	if d.cfg.Option("__restrict_internal_ip", "") == "1" {
+	if restrictIP {
 		connCfg, pErr := pgx.ParseConfig(u.String())
 		if pErr != nil {
 			return nil, pErr
@@ -175,10 +211,7 @@ func (d *Driver) poolForDB(dbName string) (*sql.DB, error) {
 		}
 	}
 
-	defaultDB := d.cfg.Database
-	if defaultDB == "" {
-		defaultDB = "postgres"
-	}
+	defaultDB := d.effectiveDefaultDB()
 	if dbName == defaultDB {
 		db.SetMaxOpenConns(8)
 		db.SetMaxIdleConns(2)
@@ -188,8 +221,76 @@ func (d *Driver) poolForDB(dbName string) (*sql.DB, error) {
 	}
 	db.SetConnMaxLifetime(15 * time.Minute)
 	db.SetConnMaxIdleTime(3 * time.Minute)
-	d.pools[dbName] = db
 	return db, nil
+}
+
+func (d *Driver) makePoolRelease(entry *pgPoolEntry) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			var toClose *sql.DB
+			d.mu.Lock()
+			if entry.active > 0 {
+				entry.active--
+			}
+			if entry.evicted && entry.active == 0 && entry.db != nil {
+				toClose = entry.db
+				entry.db = nil
+			}
+			d.mu.Unlock()
+			if toClose != nil {
+				_ = toClose.Close()
+			}
+		})
+	}
+}
+
+func (d *Driver) acquirePool(dbName string) (*sql.DB, func(), error) {
+	if dbName == "" {
+		dbName = d.cfg.Database
+	}
+	if dbName == "" {
+		dbName = "postgres"
+	}
+	defaultDB := d.effectiveDefaultDB()
+
+	d.mu.Lock()
+	if d.pools == nil {
+		d.pools = make(map[string]*pgPoolEntry)
+	}
+	if existing, ok := d.pools[dbName]; ok && existing != nil && existing.db != nil && !existing.evicted {
+		d.poolSeq++
+		existing.seq = d.poolSeq
+		existing.active++
+		d.evictIdlePoolsLocked(defaultDB, maxPGPoolsSoft, false)
+		db := existing.db
+		d.mu.Unlock()
+		return db, d.makePoolRelease(existing), nil
+	}
+
+	d.evictIdlePoolsLocked(defaultDB, maxPGPoolsSoft-1, false)
+	if len(d.pools) >= maxPGPoolsHard {
+		d.evictIdlePoolsLocked(defaultDB, maxPGPoolsHard-1, true)
+	}
+	if len(d.pools) >= maxPGPoolsHard {
+		d.mu.Unlock()
+		return nil, nil, errors.New("too many concurrent active PostgreSQL database pools; please retry shortly")
+	}
+
+	db, err := d.openDBForName(dbName)
+	if err != nil {
+		d.mu.Unlock()
+		return nil, nil, err
+	}
+	d.poolSeq++
+	entry := &pgPoolEntry{
+		db:     db,
+		seq:    d.poolSeq,
+		active: 1,
+	}
+	d.pools[dbName] = entry
+	d.mu.Unlock()
+	return db, d.makePoolRelease(entry), nil
 }
 
 func (d *Driver) Meta() driver.DriverMeta {
@@ -199,20 +300,34 @@ func (d *Driver) Meta() driver.DriverMeta {
 
 func (d *Driver) Close() error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	for _, db := range d.pools {
+	var toClose []*sql.DB
+	for k, entry := range d.pools {
+		if entry == nil {
+			delete(d.pools, k)
+			continue
+		}
+		entry.evicted = true
+		if entry.active == 0 && entry.db != nil {
+			toClose = append(toClose, entry.db)
+			entry.db = nil
+		}
+		delete(d.pools, k)
+	}
+	d.pools = map[string]*pgPoolEntry{}
+	d.mu.Unlock()
+	for _, db := range toClose {
 		_ = db.Close()
 	}
-	d.pools = map[string]*sql.DB{}
 	return nil
 }
 
 func (d *Driver) Ping(ctx context.Context) (driver.ServerInfo, error) {
 	start := time.Now()
-	db, err := d.poolForDB("")
+	db, release, err := d.acquirePool("")
 	if err != nil {
 		return driver.ServerInfo{}, err
 	}
+	defer release()
 	var version string
 	if err := db.QueryRowContext(ctx, "SHOW server_version").Scan(&version); err != nil {
 		return driver.ServerInfo{}, err
@@ -225,10 +340,11 @@ func (d *Driver) Ping(ctx context.Context) (driver.ServerInfo, error) {
 }
 
 func (d *Driver) ListDatabases(ctx context.Context) ([]driver.DatabaseSummary, error) {
-	db, err := d.poolForDB("")
+	db, release, err := d.acquirePool("")
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 	rows, err := db.QueryContext(ctx, `
 		SELECT datname, pg_encoding_to_char(encoding), COALESCE(pg_database_size(datname), 0)
 		FROM pg_database WHERE datistemplate = false ORDER BY datname
@@ -251,21 +367,31 @@ func (d *Driver) ListDatabases(ctx context.Context) ([]driver.DatabaseSummary, e
 }
 
 func (d *Driver) CreateDatabase(ctx context.Context, name, _ string) error {
-	db, err := d.poolForDB("")
+	db, release, err := d.acquirePool("")
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, "CREATE DATABASE "+sqlbase.QuoteIdent(sqlbase.DialectPostgres, name))
-	return err
+	defer release()
+	return sqlbase.Exec(ctx, db, "CREATE DATABASE "+sqlbase.QuoteIdent(sqlbase.DialectPostgres, name))
 }
 
 func (d *Driver) DropDatabase(ctx context.Context, name string) error {
 	d.mu.Lock()
+	var dropDB *sql.DB
 	if existing, ok := d.pools[name]; ok {
 		delete(d.pools, name)
-		_ = existing.Close()
+		if existing != nil {
+			existing.evicted = true
+			if existing.active == 0 && existing.db != nil {
+				dropDB = existing.db
+				existing.db = nil
+			}
+		}
 	}
 	d.mu.Unlock()
+	if dropDB != nil {
+		_ = dropDB.Close()
+	}
 
 	adminDBName := "postgres"
 	if strings.EqualFold(d.cfg.Database, name) {
@@ -273,21 +399,21 @@ func (d *Driver) DropDatabase(ctx context.Context, name string) error {
 	} else if d.cfg.Database != "" {
 		adminDBName = d.cfg.Database
 	}
-	db, err := d.poolForDB(adminDBName)
+	db, release, err := d.acquirePool(adminDBName)
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, "DROP DATABASE "+sqlbase.QuoteIdent(sqlbase.DialectPostgres, name))
-	return err
+	defer release()
+	return sqlbase.Exec(ctx, db, "DROP DATABASE "+sqlbase.QuoteIdent(sqlbase.DialectPostgres, name))
 }
 
 func (d *Driver) CreateSchema(ctx context.Context, database, schema string) error {
-	db, err := d.poolForDB(database)
+	db, release, err := d.acquirePool(database)
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, "CREATE SCHEMA IF NOT EXISTS "+sqlbase.QuoteIdent(sqlbase.DialectPostgres, schema))
-	return err
+	defer release()
+	return sqlbase.Exec(ctx, db, "CREATE SCHEMA IF NOT EXISTS "+sqlbase.QuoteIdent(sqlbase.DialectPostgres, schema))
 }
 
 func (d *Driver) DropSchema(ctx context.Context, database, schema string, cascade bool) error {
@@ -295,23 +421,24 @@ func (d *Driver) DropSchema(ctx context.Context, database, schema string, cascad
 	if lower == "" || lower == "pg_catalog" || lower == "information_schema" || strings.HasPrefix(lower, "pg_toast") {
 		return fmt.Errorf("system schema %q cannot be dropped", schema)
 	}
-	db, err := d.poolForDB(database)
+	db, release, err := d.acquirePool(database)
 	if err != nil {
 		return err
 	}
+	defer release()
 	mode := " RESTRICT"
 	if cascade {
 		mode = " CASCADE"
 	}
-	_, err = db.ExecContext(ctx, "DROP SCHEMA "+sqlbase.QuoteIdent(sqlbase.DialectPostgres, schema)+mode)
-	return err
+	return sqlbase.Exec(ctx, db, "DROP SCHEMA "+sqlbase.QuoteIdent(sqlbase.DialectPostgres, schema)+mode)
 }
 
 func (d *Driver) ListSchemas(ctx context.Context, database string) ([]string, error) {
-	db, err := d.poolForDB(database)
+	db, release, err := d.acquirePool(database)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 	rows, err := db.QueryContext(ctx, `
 		SELECT schema_name FROM information_schema.schemata
 		WHERE schema_name NOT LIKE 'pg_%' AND schema_name <> 'information_schema'
@@ -338,10 +465,11 @@ func (d *Driver) ListObjects(ctx context.Context, database, schema string) (driv
 	if schema == "" {
 		schema = "public"
 	}
-	db, err := d.poolForDB(database)
+	db, release, err := d.acquirePool(database)
 	if err != nil {
 		return driver.SchemaObjects{}, err
 	}
+	defer release()
 	res := driver.SchemaObjects{
 		Database:          database,
 		Schema:            schema,
@@ -402,10 +530,11 @@ func (d *Driver) GetTableStructure(ctx context.Context, database, schema, table 
 	if schema == "" {
 		schema = "public"
 	}
-	db, err := d.poolForDB(database)
+	db, release, err := d.acquirePool(database)
 	if err != nil {
 		return driver.TableStructure{}, err
 	}
+	defer release()
 	st := driver.TableStructure{
 		Database:         database,
 		Schema:           schema,
@@ -671,10 +800,11 @@ func (d *Driver) BrowseData(ctx context.Context, req driver.BrowseDataRequest) (
 	if req.Schema == "" {
 		req.Schema = "public"
 	}
-	db, err := d.poolForDB(req.Database)
+	db, release, err := d.acquirePool(req.Database)
 	if err != nil {
 		return driver.QueryResult{}, err
 	}
+	defer release()
 	dataSQL, countSQL, err := sqlbase.BuildBrowseQuery(sqlbase.DialectPostgres, req)
 	if err != nil {
 		return driver.QueryResult{}, err
@@ -683,8 +813,7 @@ func (d *Driver) BrowseData(ctx context.Context, req driver.BrowseDataRequest) (
 	if err != nil {
 		return res, err
 	}
-	var total int64
-	if db.QueryRowContext(ctx, countSQL).Scan(&total) == nil {
+	if total, ok := sqlbase.QueryCount(ctx, db, countSQL); ok {
 		res.Total = total
 		res.HasTotal = true
 	}
@@ -709,10 +838,11 @@ func (d *Driver) ApplyRowMutations(ctx context.Context, req driver.RowMutationRe
 	if req.Schema == "" {
 		req.Schema = "public"
 	}
-	db, err := d.poolForDB(req.Database)
+	db, release, err := d.acquirePool(req.Database)
 	if err != nil {
 		return driver.MutationResult{}, err
 	}
+	defer release()
 	return sqlbase.ApplyMutations(ctx, db, sqlbase.DialectPostgres, req)
 }
 
@@ -724,26 +854,44 @@ func (d *Driver) CreateTable(ctx context.Context, req driver.CreateTableRequest)
 	if err != nil {
 		return "", err
 	}
-	if req.PreviewOnly {
-		return ddl, nil
+	stmts := []string{ddl}
+	idxStmts, idxErr := sqlbase.BuildCreateTableIndexSQLs(sqlbase.DialectPostgres, req)
+	if idxErr != nil {
+		return "", idxErr
 	}
-	db, err := d.poolForDB(req.Database)
-	if err != nil {
-		return ddl, err
-	}
-	if _, err := db.ExecContext(ctx, ddl); err != nil {
-		return ddl, err
-	}
+	stmts = append(stmts, idxStmts...)
+
 	tbl := sqlbase.QualifyTable(sqlbase.DialectPostgres, "", req.Schema, req.Table)
 	if req.Comment != "" {
-		_, _ = db.ExecContext(ctx, fmt.Sprintf("COMMENT ON TABLE %s IS %s", tbl, sqlbase.FormatLiteralForDialect(sqlbase.DialectPostgres, req.Comment)))
+		stmts = append(stmts, fmt.Sprintf("COMMENT ON TABLE %s IS %s", tbl, sqlbase.FormatLiteralForDialect(sqlbase.DialectPostgres, req.Comment)))
 	}
 	for _, col := range req.Columns {
 		if col.Comment != "" && strings.TrimSpace(col.Name) != "" {
-			_, _ = db.ExecContext(ctx, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s", tbl, sqlbase.QuoteIdent(sqlbase.DialectPostgres, col.Name), sqlbase.FormatLiteralForDialect(sqlbase.DialectPostgres, col.Comment)))
+			stmts = append(stmts, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s", tbl, sqlbase.QuoteIdent(sqlbase.DialectPostgres, col.Name), sqlbase.FormatLiteralForDialect(sqlbase.DialectPostgres, col.Comment)))
 		}
 	}
-	return ddl, nil
+
+	fullScript := strings.Join(stmts, ";\n")
+	if req.PreviewOnly {
+		return fullScript, nil
+	}
+	db, release, err := d.acquirePool(req.Database)
+	if err != nil {
+		return fullScript, err
+	}
+	defer release()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fullScript, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := sqlbase.ExecBatch(ctx, tx, stmts); err != nil {
+		return fullScript, err
+	}
+	if err := tx.Commit(); err != nil {
+		return fullScript, err
+	}
+	return fullScript, nil
 }
 
 func (d *Driver) AlterTable(ctx context.Context, req driver.AlterTableRequest) ([]string, error) {
@@ -757,14 +905,13 @@ func (d *Driver) AlterTable(ctx context.Context, req driver.AlterTableRequest) (
 	if req.PreviewOnly {
 		return stmts, nil
 	}
-	db, err := d.poolForDB(req.Database)
+	db, release, err := d.acquirePool(req.Database)
 	if err != nil {
 		return stmts, err
 	}
-	for _, s := range stmts {
-		if _, err := db.ExecContext(ctx, s); err != nil {
-			return stmts, err
-		}
+	defer release()
+	if err := sqlbase.ExecBatch(ctx, db, stmts); err != nil {
+		return stmts, err
 	}
 	return stmts, nil
 }
@@ -773,15 +920,16 @@ func (d *Driver) ManageObject(ctx context.Context, req driver.ObjectActionReques
 	if req.Schema == "" {
 		req.Schema = "public"
 	}
-	db, err := d.poolForDB(req.Database)
+	db, release, err := d.acquirePool(req.Database)
 	if err != nil {
 		return err
 	}
+	defer release()
 	reqCopy := req
 	reqCopy.Database = ""
 	if strings.EqualFold(strings.TrimSpace(reqCopy.ObjectType), "TRIGGER") && strings.TrimSpace(reqCopy.TargetName) == "" {
 		var parentTbl string
-		_ = db.QueryRowContext(ctx, `
+		_ = sqlbase.QueryRow(ctx, db, `
 			SELECT event_object_table FROM information_schema.triggers
 			WHERE trigger_schema = $1 AND trigger_name = $2 LIMIT 1
 		`, reqCopy.Schema, reqCopy.ObjectName).Scan(&parentTbl)
@@ -793,12 +941,7 @@ func (d *Driver) ManageObject(ctx context.Context, req driver.ObjectActionReques
 	if err != nil {
 		return err
 	}
-	for _, s := range sqls {
-		if _, err := db.ExecContext(ctx, s); err != nil {
-			return err
-		}
-	}
-	return nil
+	return sqlbase.ExecBatch(ctx, db, sqls)
 }
 
 // PartitionManager implementation for PostgreSQL / KingbaseES declarative partitioning
@@ -806,10 +949,11 @@ func (d *Driver) ListPartitions(ctx context.Context, database, schema, table str
 	if schema == "" {
 		schema = "public"
 	}
-	db, err := d.poolForDB(database)
+	db, release, err := d.acquirePool(database)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 			child.relname AS part_name,
@@ -872,7 +1016,7 @@ func (d *Driver) ManagePartition(ctx context.Context, req driver.PartitionAction
 		stmt = fmt.Sprintf("ALTER TABLE %s DETACH PARTITION %s", parentTbl, partTbl)
 	case "ATTACH":
 		expr := strings.TrimSpace(req.Expression)
-		if err := sqlbase.ValidateSQLExpression("partition bound specification", expr); err != nil {
+		if err := sqlbase.ValidateSQLExpressionForEngine(d.variantType, "partition bound specification", expr); err != nil {
 			return "", err
 		}
 		upper := strings.ToUpper(expr)
@@ -889,30 +1033,33 @@ func (d *Driver) ManagePartition(ctx context.Context, req driver.PartitionAction
 	if req.PreviewOnly {
 		return stmt, nil
 	}
-	db, err := d.poolForDB(req.Database)
+	db, release, err := d.acquirePool(req.Database)
 	if err != nil {
 		return stmt, err
 	}
-	_, err = db.ExecContext(ctx, stmt)
+	defer release()
+	err = sqlbase.Exec(ctx, db, stmt)
 	return stmt, err
 }
 
 func (d *Driver) ExecuteSQL(ctx context.Context, database, query string, maxRows int) ([]driver.QueryResult, error) {
-	db, err := d.poolForDB(database)
+	db, release, err := d.acquirePool(database)
 	if err != nil {
 		return nil, err
 	}
-	return sqlbase.ExecuteMultiSQL(ctx, db, query, maxRows)
+	defer release()
+	return sqlbase.ExecuteMultiSQLForEngine(ctx, db, d.variantType, query, maxRows)
 }
 
 func (d *Driver) StreamExport(ctx context.Context, req driver.ExportRequest, w io.Writer) error {
 	if req.Schema == "" {
 		req.Schema = "public"
 	}
-	db, err := d.poolForDB(req.Database)
+	db, release, err := d.acquirePool(req.Database)
 	if err != nil {
 		return err
 	}
+	defer release()
 	if strings.TrimSpace(req.CustomSQL) == "" && (strings.TrimSpace(req.Table) == "" || len(req.Tables) > 0) {
 		names := req.Tables
 		if len(names) == 0 {
@@ -966,10 +1113,11 @@ func (d *Driver) BatchImport(ctx context.Context, req driver.ImportRequest) (dri
 	if req.Schema == "" {
 		req.Schema = "public"
 	}
-	db, err := d.poolForDB(req.Database)
+	db, release, err := d.acquirePool(req.Database)
 	if err != nil {
 		return driver.ImportResult{}, err
 	}
+	defer release()
 	return sqlbase.BatchImport(ctx, db, sqlbase.DialectPostgres, req)
 }
 
@@ -982,17 +1130,19 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 	} else if sqlbase.IsAuthError(d.variantType, err) {
 		return meta, err
 	}
-	db, err := d.poolForDB(database)
+	db, release, err := d.acquirePool(database)
 	if err != nil {
 		if sqlbase.IsAuthError(d.variantType, err) {
 			return meta, err
 		}
 		return meta, nil
 	}
-	rows, err := db.QueryContext(ctx, `
+	defer release()
+	rows, err := sqlbase.Query(ctx, db, `
 		SELECT table_name, column_name FROM information_schema.columns
 		WHERE table_schema NOT LIKE 'pg_%' AND table_schema <> 'information_schema'
 		ORDER BY table_name, ordinal_position
+		LIMIT 25000
 	`)
 	if err != nil {
 		if sqlbase.IsAuthError(d.variantType, err) {
@@ -1001,20 +1151,26 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 		return meta, nil
 	}
 	defer rows.Close()
+	rowCount := 0
 	for rows.Next() {
+		if rowCount >= maxPGAutocompleteColumns {
+			break
+		}
 		var t, c string
 		if rows.Scan(&t, &c) == nil {
 			meta.Tables[t] = append(meta.Tables[t], c)
+			rowCount++
 		}
 	}
 	return meta, nil
 }
 
 func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot, error) {
-	db, err := d.poolForDB("")
+	db, release, err := d.acquirePool("")
 	if err != nil {
 		return driver.MonitorSnapshot{}, err
 	}
+	defer release()
 	snap := driver.MonitorSnapshot{
 		Timestamp:      time.Now().Format(time.RFC3339),
 		Metrics:        []driver.MonitorMetric{},
@@ -1076,10 +1232,11 @@ func (d *Driver) GetMonitorSnapshot(ctx context.Context) (driver.MonitorSnapshot
 }
 
 func (d *Driver) KillSession(ctx context.Context, sessionID string) error {
-	db, err := d.poolForDB("")
+	db, release, err := d.acquirePool("")
 	if err != nil {
 		return err
 	}
+	defer release()
 	pid, err := strconv.ParseInt(sessionID, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid PID: %s", sessionID)

@@ -49,6 +49,7 @@ import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
 import type { AuditLogEntry, AuthSession, LoginBrandingConfig, LoginIconMode, SecurityStatus } from '../../types';
+import { triggerBlobDownload } from '../../utils/download';
 import { writeTextToClipboard } from '../../utils/tableClipboard';
 
 interface Props {
@@ -60,8 +61,8 @@ interface Props {
 function calcPasswordStrength(pwd: string): { percent: number; label: string; color: string } {
   if (!pwd) return { percent: 0, label: 'Empty', color: 'rgba(140, 140, 140, 0.85)' };
   let score = 0;
-  if (pwd.length >= 6) score += 25;
-  if (pwd.length >= 10) score += 25;
+  if (pwd.length >= 8) score += 25;
+  if (pwd.length >= 12) score += 25;
   if (/[A-Z]/.test(pwd) && /[a-z]/.test(pwd)) score += 25;
   if (/\d/.test(pwd) && /[^A-Za-z0-9]/.test(pwd)) score += 25;
   else if (/\d/.test(pwd) || /[^A-Za-z0-9]/.test(pwd)) score += 15;
@@ -360,12 +361,7 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
       '',
     ].join('\n');
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `dbharbor-2fa-recovery-codes.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
+    triggerBlobDownload(blob, 'dbharbor-2fa-recovery-codes.txt');
   };
 
   const strength = calcPasswordStrength(newPwdWatch);
@@ -734,8 +730,8 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                       </Form.Item>
                       <Form.Item
                         name="newPassword"
-                        label={t('New Password (min 6 chars, mix case, digits & symbols)')}
-                        rules={[{ required: true, min: 6, message: t('Min 6 characters') }]}
+                        label={t('New Password (min 8 chars, mix case, digits & symbols)')}
+                        rules={[{ required: true, min: 8, message: t('Password must be at least 8 characters') }]}
                         style={{ marginBottom: 14 }}
                       >
                         <Input.Password
@@ -785,7 +781,7 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                       {[
                         {
                           ok: newPwdWatch.length >= 8,
-                          text: t('At least 8 characters recommended (min 6)'),
+                          text: t('At least 8 characters'),
                         },
                         {
                           ok: /[a-z]/.test(newPwdWatch) && /[A-Z]/.test(newPwdWatch),
@@ -1072,7 +1068,7 @@ export const SecurityModal: React.FC<Props> = ({ open, initialTab = '2fa', onClo
                               <input
                                 ref={brandingIconInputRef}
                                 type="file"
-                                accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml"
+                                accept="image/png,image/jpeg,image/webp,image/gif,image/x-icon,image/vnd.microsoft.icon,.ico"
                                 style={{ display: 'none' }}
                                 onChange={handleBrandingFileSelect}
                               />

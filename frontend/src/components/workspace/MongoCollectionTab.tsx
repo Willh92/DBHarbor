@@ -41,6 +41,7 @@ import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
 import type { CollectionSummary, DocIndexInfo, WorkspaceTab } from '../../types';
+import { canonicalSerializeId, extractMongoMutationId, formatMongoIdDisplay } from '../../utils/mongoDocId';
 import { formatRawCellText, writeTextToClipboard } from '../../utils/tableClipboard';
 import { LazyCodeEditor } from '../common/LazyCodeEditor';
 import { ResizableTable, calcSmartColumnWidth } from '../common/ResizableTable';
@@ -59,6 +60,25 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
   const { isMobile } = useResponsive();
   const { t } = useI18n();
   const needsUnlockReloadRef = useRef(false);
+  const isMountedRef = useRef(true);
+  const contextSeqRef = useRef(0);
+  const docsAbortRef = useRef<AbortController | null>(null);
+  const docsReqSeqRef = useRef(0);
+  const metaAbortRef = useRef<AbortController | null>(null);
+  const metaReqSeqRef = useRef(0);
+  const indexesAbortRef = useRef<AbortController | null>(null);
+  const indexesReqSeqRef = useRef(0);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      contextSeqRef.current += 1;
+      docsAbortRef.current?.abort();
+      metaAbortRef.current?.abort();
+      indexesAbortRef.current?.abort();
+    };
+  }, []);
 
   const [collMeta, setCollMeta] = useState<CollectionSummary | null>(null);
   const isView = collMeta?.type === 'view';
@@ -110,8 +130,16 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
 
   const loadCollectionMeta = async () => {
     if (!tab.table) return;
+    metaAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    metaAbortRef.current = ctrl;
+    const seq = ++metaReqSeqRef.current;
+    const ctxSeq = contextSeqRef.current;
     try {
-      const meta = await api.docGetCollectionOptions(tab.connectionId, tab.database, tab.table);
+      const meta = await api.docGetCollectionOptions(tab.connectionId, tab.database, tab.table, ctrl.signal);
+      if (ctrl.signal.aborted || !isMountedRef.current || seq !== metaReqSeqRef.current || ctxSeq !== contextSeqRef.current) {
+        return;
+      }
       setCollMeta(meta);
       if (meta?.type === 'view') {
         setEditViewOn(meta.viewOn || '');
@@ -122,54 +150,86 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
         setEditValidationAction(meta?.validationAction || 'error');
       }
     } catch {
-      // fallback if server restricts listCollections options
+      // fallback if server restricts listCollections options or aborted
     }
   };
 
   const loadDocs = async (p = page, ps = pageSize) => {
     if (!tab.table) return;
+    docsAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    docsAbortRef.current = ctrl;
+    const seq = ++docsReqSeqRef.current;
+    const ctxSeq = contextSeqRef.current;
     setLoading(true);
     try {
-      const res = await api.docFind(tab.connectionId, {
-        database: tab.database,
-        collection: tab.table,
-        filterJson,
-        sortJson,
-        projectionJson: '{}',
-        page: p,
-        pageSize: ps,
-      });
+      const res = await api.docFind(
+        tab.connectionId,
+        {
+          database: tab.database,
+          collection: tab.table,
+          filterJson,
+          sortJson,
+          projectionJson: '{}',
+          page: p,
+          pageSize: ps,
+        },
+        ctrl.signal
+      );
+      if (ctrl.signal.aborted || !isMountedRef.current || seq !== docsReqSeqRef.current || ctxSeq !== contextSeqRef.current) {
+        return;
+      }
       needsUnlockReloadRef.current = false;
       setDocs(res.documents || []);
       setTotal(res.total || 0);
       setSelectedIds([]);
     } catch (err: any) {
+      if (err?.name === 'AbortError' || ctrl.signal.aborted || !isMountedRef.current || ctxSeq !== contextSeqRef.current) {
+        return;
+      }
       if (isAuthPromptCancelledError(err)) {
         needsUnlockReloadRef.current = true;
       } else {
         message.error(err.message);
       }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current && seq === docsReqSeqRef.current && ctxSeq === contextSeqRef.current && !ctrl.signal.aborted) {
+        setLoading(false);
+      }
     }
   };
 
   const loadIndexes = async () => {
     if (!tab.table) return;
+    indexesAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    indexesAbortRef.current = ctrl;
+    const seq = ++indexesReqSeqRef.current;
+    const ctxSeq = contextSeqRef.current;
     try {
-      const list = await api.docListIndexes(tab.connectionId, tab.database, tab.table);
+      const list = await api.docListIndexes(tab.connectionId, tab.database, tab.table, ctrl.signal);
+      if (ctrl.signal.aborted || !isMountedRef.current || seq !== indexesReqSeqRef.current || ctxSeq !== contextSeqRef.current) {
+        return;
+      }
       setIndexes(list || []);
     } catch {
-      // ignore index fetch error on views or restricted users
+      // ignore index fetch error on views, restricted users, or aborts
     }
   };
 
   useEffect(() => {
+    contextSeqRef.current += 1;
     setPage(1);
     setCmdResult('');
     loadCollectionMeta();
     loadDocs(1, pageSize);
     loadIndexes();
+    return () => {
+      contextSeqRef.current += 1;
+      docsAbortRef.current?.abort();
+      metaAbortRef.current?.abort();
+      indexesAbortRef.current?.abort();
+    };
   }, [tab.connectionId, tab.database, tab.table]);
 
   useEffect(() => {
@@ -181,20 +241,44 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
     }
   }, [connUnlocked, treeRefreshTick]);
 
+  const docRowMetaMap = useMemo(() => {
+    const map = new WeakMap<
+      Record<string, any>,
+      { reactKey: string; mutationId: string | null; displayId: string }
+    >();
+    const seen = new Map<string, number>();
+    for (const doc of docs) {
+      const base = canonicalSerializeId(doc._id);
+      const occ = seen.get(base) ?? 0;
+      seen.set(base, occ + 1);
+      map.set(doc, {
+        reactKey: `${base}#${occ}`,
+        mutationId: extractMongoMutationId(doc._id),
+        displayId: formatMongoIdDisplay(doc._id),
+      });
+    }
+    return map;
+  }, [docs]);
+
   const handleSaveDoc = async () => {
     if (!tab.table || !canMutateDocs) return;
+    const ctxSeq = contextSeqRef.current;
     try {
       if (editingId) {
         await api.docUpdate(tab.connectionId, tab.database, tab.table, editingId, docJsonText);
+        if (!isMountedRef.current || ctxSeq !== contextSeqRef.current) return;
         message.success(t('Document updated'));
       } else {
         await api.docInsert(tab.connectionId, tab.database, tab.table, docJsonText);
+        if (!isMountedRef.current || ctxSeq !== contextSeqRef.current) return;
         message.success(t('Document inserted'));
       }
       setDocModalOpen(false);
       loadDocs();
     } catch (err: any) {
-      message.error(err.message);
+      if (isMountedRef.current && ctxSeq === contextSeqRef.current) {
+        message.error(err.message);
+      }
     }
   };
 
@@ -208,12 +292,24 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
 
   const handleBatchDelete = async () => {
     if (!tab.table || !canMutateDocs || selectedIds.length === 0) return;
+    const selectedSet = new Set(selectedIds.map(String));
+    const mutationIds = docs
+      .map((doc) => docRowMetaMap.get(doc))
+      .filter((m): m is { reactKey: string; mutationId: string; displayId: string } =>
+        Boolean(m && selectedSet.has(m.reactKey) && m.mutationId)
+      )
+      .map((m) => m.mutationId);
+    if (mutationIds.length === 0) return;
+    const ctxSeq = contextSeqRef.current;
     try {
-      await api.docDelete(tab.connectionId, tab.database, tab.table, selectedIds.map(String));
-      message.success(t('Deleted {count} documents', { count: selectedIds.length }));
+      await api.docDelete(tab.connectionId, tab.database, tab.table, mutationIds);
+      if (!isMountedRef.current || ctxSeq !== contextSeqRef.current) return;
+      message.success(t('Deleted {count} documents', { count: mutationIds.length }));
       loadDocs();
     } catch (err: any) {
-      message.error(err.message);
+      if (isMountedRef.current && ctxSeq === contextSeqRef.current) {
+        message.error(err.message);
+      }
     }
   };
 
@@ -265,6 +361,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
 
   const handleSaveViewPipeline = async () => {
     if (!tab.table || !canWrite) return;
+    const ctxSeq = contextSeqRef.current;
     setSavingOptions(true);
     try {
       await api.docUpdateCollectionOptions(tab.connectionId, {
@@ -273,20 +370,24 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
         viewOn: editViewOn.trim(),
         pipelineJson: editPipelineJson,
       });
+      if (!isMountedRef.current || ctxSeq !== contextSeqRef.current) return;
       message.success(t('View pipeline updated'));
       await loadCollectionMeta();
       await loadDocs(1, pageSize);
     } catch (err: any) {
-      if (!isAuthPromptCancelledError(err)) {
+      if (isMountedRef.current && ctxSeq === contextSeqRef.current && !isAuthPromptCancelledError(err)) {
         message.error(err.message);
       }
     } finally {
-      setSavingOptions(false);
+      if (isMountedRef.current && ctxSeq === contextSeqRef.current) {
+        setSavingOptions(false);
+      }
     }
   };
 
   const handleSaveValidation = async () => {
     if (!tab.table || !canWrite) return;
+    const ctxSeq = contextSeqRef.current;
     setSavingOptions(true);
     try {
       await api.docUpdateCollectionOptions(tab.connectionId, {
@@ -296,14 +397,17 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
         validationLevel: editValidationLevel,
         validationAction: editValidationAction,
       });
+      if (!isMountedRef.current || ctxSeq !== contextSeqRef.current) return;
       message.success(t('Collection validation rules updated'));
       await loadCollectionMeta();
     } catch (err: any) {
-      if (!isAuthPromptCancelledError(err)) {
+      if (isMountedRef.current && ctxSeq === contextSeqRef.current && !isAuthPromptCancelledError(err)) {
         message.error(err.message);
       }
     } finally {
-      setSavingOptions(false);
+      if (isMountedRef.current && ctxSeq === contextSeqRef.current) {
+        setSavingOptions(false);
+      }
     }
   };
 
@@ -347,18 +451,21 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
       {
         title: t('Actions'),
         key: '__actions',
-        width: canMutateDocs ? 116 : 56,
+        width: canMutateDocs ? (isMobile ? 140 : 116) : 56,
         resizable: false,
         onHeaderCell: () => ({ 'data-copy-skip': 'true' } as any),
         render: (_: any, doc: Record<string, any>) => {
-          const idStr = String(doc._id ?? '');
+          const meta = docRowMetaMap.get(doc);
+          const mutationId = meta ? meta.mutationId : extractMongoMutationId(doc._id);
           return (
-            <Space size={2} data-copy-skip="true">
+            <Space size={isMobile ? 12 : 2} data-copy-skip="true">
               <Button
                 size="small"
                 type="text"
+                className="dbharbor-touch-target"
                 icon={<CopyOutlined />}
                 title={t('Copy JSON')}
+                aria-label={t('Copy JSON')}
                 onClick={() => {
                   writeTextToClipboard(JSON.stringify(doc, null, 2));
                   message.success(t('Copied to clipboard'));
@@ -369,10 +476,14 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                   <Button
                     size="small"
                     type="text"
+                    className="dbharbor-touch-target"
+                    disabled={!mutationId}
                     icon={<EditOutlined />}
                     title={t('Edit')}
+                    aria-label={t('Edit')}
                     onClick={() => {
-                      setEditingId(idStr);
+                      if (!mutationId) return;
+                      setEditingId(mutationId);
                       setDocJsonText(JSON.stringify(doc, null, 2));
                       setDocModalOpen(true);
                     }}
@@ -380,8 +491,10 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                   <Button
                     size="small"
                     type="text"
+                    className="dbharbor-touch-target"
                     icon={<PlusOutlined />}
                     title={t('Clone Document')}
+                    aria-label={t('Clone Document')}
                     onClick={() => handleCloneDocument(doc)}
                   />
                 </>
@@ -391,7 +504,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
         },
       },
     ];
-  }, [docs, canMutateDocs, t]);
+  }, [docs, canMutateDocs, docRowMetaMap, isMobile, t]);
 
   return (
     <div style={{ padding: isMobile ? 6 : 12, height: '100%', minWidth: 0, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}>
@@ -489,9 +602,11 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
             >
               <Button
                 size="small"
-                style={{ width: 32, height: 32, padding: 0, marginLeft: 4 }}
+                className="dbharbor-touch-target"
+                style={{ width: 34, height: 34, padding: 0, marginLeft: 8 }}
                 icon={<MoreOutlined />}
                 title={t('Actions')}
+                aria-label={t('Actions')}
               />
             </Dropdown>
           ) : (
@@ -614,7 +729,10 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                   )}
                   <Button
                     size="small"
+                    className="dbharbor-touch-target"
                     style={isMobile ? { width: 34, height: 34, padding: 0 } : undefined}
+                    aria-label={t('Refresh Data')}
+                    title={t('Refresh Data')}
                     icon={<ReloadOutlined />}
                     onClick={() => {
                       loadCollectionMeta();
@@ -635,10 +753,15 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                 {viewMode === 'json' ? (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {docs.map((doc, i) => {
-                      const idStr = String(doc._id ?? i);
+                      const meta = docRowMetaMap.get(doc) ?? {
+                        reactKey: `${canonicalSerializeId(doc._id)}#${i}`,
+                        mutationId: extractMongoMutationId(doc._id),
+                        displayId: formatMongoIdDisplay(doc._id),
+                      };
+                      const canEditRow = Boolean(meta.mutationId);
                       return (
                         <div
-                          key={idStr}
+                          key={meta.reactKey}
                           style={{
                             padding: '8px 12px',
                             borderRadius: 8,
@@ -648,12 +771,12 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, flexWrap: 'wrap', gap: 6, minWidth: 0 }}>
                             <Tag
                               color="green"
-                              title={idStr}
+                              title={meta.displayId}
                               style={{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                             >
-                              _id: {idStr}
+                              _id: {meta.displayId}
                             </Tag>
-                            <Space size={4}>
+                            <Space size={isMobile ? [10, 8] : 4} wrap>
                               <Button
                                 size="small"
                                 type="link"
@@ -678,9 +801,11 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                                   <Button
                                     size="small"
                                     type="link"
+                                    disabled={!canEditRow}
                                     icon={<EditOutlined />}
                                     onClick={() => {
-                                      setEditingId(idStr);
+                                      if (!meta.mutationId) return;
+                                      setEditingId(meta.mutationId);
                                       setDocJsonText(JSON.stringify(doc, null, 2));
                                       setDocModalOpen(true);
                                     }}
@@ -689,17 +814,31 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                                   </Button>
                                   <Popconfirm
                                     title={t('Delete this document?')}
+                                    disabled={!canEditRow}
                                     onConfirm={async () => {
+                                      if (!meta.mutationId) return;
+                                      const ctxSeq = contextSeqRef.current;
                                       try {
-                                        await api.docDelete(tab.connectionId, tab.database, tab.table || '', [idStr]);
+                                        await api.docDelete(tab.connectionId, tab.database, tab.table || '', [meta.mutationId]);
+                                        if (!isMountedRef.current || ctxSeq !== contextSeqRef.current) return;
                                         message.success(t('Document deleted'));
                                         loadDocs();
                                       } catch (err: any) {
-                                        message.error(err.message);
+                                        if (isMountedRef.current && ctxSeq === contextSeqRef.current) {
+                                          message.error(err.message);
+                                        }
                                       }
                                     }}
                                   >
-                                    <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+                                    <Button
+                                      size="small"
+                                      type="text"
+                                      danger
+                                      disabled={!canEditRow}
+                                      className="dbharbor-touch-target"
+                                      aria-label={t('Delete')}
+                                      icon={<DeleteOutlined />}
+                                    />
                                   </Popconfirm>
                                 </>
                               )}
@@ -717,13 +856,14 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                     size="small"
                     bordered
                     loading={loading}
-                    rowKey={(r, idx) => String(r._id ?? idx)}
+                    rowKey={(r, idx) => docRowMetaMap.get(r)?.reactKey ?? `${canonicalSerializeId(r._id)}#${idx ?? 0}`}
                     rowSelection={
                       canMutateDocs
                         ? {
                             columnWidth: isMobile ? 38 : 40,
                             selectedRowKeys: selectedIds,
                             onChange: setSelectedIds,
+                            getCheckboxProps: (r) => ({ disabled: !docRowMetaMap.get(r)?.mutationId }),
                           }
                         : undefined
                     }
@@ -862,15 +1002,27 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                                       <Popconfirm
                                         title={t('Drop index {name}?', { name: r.name })}
                                         onConfirm={async () => {
+                                          const ctxSeq = contextSeqRef.current;
                                           try {
                                             await api.docDropIndex(tab.connectionId, tab.database, tab.table || '', r.name);
-                                            loadIndexes();
+                                            if (isMountedRef.current && ctxSeq === contextSeqRef.current) {
+                                              loadIndexes();
+                                            }
                                           } catch (err: any) {
-                                            message.error(err.message);
+                                            if (isMountedRef.current && ctxSeq === contextSeqRef.current) {
+                                              message.error(err.message);
+                                            }
                                           }
                                         }}
                                       >
-                                        <Button size="small" danger type="text" icon={<DeleteOutlined />} />
+                                        <Button
+                                          size="small"
+                                          danger
+                                          type="text"
+                                          className="dbharbor-touch-target"
+                                          aria-label={t('Delete')}
+                                          icon={<DeleteOutlined />}
+                                        />
                                       </Popconfirm>
                                     ) : null,
                                 },
@@ -985,11 +1137,16 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                   type="primary"
                   icon={<PlayCircleOutlined />}
                   onClick={async () => {
+                    const ctxSeq = contextSeqRef.current;
                     try {
                       const res = await api.docRunCommand(tab.connectionId, tab.database, cmdText);
-                      setCmdResult(JSON.stringify(res.result, null, 2));
+                      if (isMountedRef.current && ctxSeq === contextSeqRef.current) {
+                        setCmdResult(JSON.stringify(res.result, null, 2));
+                      }
                     } catch (err: any) {
-                      message.error(err.message);
+                      if (isMountedRef.current && ctxSeq === contextSeqRef.current) {
+                        message.error(err.message);
+                      }
                     }
                   }}
                 >
@@ -1015,7 +1172,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
         onOk={handleSaveDoc}
       >
         {docModalOpen && (
-          <div style={{ height: 'min(340px, calc(100vh - 210px))', minHeight: 160, border: '1px solid rgba(128,128,128,0.22)', borderRadius: 6, overflow: 'hidden' }}>
+          <div style={{ height: 'min(340px, calc(100dvh - 210px))', minHeight: 160, border: '1px solid rgba(128,128,128,0.22)', borderRadius: 6, overflow: 'hidden' }}>
             <LazyCodeEditor
               language="json"
               darkMode={darkMode}
@@ -1036,6 +1193,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
         okText={t('Import Text')}
         onOk={async () => {
           if (!tab.table || !importText.trim()) return;
+          const ctxSeq = contextSeqRef.current;
           setImporting(true);
           try {
             const res = await api.docImportText(tab.connectionId, {
@@ -1044,13 +1202,18 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
               content: importText,
               continueOnError: importContinueOnError,
             });
+            if (!isMountedRef.current || ctxSeq !== contextSeqRef.current) return;
             message.success(t('Imported {count} documents', { count: res.importedRows }));
             setImportOpen(false);
             loadDocs(1, pageSize);
           } catch (err: any) {
-            message.error(err.message);
+            if (isMountedRef.current && ctxSeq === contextSeqRef.current) {
+              message.error(err.message);
+            }
           } finally {
-            setImporting(false);
+            if (isMountedRef.current && ctxSeq === contextSeqRef.current) {
+              setImporting(false);
+            }
           }
         }}
       >
@@ -1061,6 +1224,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
               accept=".json,.jsonl,.ndjson"
               beforeUpload={async (file) => {
                 if (!tab.table) return false;
+                const ctxSeq = contextSeqRef.current;
                 setImporting(true);
                 try {
                   const res = await api.docImportFile(tab.connectionId, {
@@ -1069,13 +1233,18 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                     file,
                     continueOnError: importContinueOnError,
                   });
+                  if (!isMountedRef.current || ctxSeq !== contextSeqRef.current) return false;
                   message.success(t('Imported {count} documents', { count: res.importedRows }));
                   setImportOpen(false);
                   loadDocs(1, pageSize);
                 } catch (err: any) {
-                  message.error(err.message);
+                  if (isMountedRef.current && ctxSeq === contextSeqRef.current) {
+                    message.error(err.message);
+                  }
                 } finally {
-                  setImporting(false);
+                  if (isMountedRef.current && ctxSeq === contextSeqRef.current) {
+                    setImporting(false);
+                  }
                 }
                 return false;
               }}
@@ -1127,6 +1296,7 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
         onCancel={() => setIdxModalOpen(false)}
         destroyOnClose
         onOk={async () => {
+          const ctxSeq = contextSeqRef.current;
           try {
             const vals = await idxForm.validateFields();
             setIdxSubmitting(true);
@@ -1141,13 +1311,18 @@ export const MongoCollectionTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => 
                 typeof vals.expireAfterSeconds === 'number' ? vals.expireAfterSeconds : undefined,
               partialFilterJson: vals.partialFilterJson?.trim() || undefined,
             });
+            if (!isMountedRef.current || ctxSeq !== contextSeqRef.current) return;
             message.success(t('Index created'));
             setIdxModalOpen(false);
             loadIndexes();
           } catch (err: any) {
-            if (!err?.errorFields) message.error(err.message);
+            if (isMountedRef.current && ctxSeq === contextSeqRef.current && !err?.errorFields) {
+              message.error(err.message);
+            }
           } finally {
-            setIdxSubmitting(false);
+            if (isMountedRef.current && ctxSeq === contextSeqRef.current) {
+              setIdxSubmitting(false);
+            }
           }
         }}
       >

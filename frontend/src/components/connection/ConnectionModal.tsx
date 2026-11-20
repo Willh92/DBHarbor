@@ -49,20 +49,24 @@ const PRESET_BADGE_COLORS = [
 
 const ColorSwatchPicker: React.FC<{ value?: string; onChange?: (hex: string) => void }> = ({ value, onChange }) => {
   const darkMode = useWorkbenchStore((s) => s.darkMode);
+  const { isMobile } = useResponsive();
   const hex = typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value) ? value : '#1677ff';
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', minHeight: 32 }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 10 : 5, flexWrap: 'wrap', minHeight: 32 }}>
       {PRESET_BADGE_COLORS.map((c) => {
         const active = hex.toLowerCase() === c.toLowerCase();
         return (
           <button
             key={c}
             type="button"
+            className="dbharbor-touch-target"
+            aria-label={c}
+            aria-pressed={active}
             onClick={() => onChange?.(c)}
             title={c}
             style={{
-              width: 18,
-              height: 18,
+              width: isMobile ? 24 : 18,
+              height: isMobile ? 24 : 18,
               padding: 0,
               borderRadius: 4,
               background: c,
@@ -363,17 +367,17 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
             justifyContent: 'space-between',
             alignItems: 'center',
             flexWrap: 'wrap',
-            gap: isMobile ? 6 : 8,
+            gap: isMobile ? 12 : 8,
           }}
         >
-          <Button size={isMobile ? 'small' : 'middle'} icon={<ThunderboltOutlined />} loading={testing} onClick={handleTest}>
+          <Button className="dbharbor-touch-target" icon={<ThunderboltOutlined />} loading={testing} onClick={handleTest}>
             {t('Test Connection')}
           </Button>
-          <Space size={isMobile ? 6 : 8}>
-            <Button size={isMobile ? 'small' : 'middle'} onClick={onClose}>
+          <Space size={isMobile ? 12 : 8}>
+            <Button className="dbharbor-touch-target" onClick={onClose}>
               {t('Cancel')}
             </Button>
-            <Button size={isMobile ? 'small' : 'middle'} type="primary" loading={saving} onClick={handleSave}>
+            <Button className="dbharbor-touch-target" type="primary" loading={saving} onClick={handleSave}>
               {t('Save Connection')}
             </Button>
           </Space>
@@ -714,6 +718,7 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
                 disabled={!fsData?.parentDir}
                 onClick={() => fsData?.parentDir && loadFSDir(fsData.parentDir, fsShowAll)}
                 title={t('Parent Folder')}
+                aria-label={t('Parent Folder')}
               />
               <Input
                 autoComplete="off"
@@ -727,6 +732,7 @@ export const ConnectionModal: React.FC<Props> = ({ open, editing, onClose, onSav
             <Space size={4}>
               <Switch
                 size="small"
+                aria-label={t('All files')}
                 checked={fsShowAll}
                 onChange={(checked) => {
                   setFsShowAll(checked);

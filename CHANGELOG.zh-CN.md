@@ -4,6 +4,24 @@
 
 DBHarbor 的所有重要版本变更均记录于此文件，并与 GitHub 仓库 [Willh92/DBHarbor](https://github.com/Willh92/DBHarbor.git) 保持同步。
 
+## [v1.0.5] - 2026-11-20
+
+### SQL 方言安全守卫、多引擎流式/索引增强、前端生命周期与移动端/主题一致性及 CodeQL 零告警发布
+- **后端安全边界与 SQL 方言守卫加固**：
+  - **只读守卫与方言词法加固**：封堵 `sqlbase.IsReadOnlySafeStatement` 中带 Schema 限定符的 `PRAGMA`（如 `PRAGMA main.wal_checkpoint(...)`）只读绕过路径；加固按方言隔离的词法扫描器（`DollarQuotes`、`/*M!` / `/*!99999` 可执行注释、`NestedBlockComments`、`HashComments`、Oracle `q'...'` `AlternativeQuotes`）、列类型校验（`sqlmeta.ValidateColumnTypeForEngine`）以及按引擎隔离的 SQLite 表达式校验（`ValidateSQLExpressionForEngine`）。
+  - **DuckDB Web 沙箱对齐**：将 `driver/sqlite/duckdb.go`（`validateDuckDBWebSandbox`）与 `sqlbase/ddlguard.go` 全面对齐，拦截 `FROM ('...')` 表函数读取、`PRAGMA`、`CALL`、`READ_XLSX` / `ST_READ` / `GLOB` / `LS`、`DESC`、`PIVOT` / `UNPIVOT` 及 `FROM VALUES` 等外部文件/沙箱绕过。
+  - **认证、登录品牌、TLS、上传与桌面端规范**：将 `NormalizeAndValidateLoginBranding` 收紧为仅允许光栅图片格式及魔数校验（彻底封堵 SVG XSS）；统一 `Store.CreateUser` 与 `AdminResetPassword` 至少 `8` 位密码策略；通过 `sqlbase.BuildDriverTLSConfig` 统一 `ClickHouse` / `Redis` TLS 1.2+ 安全配置；将 `?ticket=` 参数鉴权严格限定于 `/api/conn/.../export` 导出端点；在 256 MiB 流式上传前对 `handleUploadLocalDBFile` 增加前置文件头魔数校验；补全桌面端 `f.Close()` 错误检查与信号感知回退处理。
+- **后端功能、并发与内存优化**：
+  - **DuckDB 流式导出与多方言建表二级索引**：重构 `DuckDBDriver.StreamExport` 为基于 `json.NewDecoder` 的增量流式输出，支持 `MaxRows > 0` `LIMIT` 下推及 `req.Format` 格式选择；为 `PostgreSQL` / `KingbaseES`、`SQL Server`、`Oracle`、`达梦 DM8` 补齐 `CreateTable` 伴随二级索引（`CREATE INDEX` / `ADD_INDEX`）生成。
+  - **数据库作用域、连接池淘汰、ACL 与时间戳修复**：`ClickHouse` 多表 `StreamExport` 改为按 `acquireConnForDB(ctx, req.Database)` 限定目标库；为 `PostgreSQL`、`Oracle`、`达梦`、`ClickHouse` 的 `GetAutocompleteMeta` 增加 `LIMIT 25000` 上限；当 `PostgreSQL` 空闲子连接池超过 `4` 个时自动驱逐淘汰；修复 Redis ACL `ExecuteCommandArgs` 命令参数拆分导致的密码篡改问题；修复 `ImportConnections` 丢失 RFC3339 时间戳的问题。
+- **前端安全策略、SQL 转义、生命周期、移动端与深浅色主题一致性**：
+  - **安全策略与方言 SQL 格式化**：对齐前端 `>= 8` 位密码校验（`SecurityModal`、`UserManagementModal`）及仅限光栅图登录品牌图标校验（`LoginBrandEmblem`、`SecurityModal`）；抽离按方言转义的 `utils/sqlFormat.ts`（`quoteIdentForEngine`、MySQL/MariaDB/ClickHouse 反斜杠转义、防 NUL `qualifyTableForEngine`、前导零字符串字面量加引号），修复 `TableDataTab.handleExportFiltered`，并加固 `SchemaObjectModal` 引号处理（`END`、DuckDB `INSTALL`/`LOAD` 与 `mssql` 对齐）。
+  - **内存、竞态与生命周期清理**：延迟释放导出 `Blob` URL（`utils/download.ts`）；为 MongoDB 数据视图新增异步请求序号/中止守卫及基于 `WeakMap` 的安全 `_id` 键生成（`utils/mongoDocId.ts`、`MongoCollectionTab`）；为 `ConnectionSidebar` 增加 LRU 缓存上限、上下文清理与 MongoDB `lastDB` 缓存未命中同步；补齐组件卸载守卫与定时器清理（`WorkbenchLayout`、`TableDataTab`、`ResizableTable`）。
+  - **移动端触控适配与系统主题实时监听**：修复小屏（`375x812` / `390x844` / `375x420`）界面裁切、`TableDataTab` 移动端分页及 `180px` 网格最小高度，对齐 `640px` / `760px` 断点、采用 `100dvh`、隔离 `.dbharbor-touch-target::after` 触控热区并补齐 `aria-label`；在未保存用户手动主题偏好时实时监听系统 `prefers-color-scheme` 变更（`runtimeMode.ts`、`App.tsx`），并将前端兜底版本号更新为 `'v1.0.5'`。
+- **静态分析清零与发布同步**：
+  - **本地 CodeQL 全量零告警**：修复全部 JS/TS 质量告警（`useWorkbenchStore.ts`、`TableDataTab.tsx`），复测确认 Go（`go-security-and-quality.qls`、`go-security-extended.qls`）、JS/TS（`javascript-security-and-quality.qls`、`javascript-security-extended.qls`）与 GitHub Actions（`actions-security-and-quality.qls`）全部 **0 告警**。
+  - **版本、文档与内嵌更新日志校验**：同步更新全部构建与文档版本号至 `1.0.5` / `v1.0.5`，统一 `README*.md` 与 `SECURITY.md` 中的 `.master.key` 及安全策略说明，同步四语内嵌 `CHANGELOG*.md` 并新增 `TestEmbeddedChangelogsInSyncWithVersionAndRoot` 单元测试。
+
 ## [v1.0.4] - 2026-11-14
 
 ### 全量 CodeQL 零告警与供应链加固、14 引擎并发/方言深度修复、深色模式防白屏与手机/Safari 兼容性打磨

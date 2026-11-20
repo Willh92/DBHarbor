@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -155,7 +156,7 @@ type SavedSnippet struct {
 type LoginBrandingConfig struct {
 	PageTitle         string `json:"pageTitle"`
 	IconMode          string `json:"iconMode"`          // "shield" | "database" | "brand" | "custom" | "none"
-	CustomIconDataURL string `json:"customIconDataUrl"` // validated data:image/(png|jpeg|webp|gif|svg+xml);base64,...
+	CustomIconDataURL string `json:"customIconDataUrl"` // validated raster data:image/(png|jpeg|jpg|webp|gif|x-icon|vnd.microsoft.icon);base64,...
 	Heading           string `json:"heading"`
 	Subtitle          string `json:"subtitle"`
 }
@@ -297,6 +298,23 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+func matchesRasterImageMagic(prefix string, data []byte) bool {
+	switch prefix {
+	case "data:image/png;base64,":
+		return bytes.HasPrefix(data, []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
+	case "data:image/jpeg;base64,", "data:image/jpg;base64,":
+		return len(data) >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff
+	case "data:image/gif;base64,":
+		return bytes.HasPrefix(data, []byte("GIF87a")) || bytes.HasPrefix(data, []byte("GIF89a"))
+	case "data:image/webp;base64,":
+		return len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP"
+	case "data:image/x-icon;base64,", "data:image/vnd.microsoft.icon;base64,":
+		return len(data) >= 4 && data[0] == 0x00 && data[1] == 0x00 && (data[2] == 0x01 || data[2] == 0x02) && data[3] == 0x00
+	default:
+		return false
+	}
+}
+
 func NormalizeAndValidateLoginBranding(in LoginBrandingConfig) (LoginBrandingConfig, error) {
 	out := LoginBrandingConfig{
 		PageTitle:         strings.TrimSpace(in.PageTitle),
@@ -333,8 +351,8 @@ func NormalizeAndValidateLoginBranding(in LoginBrandingConfig) (LoginBrandingCon
 			"data:image/jpg;base64,",
 			"data:image/webp;base64,",
 			"data:image/gif;base64,",
-			"data:image/svg+xml;base64,",
 			"data:image/x-icon;base64,",
+			"data:image/vnd.microsoft.icon;base64,",
 		}
 		matchedPrefix := ""
 		for _, pfx := range allowedPrefixes {
@@ -344,23 +362,23 @@ func NormalizeAndValidateLoginBranding(in LoginBrandingConfig) (LoginBrandingCon
 			}
 		}
 		if matchedPrefix == "" {
-			return LoginBrandingConfig{}, errors.New("custom icon must be a valid PNG, JPEG, WebP, GIF, ICO, or SVG image")
+			return LoginBrandingConfig{}, errors.New("custom icon must be a valid PNG, JPEG, WebP, GIF, or ICO image")
 		}
 		rawB64 := out.CustomIconDataURL[len(matchedPrefix):]
+		if rawB64 == "" || strings.ContainsAny(rawB64, " \t\r\n") {
+			return LoginBrandingConfig{}, errors.New("invalid base64 image payload for custom icon")
+		}
 		decoded, err := base64.StdEncoding.DecodeString(rawB64)
 		if err != nil || len(decoded) == 0 {
 			return LoginBrandingConfig{}, errors.New("invalid base64 image payload for custom icon")
 		}
-		if strings.Contains(matchedPrefix, "svg+xml") {
-			svgLower := strings.ToLower(string(decoded))
-			if strings.Contains(svgLower, "<script") ||
-				strings.Contains(svgLower, "javascript:") ||
-				strings.Contains(svgLower, "onload=") ||
-				strings.Contains(svgLower, "onerror=") ||
-				strings.Contains(svgLower, "<foreignobject") {
-				return LoginBrandingConfig{}, errors.New("SVG custom icon contains disallowed active script elements")
-			}
+		if len(decoded) > 128*1024 {
+			return LoginBrandingConfig{}, errors.New("custom icon image exceeds maximum size (128 KB)")
 		}
+		if !matchesRasterImageMagic(matchedPrefix, decoded) {
+			return LoginBrandingConfig{}, errors.New("custom icon payload does not match declared raster image format")
+		}
+		out.CustomIconDataURL = matchedPrefix + rawB64
 	} else if out.IconMode == "custom" {
 		return LoginBrandingConfig{}, errors.New("please upload a custom icon image or select another icon style")
 	}
@@ -626,8 +644,8 @@ func (s *Store) GetSecurityStatus(userID string) (SecurityStatus, error) {
 }
 
 func (s *Store) UpdatePassword(userID, oldPass, newPass string) error {
-	if len(newPass) < 6 {
-		return errors.New("new password must be at least 6 characters")
+	if len(newPass) < minUserPasswordLength {
+		return fmt.Errorf("new password must be at least %d characters", minUserPasswordLength)
 	}
 	var hash string
 	if err := s.db.QueryRow(`SELECT password_hash FROM users WHERE id = ?`, userID).Scan(&hash); err != nil {

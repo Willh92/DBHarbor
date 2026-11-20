@@ -3,7 +3,7 @@
 **语言切换**: [English](./README.md) | **简体中文** | [繁體中文](./README.zh-TW.md) | [日本語](./README.ja.md)
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.4-1677ff.svg)](./CHANGELOG.zh-CN.md)
+[![Version](https://img.shields.io/badge/Version-v1.0.5-1677ff.svg)](./CHANGELOG.zh-CN.md)
 [![CGO_ENABLED=0](https://img.shields.io/badge/Go-CGO__ENABLED%3D0-00ADD8.svg)](https://github.com/Willh92/DBHarbor.git)
 
 一款融合 **phpMyAdmin 经典高效可视化操作体验** 与 **现代多引擎 IDE 能力** 的零外部依赖单文件跨平台 Web 数据库管理平台。
@@ -25,7 +25,7 @@
   - **Web 浏览器直开本地单文件库 (`SQLite 3` / `DuckDB`)、Navicat 级铺满网格与多标签 SQL 终端**：Web 服务版支持拖拽或一键 **“打开本地库 (`Open Local DB`)”** 直接载入本机 `.db`/`.sqlite`/`.duckdb` 文件，在 Chromium 浏览器支持通过 File System Access API **直接写回覆盖本机原文件**或一键下载最新二进制快照；全高铺满数据网格（`CellStateHub` 低内存架构）支持点击空白行直接新增、多行批量改列、单行/多行 TSV 复制粘贴（`Ctrl+C` / `Ctrl+V` 兼容记事本与 Excel），内嵌轻量化 Monaco Editor 支持自动补全、`Ctrl/Cmd + Enter` 执行、`EXPLAIN` 执行计划、SQL 格式化、查询中止 (`AbortController`)、历史记录与脚本另存为。
   - **流式导入导出与批量表运维**：支持整库与多表勾选 SQL Dump 备份、单表/筛选结果/自定义查询/MongoDB/Redis/DuckDB 流式导出与 `< 64 KiB` 内存流式分片上传（`SQL` / `CSV-BOM` / `CSV` / `JSON` / `JSONL` / `Markdown`）、大结果集流式内存上限保护、大文件分批事务导入，以及直接粘贴执行多条 SQL 脚本。
 - **Web 多成员三级 RBAC、登录品牌定制、安全沙箱与应急找回 *(仅 Web 服务版)***：
-  - **无默认弱口令初始化、登录页品牌定制与防搜索引擎收录**：首次启动自动引导**管理员初始化向导**（密码至少 `8` 位，移除内置 `admin123`）、零指纹登录界面、支持自定义浏览器 `<title>`、顶部图标（上传 `<= 128 KB` 图标并同步 Favicon）及主副标题，内置 `/robots.txt`、`X-Robots-Tag` 与 `<meta name="robots">` 三重防爬虫收录保护。
+  - **无默认弱口令初始化、登录页品牌定制与防搜索引擎收录**：首次启动自动引导**管理员初始化向导**（密码至少 `8` 位，移除内置 `admin123`）、零指纹登录界面、支持自定义浏览器 `<title>`、顶部图标（上传 `<= 128 KB` 仅限光栅格式图标并同步 Favicon）及主副标题，内置 `/robots.txt`、`X-Robots-Tag` 与 `<meta name="robots">` 三重防爬虫收录保护。
   - **默认不落盘的会话级数据库凭据策略与认证失败重输**：新建数据库连接**默认不勾选“记住密码”**（密码仅保存在当前登录会话内存中、磁盘零落盘，下次登录连接时自动弹窗提示输入；可选勾选以 `AES-256-GCM` 加密持久化保存，已记住密码的连接也可随时通过“编辑连接”关闭记住并立即清除本地密文）；当记住密码的连接因数据库账户或密码变更/错误导致连接或执行失败时，系统自动驱逐旧连接池并弹出凭据重输窗口，验证通过后无缝重试原请求。
   - **多成员 RBAC、2FA 与纵深安全加固**：三级 RBAC（`Admin` / `Read-Write` / `Read-Only`）与按账号独立隔离的工作区标签页/SQL 草稿、主密钥派生单次有效图形验证码、`trustedProxies` 可信反代限流 (`HTTP 429`)、离线二维码 **RFC 6238 TOTP 双因素认证** + 8 个一次性备用恢复码 + 2FA 尝试次数限制、驱动级严格 TLS 证书校验、非管理员 `<DataDir>/local_databases/u_<hash>/` 与 `<DataDir>/ephemeral_workspaces/` 按用户隔离沙箱（词法级拦截 SQLite `ATTACH`/文件函数、DuckDB `-safe` 模式 + `stdin` 传参 + `enable_external_access = false`、解包识别 MariaDB `/*M!...*/` 可执行注释）、全远程驱动拨号期防 DNS 重绑定 SSRF 拦截、引用计数并发连接池安全回收、SQL Server 独占连接 `USE [db]` 隔离，以及 `<DataDir>/config.json` 持久化配置与**自动擦除式管理员应急找回**。
 - **原生深色标题栏同步、手机端全触控工作台与多语言国际化 (i18n)**：
@@ -64,7 +64,7 @@ npm test
 
 ## 系统标准数据目录、启动参数与持久化 `config.json`
 
-DBHarbor **绝不会把运行时数据散落在程序启动目录**（除非显式指定 `-data-dir`）。默认情况下，内部元数据库 (`dbharbor.db`) 与主密钥 (`.secret.key`) 自动存放在各操作系统的标准应用数据目录：
+DBHarbor **绝不会把运行时数据散落在程序启动目录**（除非显式指定 `-data-dir`）。默认情况下，内部元数据库 (`dbharbor.db`) 与主密钥 (`.master.key`) 自动存放在各操作系统的标准应用数据目录：
 
 | 操作系统 | 普通用户 / 桌面启动默认目录 | 系统后台服务 (Daemon / Service) 默认目录 |
 | :--- | :--- | :--- |
@@ -138,7 +138,7 @@ DBHarbor **绝不会把运行时数据散落在程序启动目录**（除非显�
    dbharbor -data-dir /var/lib/dbharbor -recover-admin -recover-pass auto -reset-2fa
    ```
 
-> **Web 服务版本地数据库与内网安全边界**：DBHarbor 内部元数据库（`dbharbor.db`）、`config.json` 与主密钥（`.secret.key`）在全模式下自动隐藏并禁止作为业务数据源连接。在 **Web 服务版**中，非管理员（`Read-Write`）成员浏览或新建服务端 SQLite / DuckDB 本地文件时按账号独立隔离在 `<DataDir>/local_databases/u_<hash>/` 子目录内，通过浏览器 **“打开本地库 (`Open Local DB`)”** 载入的临时单文件库则按用户隔离在 `0700` `<DataDir>/ephemeral_workspaces/` 目录内（强制校验文件头魔数、12 小时闲置自动清理、词法级禁用 SQLite `ATTACH`/文件读写函数、强制服务端受控 `security.duckdbCliPath` 与 DuckDB `-safe` 模式 + `stdin` 传参 + `enable_external_access = false`，并在拨号阶段拦截连接私网/回环地址的 DNS 重绑定与 SSRF 请求）；**原生桌面窗体版**运行于无用户账户体系的纯本地免登录模式，保留完整本机文件访问权限。
+> **Web 服务版本地数据库与内网安全边界**：DBHarbor 内部元数据库（`dbharbor.db`）、`config.json` 与主密钥（`.master.key`）在全模式下自动隐藏并禁止作为业务数据源连接。在 **Web 服务版**中，非管理员（`Read-Write`）成员浏览或新建服务端 SQLite / DuckDB 本地文件时按账号独立隔离在 `<DataDir>/local_databases/u_<hash>/` 子目录内，通过浏览器 **“打开本地库 (`Open Local DB`)”** 载入的临时单文件库则按用户隔离在 `0700` `<DataDir>/ephemeral_workspaces/` 目录内（强制校验文件头魔数、12 小时闲置自动清理、词法级禁用 SQLite `ATTACH`/文件读写函数、强制服务端受控 `security.duckdbCliPath` 与 DuckDB `-safe` 模式 + `stdin` 传参 + `enable_external_access = false`，并在拨号阶段拦截连接私网/回环地址的 DNS 重绑定与 SSRF 请求）；**原生桌面窗体版**运行于无用户账户体系的纯本地免登录模式，保留完整本机文件访问权限。
 
 ---
 

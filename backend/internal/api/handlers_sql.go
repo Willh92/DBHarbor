@@ -404,7 +404,7 @@ func (s *Server) handleBrowseData(c *Context) {
 		return
 	}
 	if !c.CanWrite() && strings.TrimSpace(req.Filter) != "" {
-		if err := sqlbase.ValidateReadOnlyScript("SELECT 1 WHERE " + req.Filter); err != nil {
+		if err := sqlbase.ValidateReadOnlyScriptForEngine(cfg.Type, "SELECT 1 WHERE "+req.Filter); err != nil {
 			c.JSON(http.StatusForbidden, H{"error": "Read-only mode: " + err.Error()})
 			return
 		}
@@ -548,7 +548,7 @@ func (s *Server) handleExecuteQuery(c *Context) {
 		return
 	}
 	if !c.CanWrite() {
-		if err := sqlbase.ValidateReadOnlyScript(req.Query); err != nil {
+		if err := sqlbase.ValidateReadOnlyScriptForEngine(cfg.Type, req.Query); err != nil {
 			c.JSON(http.StatusForbidden, H{"error": "Read-only mode: " + err.Error()})
 			return
 		}
@@ -666,7 +666,7 @@ func (s *Server) handleExport(c *Context) {
 	table := strings.TrimSpace(c.Query("table"))
 	customSQL := strings.TrimSpace(c.Query("sql"))
 	if customSQL != "" && !c.CanWrite() {
-		if err := sqlbase.ValidateReadOnlyScript(customSQL); err != nil {
+		if err := sqlbase.ValidateReadOnlyScriptForEngine(cfg.Type, customSQL); err != nil {
 			c.JSON(http.StatusForbidden, H{"error": "Read-only mode: " + err.Error()})
 			return
 		}

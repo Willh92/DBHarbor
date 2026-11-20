@@ -368,7 +368,7 @@ export const VersionUpdateModal: React.FC<Props> = ({
                 {t('Current Version')}:
               </Typography.Text>
               <Tag color="geekblue" style={{ fontWeight: 700, margin: 0 }}>
-                {checkData?.currentVersion || buildInfo?.displayVersion || 'v1.0.4'}
+                {checkData?.currentVersion || buildInfo?.displayVersion || 'v1.0.5'}
               </Tag>
               {buildInfo?.edition === 'desktop' && (
                 <Tag color="purple" style={{ margin: 0 }}>
@@ -409,7 +409,7 @@ export const VersionUpdateModal: React.FC<Props> = ({
               )}
             </Space>
 
-            <Space size={6} wrap>
+            <Space size={isMobile ? [12, 12] : 6} wrap>
               <Segmented
                 size="small"
                 value={channel}
@@ -421,7 +421,8 @@ export const VersionUpdateModal: React.FC<Props> = ({
                 ]}
               />
               <Button
-                size="small"
+                size={isMobile ? 'middle' : 'small'}
+                className="dbharbor-touch-target"
                 type="primary"
                 icon={checking ? <SyncOutlined spin /> : <ReloadOutlined />}
                 loading={checking}
@@ -429,7 +430,14 @@ export const VersionUpdateModal: React.FC<Props> = ({
               >
                 {t('Check GitHub Updates Now')}
               </Button>
-              <Button size="small" icon={<GithubOutlined />} href={repoUrl} target="_blank" rel="noreferrer">
+              <Button
+                size={isMobile ? 'middle' : 'small'}
+                className="dbharbor-touch-target"
+                icon={<GithubOutlined />}
+                href={repoUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
                 {t('Open GitHub Repo')}
               </Button>
             </Space>
@@ -488,7 +496,9 @@ export const VersionUpdateModal: React.FC<Props> = ({
                 {t('Auto Update Reminder')}:
               </Typography.Text>
               <Switch
-                size="small"
+                size={isMobile ? 'default' : 'small'}
+                className="dbharbor-touch-target"
+                aria-label={t('Auto Update Reminder')}
                 checked={autoRemind}
                 onChange={(checked) => {
                   setAutoRemind(checked);
@@ -541,10 +551,11 @@ export const VersionUpdateModal: React.FC<Props> = ({
                       ? t('Matched installer for your platform: {name}', { name: checkData.matchedAssetName })
                       : t('Visit GitHub Releases to download the standalone binary for your OS.')}
                   </span>
-                  <Space wrap>
+                  <Space size={isMobile ? [12, 12] : 8} wrap>
                     {safeMatchedAssetUrl && (
                       <Button
-                        size="small"
+                        size={isMobile ? 'middle' : 'small'}
+                        className="dbharbor-touch-target"
                         type="primary"
                         icon={<CloudDownloadOutlined />}
                         href={safeMatchedAssetUrl}
@@ -554,12 +565,19 @@ export const VersionUpdateModal: React.FC<Props> = ({
                         {t('Download for Current OS ({name})', { name: checkData.matchedAssetName || '' })}
                       </Button>
                     )}
-                    <Button size="small" href={safeReleaseUrl} target="_blank" rel="noreferrer">
+                    <Button
+                      size={isMobile ? 'middle' : 'small'}
+                      className="dbharbor-touch-target"
+                      href={safeReleaseUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
                       {t('Release Details')}
                     </Button>
                     {skippedVer === checkData.latestVersion ? (
                       <Button
-                        size="small"
+                        size={isMobile ? 'middle' : 'small'}
+                        className="dbharbor-touch-target"
                         onClick={() => {
                           setSkippedUpdateVersion('');
                           setSkippedVer('');
@@ -570,7 +588,8 @@ export const VersionUpdateModal: React.FC<Props> = ({
                       </Button>
                     ) : (
                       <Button
-                        size="small"
+                        size={isMobile ? 'middle' : 'small'}
+                        className="dbharbor-touch-target"
                         onClick={() => {
                           setSkippedUpdateVersion(checkData.latestVersion);
                           setSkippedVer(checkData.latestVersion);
@@ -648,10 +667,8 @@ export const VersionUpdateModal: React.FC<Props> = ({
                     </div>
                   )}
                   <div
+                    className="dbharbor-changelog-scroll"
                     style={{
-                      maxHeight: 'min(380px, calc(100vh - 330px))',
-                      minHeight: 140,
-                      overflowY: 'auto',
                       padding: isMobile ? '10px 12px' : '12px 16px',
                       borderRadius: 8,
                       border: '1px solid rgba(128,128,128,0.18)',
@@ -690,10 +707,8 @@ export const VersionUpdateModal: React.FC<Props> = ({
                   />
                 ) : (
                   <div
+                    className="dbharbor-changelog-scroll"
                     style={{
-                      maxHeight: 'min(380px, calc(100vh - 330px))',
-                      minHeight: 140,
-                      overflowY: 'auto',
                       display: 'flex',
                       flexDirection: 'column',
                       gap: 10,

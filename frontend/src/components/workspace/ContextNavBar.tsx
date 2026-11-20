@@ -17,6 +17,7 @@ import { useResponsive } from '../../hooks/useResponsive';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
 import type { WorkspaceTab } from '../../types';
+import { quoteIdentForEngine } from '../../utils/sqlFormat';
 
 export type TransferModalMode = 'export' | 'import' | 'sql_exec';
 
@@ -83,7 +84,7 @@ export const ContextNavBar: React.FC<Props> = ({ tab, activeSection, onOpenTrans
 
   const goSQLConsole = () => {
     const defaultSQL = tab.table
-      ? `SELECT * FROM ${tab.table} LIMIT 100;`
+      ? `SELECT * FROM ${quoteIdentForEngine(tab.dbType, tab.table)} LIMIT 100;`
       : `-- Database: ${tab.database} (${tab.dbType})\n-- Ctrl+Enter / Cmd+Enter\n`;
     openTab({
       key: `sql:${tab.connectionId}:${tab.database}:${tab.table || 'db'}`,
@@ -154,11 +155,12 @@ export const ContextNavBar: React.FC<Props> = ({ tab, activeSection, onOpenTrans
 
     return (
       <div
-        className="dbharbor-context-navbar dbharbor-no-scrollbar"
+        className="dbharbor-context-navbar"
         style={{
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'center',
+          flexWrap: 'wrap',
           gap: 4,
           minWidth: 0,
           maxWidth: '100%',
@@ -168,12 +170,11 @@ export const ContextNavBar: React.FC<Props> = ({ tab, activeSection, onOpenTrans
           background: 'rgba(22, 119, 255, 0.05)',
           border: '1px solid rgba(22, 119, 255, 0.14)',
           flexShrink: 0,
-          overflowX: 'auto',
         }}
       >
         <Segmented
-          size="middle"
-          style={{ flexShrink: 0 }}
+          size="small"
+          style={{ flexShrink: 0, maxWidth: '100%' }}
           value={activeSection}
           onChange={(val) => {
             if (val === 'overview') goOverview();
@@ -190,12 +191,12 @@ export const ContextNavBar: React.FC<Props> = ({ tab, activeSection, onOpenTrans
               : []),
           ]}
         />
-        <Space size={4} style={{ flexShrink: 0 }}>
+        <Space size={8} style={{ flexShrink: 0 }}>
           <Button
             size="small"
             icon={<CodeOutlined />}
             onClick={goSQLConsole}
-            style={{ height: 34, paddingInline: 8 }}
+            style={{ height: 34, paddingInline: 7, fontSize: 12.5 }}
           >
             SQL
           </Button>
@@ -203,6 +204,7 @@ export const ContextNavBar: React.FC<Props> = ({ tab, activeSection, onOpenTrans
             <Dropdown trigger={['click']} menu={{ items: mobileMenuItems }} placement="bottomRight">
               <Button
                 size="small"
+                className="dbharbor-touch-target"
                 icon={<MoreOutlined />}
                 aria-label={t('More Actions')}
                 style={{ width: 34, height: 34, padding: 0 }}

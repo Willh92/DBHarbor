@@ -46,6 +46,7 @@ import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
 import type { ObjectItem, ObjectSpec, WorkspaceTab } from '../../types';
 import { formatBytes } from '../../utils/format';
+import { quoteIdentForEngine } from '../../utils/sqlFormat';
 import { ResizableTable, calcSmartColumnWidth } from '../common/ResizableTable';
 import { ContextNavBar, type TransferModalMode, type TransferOpenOptions } from './ContextNavBar';
 import type { SchemaObjectType } from './SchemaObjectModal';
@@ -613,7 +614,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                         database: tab.database,
                         schema: tab.schema,
                         table: r.name,
-                        initialSQL: `SELECT * FROM ${r.name} LIMIT 100;`,
+                        initialSQL: `SELECT * FROM ${quoteIdentForEngine(tab.dbType, r.name)} LIMIT 100;`,
                       }),
                   },
                   ...(r.type === 'TABLE'
@@ -681,7 +682,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
           ];
 
           return (
-            <Space size={isMobile ? 4 : 2} style={{ whiteSpace: 'nowrap' }}>
+            <Space size={isMobile ? 10 : 2} style={{ whiteSpace: 'nowrap' }}>
               {isDataObj ? (
                 <>
                   <Button
@@ -743,6 +744,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                       <Button
                         size="small"
                         type="text"
+                        aria-label={t('Refresh View')}
                         icon={<SyncOutlined />}
                         onClick={() => void handleAction(r, 'REFRESH')}
                       />
@@ -753,6 +755,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                       <Button
                         size="small"
                         type="text"
+                        aria-label={t('Open SQL Console for this table')}
                         icon={<CodeOutlined />}
                         onClick={() =>
                           openTab({
@@ -765,7 +768,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                             database: tab.database,
                             schema: tab.schema,
                             table: r.name,
-                            initialSQL: `SELECT * FROM ${r.name} LIMIT 100;`,
+                            initialSQL: `SELECT * FROM ${quoteIdentForEngine(tab.dbType, r.name)} LIMIT 100;`,
                           })
                         }
                       />
@@ -776,6 +779,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                       <Button
                         size="small"
                         type="text"
+                        aria-label={t('Export table')}
                         icon={<DownloadOutlined />}
                         onClick={() => onOpenTransfer('export', r.name)}
                       />
@@ -845,6 +849,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                   <Button
                     size="small"
                     type="text"
+                    aria-label={t('Clone or rename table')}
                     icon={<CopyOutlined />}
                     onClick={() => {
                       setCloneTarget(r);
@@ -858,7 +863,14 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
               )}
               {moreMenuItems.length > 0 && (
                 <Dropdown trigger={['click']} placement="bottomRight" menu={{ items: moreMenuItems }}>
-                  <Button size="small" type="text" style={btnStyle} icon={<MoreOutlined />} />
+                  <Button
+                    size="small"
+                    type="text"
+                    className="dbharbor-touch-target"
+                    aria-label={t('More Actions')}
+                    style={btnStyle}
+                    icon={<MoreOutlined />}
+                  />
                 </Dropdown>
               )}
               {!isMobile && canWrite && r.type === 'TABLE' && (
@@ -867,7 +879,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                   onConfirm={() => void handleAction(r, 'TRUNCATE')}
                 >
                   <Tooltip title={t('Truncate table')}>
-                    <Button size="small" type="text" danger icon={<ClearOutlined />} />
+                    <Button size="small" type="text" danger aria-label={t('Truncate table')} icon={<ClearOutlined />} />
                   </Tooltip>
                 </Popconfirm>
               )}
@@ -877,7 +889,7 @@ export const OverviewTab: React.FC<Props> = React.memo(({ tab, onOpenCreateTable
                   onConfirm={() => void handleAction(r, 'DROP')}
                 >
                   <Tooltip title={t('Drop object')}>
-                    <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+                    <Button size="small" type="text" danger aria-label={t('Drop object')} icon={<DeleteOutlined />} />
                   </Tooltip>
                 </Popconfirm>
               )}

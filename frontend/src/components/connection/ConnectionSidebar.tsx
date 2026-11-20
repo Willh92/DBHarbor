@@ -74,7 +74,9 @@ import type {
   SchemaObjects,
 } from '../../types';
 import { DB_SHORT_LABELS, formatBytes } from '../../utils/format';
+import { triggerBlobDownload } from '../../utils/download';
 import { hasEphemeralFileHandle, removeEphemeralFileHandle } from '../../utils/ephemeralFileHandles';
+import { quoteIdentForEngine } from '../../utils/sqlFormat';
 import { writeTextToClipboard } from '../../utils/tableClipboard';
 import { LazyCodeEditor } from '../common/LazyCodeEditor';
 import type { TransferModalMode } from '../workspace/ContextNavBar';
@@ -144,6 +146,29 @@ interface Props {
 const VIRTUAL_THRESHOLD = 60;
 const ITEM_ROW_HEIGHT = 30;
 const OVERSCAN_ROWS = 12;
+const MAX_CONN_DB_CACHE = 40;
+const MAX_DB_CHILDREN_CACHE = 30;
+
+function lruGet<K, V>(map: Map<K, V>, key: K): V | undefined {
+  const val = map.get(key);
+  if (val !== undefined) {
+    map.delete(key);
+    map.set(key, val);
+  }
+  return val;
+}
+
+function lruSet<K, V>(map: Map<K, V>, key: K, val: V, maxSize: number): void {
+  if (map.has(key)) {
+    map.delete(key);
+  }
+  map.set(key, val);
+  while (map.size > maxSize) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey === undefined) break;
+    map.delete(oldestKey);
+  }
+}
 
 export const ConnectionSidebar: React.FC<Props> = React.memo(({
   onNewConnection,
@@ -173,7 +198,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
   } = useWorkbenchStore();
   const { isMobile } = useResponsive();
   const { t } = useI18n();
-  const itemRowHeight = isMobile ? 40 : ITEM_ROW_HEIGHT;
+  const itemRowHeight = isMobile ? 44 : ITEM_ROW_HEIGHT;
 
   const canWrite = isDesktop || role !== 'readonly';
   const effectiveCanCreateConn = isDesktop || role === 'admin' || canCreateConn;
@@ -299,6 +324,21 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
       }
     }
   };
+
+  const pruneContextMaps = useCallback((shouldDelete: (key: string) => boolean) => {
+    const pruneRecord = <T,>(prev: Record<string, T>): Record<string, T> => {
+      const keysToRemove = Object.keys(prev).filter(shouldDelete);
+      if (keysToRemove.length === 0) return prev;
+      const next = { ...prev };
+      for (const k of keysToRemove) {
+        delete next[k];
+      }
+      return next;
+    };
+    setExpandedByContext(pruneRecord);
+    setSearchByContext(pruneRecord);
+    setSearchExpandedOverrides(pruneRecord);
+  }, []);
 
   // Virtual scroll state for large schemas (hundreds to thousands of tables)
   const treeScrollRef = useRef<HTMLDivElement | null>(null);
@@ -466,13 +506,13 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
 
     const cacheKey = `${conn.id}::${dbName}::${drv.supportsSchemas ? preferredSchema || '__default__' : ''}`;
     if (!forceReload) {
-      const cached = dbChildrenCacheRef.current.get(cacheKey);
+      const cached = lruGet(dbChildrenCacheRef.current, cacheKey);
       if (cached) {
         setSchemas(cached.schemas);
         setSelectedSchema(cached.selectedSchema);
         setSchemaObjects(cached.schemaObjects);
         setCollections(cached.collections);
-        const existingConnEntry = connDatabasesCacheRef.current.get(conn.id);
+        const existingConnEntry = lruGet(connDatabasesCacheRef.current, conn.id);
         if (existingConnEntry) {
           existingConnEntry.lastDB = dbName;
           existingConnEntry.lastSchema = cached.selectedSchema;
@@ -494,12 +534,22 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
         const colls = await api.docListCollections(conn.id, dbName);
         if (seq !== reqSeqRef.current) return null;
         setCollections(colls);
-        dbChildrenCacheRef.current.set(cacheKey, {
-          schemas: [],
-          selectedSchema: '',
-          schemaObjects: EMPTY_SCHEMA_OBJECTS,
-          collections: colls,
-        });
+        lruSet(
+          dbChildrenCacheRef.current,
+          cacheKey,
+          {
+            schemas: [],
+            selectedSchema: '',
+            schemaObjects: EMPTY_SCHEMA_OBJECTS,
+            collections: colls,
+          },
+          MAX_DB_CHILDREN_CACHE
+        );
+        const existingConnEntry = lruGet(connDatabasesCacheRef.current, conn.id);
+        if (existingConnEntry) {
+          existingConnEntry.lastDB = dbName;
+          existingConnEntry.lastSchema = '';
+        }
         return '';
       }
 
@@ -535,11 +585,11 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
         schemaObjects: normalizedObjs,
         collections: [],
       };
-      dbChildrenCacheRef.current.set(cacheKey, snapshot);
+      lruSet(dbChildrenCacheRef.current, cacheKey, snapshot, MAX_DB_CHILDREN_CACHE);
       if (drv.supportsSchemas && schemaToUse) {
-        dbChildrenCacheRef.current.set(`${conn.id}::${dbName}::${schemaToUse}`, snapshot);
+        lruSet(dbChildrenCacheRef.current, `${conn.id}::${dbName}::${schemaToUse}`, snapshot, MAX_DB_CHILDREN_CACHE);
       }
-      const existingConnEntry = connDatabasesCacheRef.current.get(conn.id);
+      const existingConnEntry = lruGet(connDatabasesCacheRef.current, conn.id);
       if (existingConnEntry) {
         existingConnEntry.lastDB = dbName;
         existingConnEntry.lastSchema = schemaToUse;
@@ -580,7 +630,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
     if (forceReload) {
       invalidateConnCache(conn.id);
     } else {
-      const cachedConn = connDatabasesCacheRef.current.get(conn.id);
+      const cachedConn = lruGet(connDatabasesCacheRef.current, conn.id);
       if (cachedConn && cachedConn.databases.length > 0) {
         setActiveConnId(conn.id);
         setDatabases(cachedConn.databases);
@@ -631,7 +681,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
         setDatabases(dbs);
         const initDB = conn.database ? `db${conn.database}` : 'db0';
         setSelectedDB(initDB);
-        connDatabasesCacheRef.current.set(conn.id, { databases: dbs, lastDB: initDB, lastSchema: '' });
+        lruSet(connDatabasesCacheRef.current, conn.id, { databases: dbs, lastDB: initDB, lastSchema: '' }, MAX_CONN_DB_CACHE);
         openTab({
           key: `redis:${conn.id}`,
           title: `${conn.name} [Redis]`,
@@ -647,11 +697,17 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
 
       const dbs = await api.listDatabases(conn.id);
       if (seq !== reqSeqRef.current) return;
+      const validDBs = new Set(dbs.map((d) => d.name));
+      pruneContextMaps((key) => {
+        if (!key.startsWith(`${conn.id}::`)) return false;
+        const dbSegment = key.slice(conn.id.length + 2).split('::')[0];
+        return Boolean(dbSegment) && !validDBs.has(dbSegment);
+      });
       setDatabases(dbs);
       const targetDB =
         (conn.database && dbs.some((d) => d.name === conn.database) ? conn.database : dbs[0]?.name) || '';
       setSelectedDB(targetDB);
-      connDatabasesCacheRef.current.set(conn.id, { databases: dbs, lastDB: targetDB, lastSchema: '' });
+      lruSet(connDatabasesCacheRef.current, conn.id, { databases: dbs, lastDB: targetDB, lastSchema: '' }, MAX_CONN_DB_CACHE);
       if (targetDB) {
         await loadDatabaseChildren(conn, targetDB, '', seq, forceReload);
       }
@@ -674,7 +730,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
     setSelectedDB(dbName);
     if (!activeConn) return;
     if (activeDriver?.category === 'keyvalue') {
-      const existingConnEntry = connDatabasesCacheRef.current.get(activeConn.id);
+      const existingConnEntry = lruGet(connDatabasesCacheRef.current, activeConn.id);
       if (existingConnEntry) {
         existingConnEntry.lastDB = dbName;
       }
@@ -760,14 +816,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
     try {
       const bundle = await api.exportConnections();
       const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `dbharbor-connections-${new Date().toISOString().slice(0, 10)}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      triggerBlobDownload(blob, `dbharbor-connections-${new Date().toISOString().slice(0, 10)}.json`);
       message.success(t('Exported {count} connection profile(s)', { count: bundle.connections.length }));
     } catch (err: any) {
       message.error(err.message);
@@ -848,6 +897,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
     try {
       const target = selectedDB;
       await api.dropDatabase(activeConn.id, target);
+      pruneContextMaps((key) => key.startsWith(`${activeConn.id}::${target}::`));
       message.success(t('Database {name} dropped', { name: target }));
       setDropDBModalOpen(false);
       setDropDBConfirmInput('');
@@ -877,6 +927,8 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
     try {
       const sc = selectedSchema;
       await api.dropSchema(activeConn.id, selectedDB, sc, dropSchemaCascade);
+      const prefix = `${activeConn.id}::${selectedDB}::${sc}`;
+      pruneContextMaps((key) => key === prefix || key.startsWith(`${prefix}::`));
       message.success(t('Schema {name} dropped', { name: sc }));
       setDropSchemaModalOpen(false);
       setDropSchemaCascade(false);
@@ -1280,7 +1332,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
             database: selectedDB,
             schema: selectedSchema,
             table: item.name,
-            initialSQL: `SELECT * FROM ${item.name} LIMIT 100;`,
+            initialSQL: `SELECT * FROM ${quoteIdentForEngine(conn.type, item.name)} LIMIT 100;`,
           });
           onItemOpened?.();
         },
@@ -1400,13 +1452,28 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
         }));
         return;
       }
-      setExpandedByContext((prev) => ({
-        ...prev,
-        [contextScopeKey]: {
-          ...(prev[contextScopeKey] || {}),
-          [group]: nextOpen,
-        },
-      }));
+      setExpandedByContext((prev) => {
+        const curScope = prev[contextScopeKey] || {};
+        if (!nextOpen) {
+          if (!(group in curScope)) return prev;
+          const nextScope = { ...curScope };
+          delete nextScope[group];
+          const next = { ...prev };
+          if (Object.keys(nextScope).length === 0) {
+            delete next[contextScopeKey];
+          } else {
+            next[contextScopeKey] = nextScope;
+          }
+          return next;
+        }
+        return {
+          ...prev,
+          [contextScopeKey]: {
+            ...curScope,
+            [group]: true,
+          },
+        };
+      });
     },
     [isSectionExpanded, qLower, searchScopeKey, contextScopeKey]
   );
@@ -1733,7 +1800,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
               {t('Connections ({count})', { count: connections.length })}
             </Typography.Text>
           </div>
-          <Space size={4}>
+          <Space size={isMobile ? 12 : 4}>
             <Dropdown
               trigger={['click']}
               placement="bottomRight"
@@ -1770,10 +1837,22 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
                 ],
               }}
             >
-              <Button size="small" type="text" icon={<MoreOutlined />} />
+              <Button
+                size={isMobile ? 'middle' : 'small'}
+                type="text"
+                className="dbharbor-touch-target"
+                aria-label={t('More Actions')}
+                icon={<MoreOutlined />}
+              />
             </Dropdown>
             {effectiveCanCreateConn && (
-              <Button type="primary" size="small" icon={<PlusOutlined />} onClick={onNewConnection}>
+              <Button
+                type="primary"
+                size={isMobile ? 'middle' : 'small'}
+                className="dbharbor-touch-target"
+                icon={<PlusOutlined />}
+                onClick={onNewConnection}
+              >
                 {t('New')}
               </Button>
             )}
@@ -1805,7 +1884,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
                     <div
                       onClick={() => handleSelectConnection(conn, false)}
                       style={{
-                        minHeight: isMobile ? 42 : 34,
+                        minHeight: isMobile ? 46 : 34,
                         padding: isMobile ? '6px 10px' : '5px 8px',
                         borderRadius: 8,
                         cursor: 'pointer',
@@ -1876,7 +1955,9 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
                           <Button
                             type="text"
                             size={isMobile ? 'middle' : 'small'}
-                            style={isMobile ? { width: 34, height: 34 } : undefined}
+                            className="dbharbor-touch-target"
+                            aria-label={t('More Actions')}
+                            style={isMobile ? { width: 38, height: 38, padding: 0 } : undefined}
                             icon={<MoreOutlined />}
                           />
                         </Dropdown>
@@ -1893,9 +1974,14 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
       {/* Active Connection Database & Quick Actions */}
       {activeConn && (
         <div style={{ padding: '8px 12px', borderBottom: '1px solid rgba(128,128,128,0.15)', flexShrink: 0 }}>
-          <Space.Compact
-            size={isMobile ? 'middle' : 'small'}
-            style={{ width: '100%', marginBottom: activeDriver?.supportsSchemas ? 6 : 8 }}
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: isMobile ? 6 : 4,
+              width: '100%',
+              marginBottom: activeDriver?.supportsSchemas ? 6 : 8,
+            }}
           >
             <Select
               style={{ flex: 1, minWidth: 0 }}
@@ -1911,8 +1997,11 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
             />
             <Button
               size={isMobile ? 'middle' : 'small'}
+              className="dbharbor-touch-target-y"
+              style={isMobile ? { width: 38, padding: 0, flexShrink: 0 } : { flexShrink: 0 }}
               icon={<ReloadOutlined />}
               title={t('Refresh Metadata')}
+              aria-label={t('Refresh Metadata')}
               onClick={() => handleSelectConnection(activeConn, true)}
             />
             {canWrite &&
@@ -1948,13 +2037,20 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
                     ],
                   }}
                 >
-                  <Button size={isMobile ? 'middle' : 'small'} icon={<MoreOutlined />} title={t('Database Actions')} />
+                  <Button
+                    size={isMobile ? 'middle' : 'small'}
+                    className="dbharbor-touch-target-y"
+                    style={isMobile ? { width: 38, padding: 0, flexShrink: 0 } : { flexShrink: 0 }}
+                    icon={<MoreOutlined />}
+                    title={t('Database Actions')}
+                    aria-label={t('Database Actions')}
+                  />
                 </Dropdown>
               )}
-          </Space.Compact>
+          </div>
 
           {activeDriver?.supportsSchemas && selectedDB && (
-            <Space.Compact size={isMobile ? 'middle' : 'small'} style={{ width: '100%', marginBottom: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 6 : 4, width: '100%', marginBottom: 8 }}>
               <Select
                 style={{ flex: 1, minWidth: 0 }}
                 size={isMobile ? 'middle' : 'small'}
@@ -1989,17 +2085,25 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
                     ],
                   }}
                 >
-                  <Button size={isMobile ? 'middle' : 'small'} icon={<MoreOutlined />} title={t('Schema Actions')} />
+                  <Button
+                    size={isMobile ? 'middle' : 'small'}
+                    className="dbharbor-touch-target-y"
+                    style={isMobile ? { width: 38, padding: 0, flexShrink: 0 } : { flexShrink: 0 }}
+                    icon={<MoreOutlined />}
+                    title={t('Schema Actions')}
+                    aria-label={t('Schema Actions')}
+                  />
                 </Dropdown>
               )}
-            </Space.Compact>
+            </div>
           )}
 
-          <Space size={isMobile ? 6 : 4} wrap style={{ width: '100%' }}>
+          <Space size={isMobile ? [12, 12] : 4} wrap style={{ width: '100%' }}>
             {(activeDriver?.category === 'relational' || activeDriver?.category === 'olap') && (
               <>
                 <Button
                   size={isMobile ? 'middle' : 'small'}
+                  className="dbharbor-touch-target"
                   icon={<FolderOpenOutlined />}
                   disabled={!selectedDB}
                   onClick={() => {
@@ -2020,6 +2124,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
                 </Button>
                 <Button
                   size={isMobile ? 'middle' : 'small'}
+                  className="dbharbor-touch-target"
                   type="primary"
                   ghost
                   icon={<CodeOutlined />}
@@ -2045,7 +2150,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
                     placement="bottomLeft"
                     menu={{ items: creatableObjectMenuItems }}
                   >
-                    <Button size={isMobile ? 'middle' : 'small'} icon={<PlusOutlined />}>
+                    <Button size={isMobile ? 'middle' : 'small'} className="dbharbor-touch-target" icon={<PlusOutlined />}>
                       {t('New Object')} <DownOutlined style={{ fontSize: 10 }} />
                     </Button>
                   </Dropdown>
@@ -2055,6 +2160,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
             {activeDriver?.category === 'document' && canWrite && selectedDB && (
               <Button
                 size={isMobile ? 'middle' : 'small'}
+                className="dbharbor-touch-target"
                 type="primary"
                 ghost
                 icon={<PlusOutlined />}
@@ -2066,6 +2172,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
             {activeDriver?.category === 'keyvalue' && (
               <Button
                 size={isMobile ? 'middle' : 'small'}
+                className="dbharbor-touch-target"
                 type="primary"
                 ghost
                 icon={<KeyOutlined />}
@@ -2086,12 +2193,18 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
               </Button>
             )}
             {supportsDbUsers && (
-              <Button size={isMobile ? 'middle' : 'small'} icon={<TeamOutlined />} onClick={() => openDbUsersTab(activeConn)}>
+              <Button
+                size={isMobile ? 'middle' : 'small'}
+                className="dbharbor-touch-target"
+                icon={<TeamOutlined />}
+                onClick={() => openDbUsersTab(activeConn)}
+              >
                 {t('Users & Grants')}
               </Button>
             )}
             <Button
               size={isMobile ? 'middle' : 'small'}
+              className="dbharbor-touch-target"
               icon={<DashboardOutlined />}
               onClick={() => {
                 openTab({
@@ -2126,6 +2239,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
                 <Tooltip title={allSectionsExpanded ? t('Collapse All') : t('Expand All')}>
                   <Button
                     size={isMobile ? 'middle' : 'small'}
+                    className="dbharbor-touch-target"
                     type={allSectionsExpanded ? 'primary' : 'default'}
                     ghost={allSectionsExpanded}
                     icon={allSectionsExpanded ? <NodeCollapseOutlined /> : <NodeExpandOutlined />}
@@ -2165,11 +2279,12 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 {t('Redis Logical Databases (click to switch):')}
               </Typography.Text>
-              <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+              <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: isMobile ? 12 : 6 }}>
                 {databases.map((d) => (
                   <Button
                     key={d.name}
-                    size="small"
+                    size={isMobile ? 'middle' : 'small'}
+                    className="dbharbor-touch-target"
                     type={selectedDB === d.name ? 'primary' : 'default'}
                     onClick={() => handleDBChange(d.name)}
                     style={{ justifyContent: 'space-between', display: 'flex' }}
@@ -2318,7 +2433,8 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
                                 <Button
                                   type="text"
                                   size="small"
-                                  style={{ width: 30, height: 30, padding: 0 }}
+                                  aria-label={t('More Actions')}
+                                  style={{ width: 42, height: 42, padding: 0 }}
                                   icon={<MoreOutlined />}
                                   onClick={(e) => e.stopPropagation()}
                                 />
@@ -2370,8 +2486,9 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
                           <Button
                             type="link"
                             size="small"
+                            aria-label={t('New Object')}
                             icon={<PlusOutlined />}
-                            style={{ padding: '0 4px', height: 22 }}
+                            style={isMobile ? { padding: '0 8px', minWidth: 44, height: 40 } : { padding: '0 4px', height: 22 }}
                             onClick={() => openCreateObjectModal(row.createType!)}
                           />
                         </div>
@@ -2475,7 +2592,7 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
                           {item.name}
                         </Typography.Text>
                       </div>
-                      <Space size={2} style={{ flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
+                      <Space size={isMobile ? 12 : 2} style={{ flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
                         {objectType === 'TABLE' && item.dataBytes > 0 && (
                           <Typography.Text type="secondary" style={{ fontSize: 11 }}>
                             {formatBytes(item.dataBytes)}
@@ -2513,8 +2630,9 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
                             <Button
                               type="text"
                               size="small"
-                              style={isMobile ? { width: 30, height: 30, padding: 0 } : undefined}
-                              icon={<EditOutlined style={{ fontSize: 12 }} />}
+                              aria-label={t('Table Structure')}
+                              style={isMobile ? { width: 42, height: 42, padding: 0 } : undefined}
+                              icon={<EditOutlined style={{ fontSize: isMobile ? 14 : 12 }} />}
                               onClick={() => {
                                 openTab({
                                   key: `struct:${activeConn.id}:${selectedDB}:${selectedSchema}:${item.name}`,
@@ -2536,8 +2654,9 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
                             <Button
                               type="text"
                               size="small"
-                              style={isMobile ? { width: 30, height: 30, padding: 0 } : undefined}
-                              icon={<CodeOutlined style={{ fontSize: 12 }} />}
+                              aria-label={canWrite ? t('Edit / DDL') : t('Inspect DDL')}
+                              style={isMobile ? { width: 42, height: 42, padding: 0 } : undefined}
+                              icon={<CodeOutlined style={{ fontSize: isMobile ? 14 : 12 }} />}
                               onClick={() => openEditObjectModal(item, objectType)}
                             />
                           </Tooltip>
@@ -2547,7 +2666,8 @@ export const ConnectionSidebar: React.FC<Props> = React.memo(({
                             <Button
                               type="text"
                               size="small"
-                              style={{ width: 30, height: 30, padding: 0 }}
+                              aria-label={t('More Actions')}
+                              style={{ width: 42, height: 42, padding: 0 }}
                               icon={<MoreOutlined />}
                               onClick={(e) => e.stopPropagation()}
                             />

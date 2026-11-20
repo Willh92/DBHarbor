@@ -608,7 +608,7 @@ func fetchOracleSourceDDL(ctx context.Context, sqlDrv driver.SQLDriver, database
 		}
 		src := strings.TrimSpace(sb.String())
 		if src != "" {
-			upper := strings.ToUpper(sqlbase.StripLeadingSQLComments(src))
+			upper := strings.ToUpper(sqlbase.StripLeadingSQLCommentsForEngine("oracle", src))
 			if strings.HasPrefix(upper, "CREATE ") {
 				return src, nil
 			}

@@ -42,6 +42,8 @@ import { ResizableTable, calcSmartColumnWidth } from '../common/ResizableTable';
 import { useI18n } from '../../i18n/useI18n';
 import { useWorkbenchStore } from '../../store/useWorkbenchStore';
 import type { DatabaseSummary, HistoryEntry, QueryResult, SavedSnippet, WorkspaceTab } from '../../types';
+import { triggerBlobDownload } from '../../utils/download';
+import { formatSqlLiteralForEngine, quoteIdentForEngine } from '../../utils/sqlFormat';
 import { formatRawCellText, formatTsvCell, writeTextToClipboard } from '../../utils/tableClipboard';
 
 interface Props {
@@ -81,7 +83,8 @@ function simpleFormatSQL(sql: string): string {
 function formatResultForClipboard(
   r: QueryResult,
   mode: 'tsv' | 'csv' | 'csv_bom' | 'json' | 'jsonl' | 'md' | 'sql',
-  tableHint = 'export_table'
+  tableHint = 'export_table',
+  dbType?: string
 ): string {
   const cols = r.columns.map((c) => c.name);
   if (mode === 'tsv') {
@@ -106,17 +109,12 @@ function formatResultForClipboard(
     return [header, sep, ...body].join('\n');
   }
   if (mode === 'sql') {
-    const colList = cols.map((c) => `"${c}"`).join(', ');
+    const colList = cols.map((c) => quoteIdentForEngine(dbType, c)).join(', ');
+    const quotedTable = quoteIdentForEngine(dbType, tableHint);
     return r.rows
       .map((row) => {
-        const vals = row
-          .map((v) => {
-            if (v === null || v === undefined) return 'NULL';
-            if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-            return `'${String(v).replace(/'/g, "''")}'`;
-          })
-          .join(', ');
-        return `INSERT INTO "${tableHint}" (${colList}) VALUES (${vals});`;
+        const vals = row.map((v) => formatSqlLiteralForEngine(dbType, v)).join(', ');
+        return `INSERT INTO ${quotedTable} (${colList}) VALUES (${vals});`;
       })
       .join('\n');
   }
@@ -144,7 +142,7 @@ function prettyFormatCellValue(raw: any): string {
   return s;
 }
 
-const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, tableHint }) => {
+const ResultGrid = memo<{ result: QueryResult; tableHint?: string; dbType?: string }>(({ result, tableHint, dbType }) => {
   const { t } = useI18n();
   const { isMobile } = useResponsive();
   const [rowSearch, setRowSearch] = useState('');
@@ -223,7 +221,7 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
   const copyAs = (mode: 'tsv' | 'csv' | 'json' | 'md' | 'sql') => {
     const exportTarget: QueryResult =
       filteredRawRows.length === result.rows.length ? result : { ...result, rows: filteredRawRows };
-    const text = formatResultForClipboard(exportTarget, mode, tableHint || 'table_name');
+    const text = formatResultForClipboard(exportTarget, mode, tableHint || 'table_name', dbType);
     writeTextToClipboard(text);
     message.success(t('Copied {count} rows as {mode}', { count: exportTarget.rows.length, mode: mode.toUpperCase() }));
   };
@@ -231,7 +229,7 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
   const downloadAsFile = (mode: 'csv_bom' | 'csv' | 'json' | 'jsonl' | 'md' | 'sql') => {
     const exportTarget: QueryResult =
       filteredRawRows.length === result.rows.length ? result : { ...result, rows: filteredRawRows };
-    const content = formatResultForClipboard(exportTarget, mode, tableHint || 'query_result');
+    const content = formatResultForClipboard(exportTarget, mode, tableHint || 'query_result', dbType);
     const extMap: Record<string, { ext: string; mime: string }> = {
       csv_bom: { ext: 'csv', mime: 'text/csv;charset=utf-8' },
       csv: { ext: 'csv', mime: 'text/csv;charset=utf-8' },
@@ -242,14 +240,10 @@ const ResultGrid = memo<{ result: QueryResult; tableHint?: string }>(({ result, 
     };
     const meta = extMap[mode] || extMap.csv_bom;
     const blob = new Blob([content], { type: meta.mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${tableHint || 'query_result'}_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${meta.ext}`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    triggerBlobDownload(
+      blob,
+      `${tableHint || 'query_result'}_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${meta.ext}`
+    );
   };
 
   const gridWrapRef = useRef<HTMLDivElement | null>(null);
@@ -406,7 +400,8 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
   const defaultHeader = `${DEFAULT_PLACEHOLDER_PREFIX}${tab.connName} (${tab.dbType})\n-- Shortcut: Ctrl+Enter / Cmd+Enter to execute selection or full script (semicolon-separated)\n`;
 
   const [sqlText, setSqlText] = useState(
-    tab.initialSQL || (tab.table ? `SELECT * FROM ${tab.table} LIMIT 100;` : `${defaultHeader}SELECT 1 AS status;`)
+    tab.initialSQL ||
+      (tab.table ? `SELECT * FROM ${quoteIdentForEngine(tab.dbType, tab.table)} LIMIT 100;` : `${defaultHeader}SELECT 1 AS status;`)
   );
   const [currentDB, setCurrentDB] = useState(tab.database || '');
   const [databases, setDatabases] = useState<DatabaseSummary[]>([]);
@@ -512,7 +507,7 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
           // If still on generic SELECT 1 placeholder, populate a real table query for instant convenience
           setSqlText((prev) =>
             prev.endsWith('SELECT 1 AS status;')
-              ? `${defaultHeader}SELECT * FROM ${tableNames[0]} LIMIT 50;`
+              ? `${defaultHeader}SELECT * FROM ${quoteIdentForEngine(tab.dbType, tableNames[0])} LIMIT 50;`
               : prev
           );
         } else {
@@ -668,6 +663,7 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
   };
 
   const tbl = tab.table || firstTableHint || 'table_name';
+  const qTbl = quoteIdentForEngine(tab.dbType, tbl);
 
   const handleEditorSplitterPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
@@ -755,22 +751,22 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
     {
       key: 'select',
       label: 'SELECT ... LIMIT 100',
-      onClick: () => insertTemplate(`SELECT *\nFROM ${tbl}\nWHERE 1 = 1\nLIMIT 100;`),
+      onClick: () => insertTemplate(`SELECT *\nFROM ${qTbl}\nWHERE 1 = 1\nLIMIT 100;`),
     },
     {
       key: 'insert',
       label: 'INSERT INTO ...',
-      onClick: () => insertTemplate(`INSERT INTO ${tbl} (col1, col2)\nVALUES ('val1', 'val2');`),
+      onClick: () => insertTemplate(`INSERT INTO ${qTbl} (col1, col2)\nVALUES ('val1', 'val2');`),
     },
     {
       key: 'update',
       label: 'UPDATE ... SET ...',
-      onClick: () => insertTemplate(`UPDATE ${tbl}\nSET col1 = 'new_value'\nWHERE id = 1;`),
+      onClick: () => insertTemplate(`UPDATE ${qTbl}\nSET col1 = 'new_value'\nWHERE id = 1;`),
     },
     {
       key: 'alter',
       label: 'ALTER TABLE ... ADD COLUMN',
-      onClick: () => insertTemplate(`ALTER TABLE ${tbl}\nADD COLUMN new_col VARCHAR(128);`),
+      onClick: () => insertTemplate(`ALTER TABLE ${qTbl}\nADD COLUMN new_col VARCHAR(128);`),
     },
     {
       key: 'create',
@@ -814,7 +810,7 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
     >
       {/* Top Toolbar */}
       {isMobile ? (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
           <Button
             size="small"
             style={{ height: 34, paddingInline: 12 }}
@@ -829,6 +825,8 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
             <Button
               danger
               size="small"
+              className="dbharbor-touch-target"
+              aria-label={t('Stop')}
               style={{ width: 34, height: 34, padding: 0 }}
               icon={<StopOutlined />}
               onClick={() => abortRef.current?.abort()}
@@ -844,10 +842,12 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
           />
           <Button
             size="small"
+            className="dbharbor-touch-target"
             style={{ width: 34, height: 34, padding: 0 }}
             icon={<HistoryOutlined />}
             onClick={openHistory}
             title={t('History')}
+            aria-label={t('History')}
           />
           <Dropdown
             trigger={['click']}
@@ -934,7 +934,13 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
                     ],
             }}
           >
-            <Button size="small" style={{ width: 34, height: 34, padding: 0 }} icon={<MoreOutlined />} />
+            <Button
+              size="small"
+              className="dbharbor-touch-target"
+              style={{ width: 34, height: 34, padding: 0 }}
+              icon={<MoreOutlined />}
+              aria-label={t('More Actions')}
+            />
           </Dropdown>
         </div>
       ) : (
@@ -1059,10 +1065,10 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
         <div
           className="dbharbor-no-scrollbar"
           style={{
-            height: 30,
+            height: 40,
             display: 'flex',
             alignItems: 'center',
-            gap: 5,
+            gap: 6,
             overflowX: 'auto',
             flexShrink: 0,
             padding: '0 2px',
@@ -1075,17 +1081,20 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => insertQuickSymbol(sym)}
               style={{
-                height: 26,
-                minWidth: 28,
-                padding: '0 8px',
+                height: 34,
+                minWidth: 34,
+                padding: '0 10px',
                 borderRadius: 6,
                 border: `1px solid ${darkMode ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.14)'}`,
                 background: darkMode ? '#1a1d24' : '#f5f7fa',
                 color: darkMode ? '#e6edf3' : '#1f2328',
                 fontFamily: "'JetBrains Mono', Consolas, monospace",
-                fontSize: 12,
+                fontSize: 12.5,
                 fontWeight: 500,
-                lineHeight: '24px',
+                lineHeight: '32px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
                 cursor: 'pointer',
                 flexShrink: 0,
                 whiteSpace: 'nowrap',
@@ -1152,8 +1161,10 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
                   <Button
                     size="small"
                     type="text"
+                    className="dbharbor-touch-target"
                     icon={<ClearOutlined />}
                     title={t('Clear Results')}
+                    aria-label={t('Clear Results')}
                     onClick={() => {
                       setResults([]);
                       setExecError('');
@@ -1168,7 +1179,7 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
                 ? t('Result #{idx} ({count} rows)', { idx: idx + 1, count: r.rows.length })
                 : t('Statement #{idx}', { idx: idx + 1 }),
               children: r.isSelect ? (
-                <ResultGrid result={r} tableHint={tbl} />
+                <ResultGrid result={r} tableHint={tbl} dbType={tab.dbType} />
               ) : (
                 <Alert
                   type="success"
@@ -1307,6 +1318,8 @@ export const SqlConsoleTab: React.FC<Props> = ({ tab, onOpenExportSQL }) => {
                         size="small"
                         type="text"
                         danger
+                        className="dbharbor-touch-target"
+                        aria-label={t('Delete')}
                         icon={<DeleteOutlined />}
                         onClick={async () => {
                           if (sn.id) {

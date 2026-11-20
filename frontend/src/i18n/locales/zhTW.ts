@@ -435,8 +435,7 @@ export const ZH_TW_DICT: Record<string, string> = {
   'Regenerated 8 one-time recovery codes (previous codes invalidated)':
     '已重新產生 8 組一次性備用復原碼（舊復原碼已失效）',
   'Current Password': '目前登入密碼',
-  'New Password (min 6 chars, mix case, digits & symbols)': '新密碼 (至少 6 位，建議混合大小寫、數字與符號)',
-  'Min 6 characters': '至少 6 個字元',
+  'New Password (min 8 chars, mix case, digits & symbols)': '新密碼 (至少 8 位，建議混合大小寫、數字與符號)',
   'Confirm New Password': '確認新密碼',
   'New passwords do not match': '兩次輸入的新密碼不一致',
   'Empty': '未輸入',
@@ -695,7 +694,6 @@ export const ZH_TW_DICT: Record<string, string> = {
   'Apply Paste': '執行貼上',
   'Assign Privileges': '分配權限',
   'Assign or Revoke Database Privileges': '分配或撤銷資料庫權限',
-  'At least 6 characters': '至少 6 個字元',
   'Auth DB': '驗證資料庫',
   'CASCADE (also drop contained objects)': '串聯刪除 (CASCADE，同時刪除內部物件)',
   'Cannot disable your own active administrator account': '無法停用目前正在使用的管理員帳戶',
@@ -1110,7 +1108,6 @@ export const ZH_TW_DICT: Record<string, string> = {
   'Change Account Password': '修改帳號登入密碼',
   'Password Security Checklist': '密碼安全規範與強度檢測',
   'Password Strength': '目前密碼強度',
-  'At least 8 characters recommended (min 6)': '建議長度至少 8 個字元（最低 6 位）',
   'Mix uppercase & lowercase letters': '同時包含大寫與小寫英文字母',
   'Include numbers & special symbols': '包含數字與特殊符號組合',
   'Bcrypt salted hash & multi-device session revocation': 'Bcrypt 自適應加鹽雜湊儲存與多裝置工作階段一鍵撤銷',
@@ -1522,8 +1519,8 @@ export const ZH_TW_DICT: Record<string, string> = {
   'UPDATE (SQL Console)': 'UPDATE（開啟 SQL 主控台）',
   'CREATE TABLE DDL (Copy)': 'CREATE TABLE DDL（複製）',
   'Optional': '選填',
-  'Unsupported image format (use PNG, JPG, WebP, GIF, or SVG)':
-    '不支援的圖片格式（請使用 PNG、JPG、WebP、GIF 或 SVG）',
+  'Unsupported image format (use PNG, JPG, WebP, GIF, or ICO)':
+    '不支援的圖片格式（請使用 PNG、JPG、WebP、GIF 或 ICO）',
   'Image file must not exceed 128 KB': '圖片檔案大小不得超過 128 KB',
   'Failed to encode image file': '圖片檔案編碼失敗',
   'Failed to read image file': '讀取圖片檔案失敗',
@@ -1574,4 +1571,5 @@ export const ZH_TW_DICT: Record<string, string> = {
   'Embedded file-based database engines do not use server-level user accounts or SQL GRANT tables.':
     '嵌入式單一檔案資料庫引擎不使用伺服器層級使用者帳號與 SQL 權限表。',
   'Optional or enter password': '選填或輸入密碼',
+  'Toggle Sidebar': '切換側邊欄',
 };

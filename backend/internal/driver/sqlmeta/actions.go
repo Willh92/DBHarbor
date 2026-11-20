@@ -53,12 +53,12 @@ func validateDuckDBSandboxSQL(sqlText string) error {
 	return sqlbase.ValidateDuckDBRestrictedWebSQL(sqlText)
 }
 
-func validateNoDefinerForNonAdminWeb(req driver.ObjectActionRequest, texts ...string) error {
+func validateNoDefinerForNonAdminWeb(eng string, req driver.ObjectActionRequest, texts ...string) error {
 	if !req.WebMode || req.IsAdmin {
 		return nil
 	}
 	for _, t := range texts {
-		if sqlbase.HasSQLDefinerClause(t) {
+		if sqlbase.HasSQLDefinerClauseForEngine(eng, t) {
 			return errors.New("DEFINER and SQL SECURITY DEFINER clauses are not permitted for non-administrator accounts in Web mode")
 		}
 	}
@@ -118,7 +118,7 @@ func executeObjectActionImpl(ctx context.Context, dbType string, sqlDrv driver.S
 		specSelect = req.Spec.SelectSQL
 		specMacro = req.Spec.MacroExpr
 	}
-	if err := validateNoDefinerForNonAdminWeb(req, req.RoutineSQL, req.ViewSQL, specBody, specSelect, specMacro); err != nil {
+	if err := validateNoDefinerForNonAdminWeb(eng, req, req.RoutineSQL, req.ViewSQL, specBody, specSelect, specMacro); err != nil {
 		return nil, err
 	}
 
@@ -268,7 +268,7 @@ func executeObjectActionImpl(ctx context.Context, dbType string, sqlDrv driver.S
 		}
 	}
 
-	previewSQLs, err := sqlbase.BuildObjectActionSQLs(d, req)
+	previewSQLs, err := sqlbase.BuildObjectActionSQLsForEngine(eng, d, req)
 	if err != nil {
 		return nil, err
 	}
@@ -413,7 +413,7 @@ func buildEventActionSQLs(eng string, d sqlbase.Dialect, req driver.ObjectAction
 				return nil, errors.New("event DO body SQL cannot be empty")
 			}
 			probe := fmt.Sprintf("CREATE EVENT `probe` ON SCHEDULE EVERY 1 DAY DO %s", body)
-			if len(sqlbase.SplitStatements(probe)) != 1 {
+			if _, err := sqlbase.SplitSingleStatementForEngine(eng, probe); err != nil {
 				return nil, errors.New("event DO body must be a single SQL statement or BEGIN ... END compound block")
 			}
 
@@ -435,14 +435,15 @@ func buildEventActionSQLs(eng string, d sqlbase.Dialect, req driver.ObjectAction
 		if raw == "" {
 			return nil, errors.New("event specification or DDL SQL is required")
 		}
-		stmts := sqlbase.SplitStatements(raw)
-		if len(stmts) != 1 {
+		stmt, err := sqlbase.SplitSingleStatementForEngine(eng, raw)
+		if err != nil {
 			return nil, errors.New("event DDL must contain exactly one statement")
 		}
-		if err := sqlbase.ValidateExpectedDDLTarget(stmts[0], []string{"CREATE", "ALTER"}, "EVENT"); err != nil {
+		stmts := []string{stmt}
+		if err := sqlbase.ValidateExpectedDDLTargetForEngine(eng, stmts[0], []string{"CREATE", "ALTER"}, "EVENT"); err != nil {
 			return nil, err
 		}
-		upper := strings.ToUpper(sqlbase.StripLeadingSQLComments(stmts[0]))
+		upper := strings.ToUpper(sqlbase.StripLeadingSQLCommentsForEngine(eng, stmts[0]))
 		if (req.ReplaceExisting || req.Action == "CREATE_OR_REPLACE") && eng != "mariadb" && !strings.Contains(upper, "CREATE OR REPLACE") && strings.HasPrefix(upper, "CREATE") {
 			return []string{"DROP EVENT IF EXISTS " + qEv, stmts[0]}, nil
 		}
@@ -487,20 +488,20 @@ func buildSequenceActionSQLs(eng string, d sqlbase.Dialect, req driver.ObjectAct
 		spec := req.Spec
 		if spec == nil {
 			if strings.TrimSpace(req.RoutineSQL) != "" {
-				stmts := sqlbase.SplitStatements(req.RoutineSQL)
-				if len(stmts) != 1 {
+				stmt, err := sqlbase.SplitSingleStatementForEngine(eng, req.RoutineSQL)
+				if err != nil {
 					return nil, errors.New("sequence DDL must be a single statement")
 				}
-				if err := sqlbase.ValidateExpectedDDLTarget(stmts[0], []string{"CREATE", "ALTER"}, "SEQUENCE"); err != nil {
+				if err := sqlbase.ValidateExpectedDDLTargetForEngine(eng, stmt, []string{"CREATE", "ALTER"}, "SEQUENCE"); err != nil {
 					return nil, err
 				}
-				return stmts, nil
+				return []string{stmt}, nil
 			}
 			spec = &driver.ObjectSpec{}
 		}
 
 		if dt := strings.TrimSpace(spec.DataType); dt != "" {
-			if err := sqlbase.ValidateColumnType(dt); err != nil {
+			if err := sqlbase.ValidateColumnTypeForEngine(eng, dt); err != nil {
 				return nil, err
 			}
 		}
@@ -632,24 +633,23 @@ func buildMatViewActionSQLs(eng string, d sqlbase.Dialect, req driver.ObjectActi
 		} else {
 			rawSelect = req.RoutineSQL
 		}
-		stmts := sqlbase.SplitStatements(rawSelect)
-		if len(stmts) != 1 {
+		stmt, err := sqlbase.SplitSingleStatementForEngine(eng, rawSelect)
+		if err != nil {
 			return nil, errors.New("materialized view definition must contain exactly one SQL statement")
 		}
-		stmt := strings.TrimSpace(stmts[0])
 		if eng == "clickhouse" && req.WebMode && !req.IsAdmin && !req.AllowPrivIP {
 			if err := sqlbase.ValidateClickHouseRestrictedWebSQL(stmt); err != nil {
 				return nil, err
 			}
 		}
-		upper := strings.ToUpper(sqlbase.StripLeadingSQLComments(stmt))
+		upper := strings.ToUpper(sqlbase.StripLeadingSQLCommentsForEngine(eng, stmt))
 		if strings.HasPrefix(upper, "CREATE") || strings.HasPrefix(upper, "ALTER") || strings.HasPrefix(upper, "REPLACE") {
-			if err := sqlbase.ValidateExpectedDDLTarget(stmt, []string{"CREATE", "ALTER", "REPLACE"}, "MATERIALIZED VIEW"); err != nil {
+			if err := sqlbase.ValidateExpectedDDLTargetForEngine(eng, stmt, []string{"CREATE", "ALTER", "REPLACE"}, "MATERIALIZED VIEW"); err != nil {
 				return nil, err
 			}
 			return []string{stmt}, nil
 		}
-		if err := sqlbase.ValidateReadOnlyScript(stmt); err != nil {
+		if err := sqlbase.ValidateReadOnlyScriptForEngine(eng, stmt); err != nil {
 			return nil, fmt.Errorf("materialized view query must be read-only: %w", err)
 		}
 
@@ -673,7 +673,8 @@ func buildMatViewActionSQLs(eng string, d sqlbase.Dialect, req driver.ObjectActi
 			} else {
 				engClause := "MergeTree() ORDER BY tuple()"
 				if req.Spec != nil && strings.TrimSpace(req.Spec.EngineClause) != "" {
-					if sqlbase.ContainsUnquotedSQLMeta(req.Spec.EngineClause) {
+					if sqlbase.ContainsUnquotedSQLMetaForEngine(eng, req.Spec.EngineClause) ||
+						len(sqlbase.SplitStatementsForEngine(eng, "SELECT "+strings.TrimSpace(req.Spec.EngineClause))) > 1 {
 						return nil, errors.New("invalid ClickHouse ENGINE clause")
 					}
 					if req.WebMode && !req.IsAdmin && !req.AllowPrivIP {
@@ -724,11 +725,12 @@ func buildDictionaryActionSQLs(eng string, d sqlbase.Dialect, req driver.ObjectA
 		if raw == "" {
 			raw = strings.TrimSpace(req.ViewSQL)
 		}
-		stmts := sqlbase.SplitStatements(raw)
-		if len(stmts) != 1 {
+		stmt, err := sqlbase.SplitSingleStatementForEngine(eng, raw)
+		if err != nil {
 			return nil, errors.New("ClickHouse DICTIONARY DDL must contain a single statement")
 		}
-		if err := sqlbase.ValidateExpectedDDLTarget(stmts[0], []string{"CREATE", "REPLACE"}, "DICTIONARY"); err != nil {
+		stmts := []string{stmt}
+		if err := sqlbase.ValidateExpectedDDLTargetForEngine(eng, stmts[0], []string{"CREATE", "REPLACE"}, "DICTIONARY"); err != nil {
 			return nil, err
 		}
 		if req.WebMode && !req.IsAdmin {
@@ -760,11 +762,11 @@ func buildClickHouseUDFActionSQLs(d sqlbase.Dialect, req driver.ObjectActionRequ
 				}
 				params = append(params, pt)
 			}
-			if err := sqlbase.ValidateSQLExpression("UDF expression", req.Spec.MacroExpr); err != nil {
+			if err := sqlbase.ValidateSQLExpressionForEngine("clickhouse", "UDF expression", req.Spec.MacroExpr); err != nil {
 				return nil, err
 			}
 			if req.WebMode {
-				if err := sqlbase.ValidateReadOnlyScript("SELECT " + req.Spec.MacroExpr); err != nil {
+				if err := sqlbase.ValidateReadOnlyScriptForEngine("clickhouse", "SELECT "+req.Spec.MacroExpr); err != nil {
 					return nil, err
 				}
 				if !req.IsAdmin && !req.AllowPrivIP {
@@ -777,11 +779,12 @@ func buildClickHouseUDFActionSQLs(d sqlbase.Dialect, req driver.ObjectActionRequ
 			return []string{fmt.Sprintf("CREATE OR REPLACE FUNCTION %s AS %s -> %s", qFn, paramClause, strings.TrimSpace(req.Spec.MacroExpr))}, nil
 		}
 		raw := strings.TrimSpace(req.RoutineSQL)
-		stmts := sqlbase.SplitStatements(raw)
-		if len(stmts) != 1 {
+		stmt, err := sqlbase.SplitSingleStatementForEngine("clickhouse", raw)
+		if err != nil {
 			return nil, errors.New("ClickHouse FUNCTION DDL must contain a single statement")
 		}
-		if err := sqlbase.ValidateExpectedDDLTarget(stmts[0], []string{"CREATE", "REPLACE"}, "FUNCTION"); err != nil {
+		stmts := []string{stmt}
+		if err := sqlbase.ValidateExpectedDDLTargetForEngine("clickhouse", stmts[0], []string{"CREATE", "REPLACE"}, "FUNCTION"); err != nil {
 			return nil, err
 		}
 		if req.WebMode && !req.IsAdmin && !req.AllowPrivIP {
@@ -818,11 +821,12 @@ func buildPackageActionSQLs(eng string, d sqlbase.Dialect, req driver.ObjectActi
 		if raw == "" {
 			return nil, errors.New("package DDL source cannot be empty")
 		}
-		stmts := sqlbase.SplitStatements(raw)
-		if len(stmts) != 1 {
+		stmt, err := sqlbase.SplitSingleStatementForEngine(eng, raw)
+		if err != nil {
 			return nil, errors.New("package DDL must be a single CREATE [OR REPLACE] PACKAGE statement")
 		}
-		if err := sqlbase.ValidateExpectedDDLTarget(stmts[0], []string{"CREATE", "ALTER"}, "PACKAGE BODY", "PACKAGE"); err != nil {
+		stmts := []string{stmt}
+		if err := sqlbase.ValidateExpectedDDLTargetForEngine(eng, stmts[0], []string{"CREATE", "ALTER"}, "PACKAGE BODY", "PACKAGE"); err != nil {
 			return nil, err
 		}
 		return stmts, nil
@@ -986,12 +990,12 @@ func buildPostgresTypeActionSQLs(eng string, d sqlbase.Dialect, req driver.Objec
 				return out, nil
 
 			case "DOMAIN":
-				if err := sqlbase.ValidateColumnType(req.Spec.BaseType); err != nil {
+				if err := sqlbase.ValidateColumnTypeForEngine(eng, req.Spec.BaseType); err != nil {
 					return nil, fmt.Errorf("invalid domain base type: %w", err)
 				}
 				chkClause := ""
 				if strings.TrimSpace(req.Spec.CheckExpr) != "" {
-					if err := sqlbase.ValidateSQLExpression("domain CHECK expression", req.Spec.CheckExpr); err != nil {
+					if err := sqlbase.ValidateSQLExpressionForEngine(eng, "domain CHECK expression", req.Spec.CheckExpr); err != nil {
 						return nil, err
 					}
 					chkClause = fmt.Sprintf(" CHECK (%s)", strings.TrimSpace(req.Spec.CheckExpr))
@@ -1005,14 +1009,14 @@ func buildPostgresTypeActionSQLs(eng string, d sqlbase.Dialect, req driver.Objec
 			}
 		}
 		if strings.TrimSpace(req.RoutineSQL) != "" {
-			stmts := sqlbase.SplitStatements(req.RoutineSQL)
-			if len(stmts) != 1 {
+			stmt, err := sqlbase.SplitSingleStatementForEngine(eng, req.RoutineSQL)
+			if err != nil {
 				return nil, errors.New("TYPE DDL must contain a single statement")
 			}
-			if err := sqlbase.ValidateExpectedDDLTarget(stmts[0], []string{"CREATE", "ALTER"}, "TYPE", "DOMAIN"); err != nil {
+			if err := sqlbase.ValidateExpectedDDLTargetForEngine(eng, stmt, []string{"CREATE", "ALTER"}, "TYPE", "DOMAIN"); err != nil {
 				return nil, err
 			}
-			return stmts, nil
+			return []string{stmt}, nil
 		}
 		return nil, errors.New("type specification or DDL SQL is required")
 
@@ -1128,16 +1132,16 @@ func buildDuckDBMacroActionSQLs(eng string, d sqlbase.Dialect, req driver.Object
 			}
 			expr := strings.TrimSuffix(strings.TrimSpace(req.Spec.MacroExpr), ";")
 			if isTable {
-				stmts := sqlbase.SplitStatements(expr)
-				if len(stmts) != 1 {
+				stmt, err := sqlbase.SplitSingleStatementForEngine(eng, expr)
+				if err != nil {
 					return nil, errors.New("table macro query must contain a single SQL statement")
 				}
-				if err := sqlbase.ValidateReadOnlyScript(stmts[0]); err != nil {
+				if err := sqlbase.ValidateReadOnlyScriptForEngine(eng, stmt); err != nil {
 					return nil, fmt.Errorf("table macro query must be read-only: %w", err)
 				}
-				return []string{fmt.Sprintf("CREATE OR REPLACE MACRO %s(%s) AS TABLE %s", qMacro, strings.Join(params, ", "), stmts[0])}, nil
+				return []string{fmt.Sprintf("CREATE OR REPLACE MACRO %s(%s) AS TABLE %s", qMacro, strings.Join(params, ", "), stmt)}, nil
 			}
-			if err := sqlbase.ValidateSQLExpression("macro expression", expr); err != nil {
+			if err := sqlbase.ValidateSQLExpressionForEngine(eng, "macro expression", expr); err != nil {
 				return nil, err
 			}
 			return []string{fmt.Sprintf("CREATE OR REPLACE MACRO %s(%s) AS %s", qMacro, strings.Join(params, ", "), expr)}, nil
@@ -1152,11 +1156,12 @@ func buildDuckDBMacroActionSQLs(eng string, d sqlbase.Dialect, req driver.Object
 				return nil, err
 			}
 		}
-		stmts := sqlbase.SplitStatements(raw)
-		if len(stmts) != 1 {
+		stmt, err := sqlbase.SplitSingleStatementForEngine(eng, raw)
+		if err != nil {
 			return nil, errors.New("macro DDL must contain a single SQL statement")
 		}
-		if err := sqlbase.ValidateExpectedDDLTarget(stmts[0], []string{"CREATE"}, "MACRO"); err != nil {
+		stmts := []string{stmt}
+		if err := sqlbase.ValidateExpectedDDLTargetForEngine(eng, stmts[0], []string{"CREATE"}, "MACRO"); err != nil {
 			return nil, err
 		}
 		return stmts, nil

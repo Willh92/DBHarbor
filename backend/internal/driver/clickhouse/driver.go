@@ -2,7 +2,6 @@ package clickhouse
 
 import (
 	"context"
-	"crypto/tls"
 	"database/sql"
 	stdsql_driver "database/sql/driver"
 	"errors"
@@ -55,6 +54,7 @@ func init() {
 					{Label: "TLS (Skip Certificate Verification)", Value: "skip-verify"},
 				},
 			},
+			{Key: "caCert", Label: "Custom CA Certificate (PEM, optional)", Type: "text", Target: "options", Placeholder: "-----BEGIN CERTIFICATE-----..."},
 		},
 	}, New)
 }
@@ -109,18 +109,19 @@ func New(cfg driver.ConnectionConfig) (driver.Driver, error) {
 		DialTimeout: 8 * time.Second,
 		Compression: &ch.Compression{Method: ch.CompressionLZ4},
 	}
-	if cfg.Option("__restrict_internal_ip", "") == "1" {
+	restrictIP := cfg.Option("__restrict_internal_ip", "") == "1"
+	if restrictIP {
 		restricted := sqlbase.NewRestrictedDialContext(8 * time.Second)
 		opts.DialContext = func(ctx context.Context, addr string) (net.Conn, error) {
 			return restricted(ctx, "tcp", addr)
 		}
 	}
-	if tlsMode := cfg.Option("tls", "false"); tlsMode == "true" || tlsMode == "skip-verify" {
-		skipVerify := tlsMode == "skip-verify"
-		if skipVerify && cfg.Option("__restrict_internal_ip", "") == "1" {
-			return nil, errors.New("TLS skip-verify is not permitted for restricted non-admin connections")
-		}
-		opts.TLS = &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12, InsecureSkipVerify: skipVerify} // #nosec G402
+	tlsCfg, err := sqlbase.BuildDriverTLSConfig(host, cfg.Option("tls", "false"), cfg.Option("caCert", ""), restrictIP)
+	if err != nil {
+		return nil, err
+	}
+	if tlsCfg != nil {
+		opts.TLS = tlsCfg
 	}
 
 	db := ch.OpenDB(opts)
@@ -187,13 +188,11 @@ func (d *Driver) ListDatabases(ctx context.Context) ([]driver.DatabaseSummary, e
 }
 
 func (d *Driver) CreateDatabase(ctx context.Context, name, _ string) error {
-	_, err := d.db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS "+sqlbase.QuoteIdent(sqlbase.DialectClickHouse, name))
-	return err
+	return sqlbase.Exec(ctx, d.db, "CREATE DATABASE IF NOT EXISTS "+sqlbase.QuoteIdent(sqlbase.DialectClickHouse, name))
 }
 
 func (d *Driver) DropDatabase(ctx context.Context, name string) error {
-	_, err := d.db.ExecContext(ctx, "DROP DATABASE "+sqlbase.QuoteIdent(sqlbase.DialectClickHouse, name))
-	return err
+	return sqlbase.Exec(ctx, d.db, "DROP DATABASE "+sqlbase.QuoteIdent(sqlbase.DialectClickHouse, name))
 }
 
 func (d *Driver) ListSchemas(_ context.Context, _ string) ([]string, error) {
@@ -406,7 +405,7 @@ func (d *Driver) GetTableStructure(ctx context.Context, database, _, table strin
 
 	if strings.TrimSpace(createQuery) == "" {
 		qTbl := sqlbase.QualifyTable(sqlbase.DialectClickHouse, database, "", table)
-		_ = d.db.QueryRowContext(ctx, "SHOW CREATE TABLE "+qTbl).Scan(&createQuery)
+		_ = sqlbase.QueryRow(ctx, d.db, "SHOW CREATE TABLE "+qTbl).Scan(&createQuery)
 	}
 
 	st.Engine = engine
@@ -550,9 +549,8 @@ func (d *Driver) BrowseData(ctx context.Context, req driver.BrowseDataRequest) (
 	if err != nil {
 		return res, err
 	}
-	var total uint64
-	if err := d.db.QueryRowContext(ctx, countSQL).Scan(&total); err == nil {
-		res.Total = int64(total)
+	if total, ok := sqlbase.QueryCount(ctx, d.db, countSQL); ok {
+		res.Total = total
 		res.HasTotal = true
 	}
 	if st, err := d.GetTableStructure(ctx, req.Database, "", req.Table); err == nil {
@@ -593,14 +591,14 @@ func (d *Driver) acquireConnForDB(ctx context.Context, database string) (*sql.Co
 	if targetDB == "" || targetDB == defaultDB {
 		return conn, func() { _ = conn.Close() }, nil
 	}
-	if _, err := conn.ExecContext(ctx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectClickHouse, targetDB)); err != nil {
+	if err := sqlbase.Exec(ctx, conn, "USE "+sqlbase.QuoteIdent(sqlbase.DialectClickHouse, targetDB)); err != nil {
 		_ = conn.Close()
 		return nil, nil, err
 	}
 	cleanup := func() {
 		rCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if _, rErr := conn.ExecContext(rCtx, "USE "+sqlbase.QuoteIdent(sqlbase.DialectClickHouse, defaultDB)); rErr != nil {
+		if rErr := sqlbase.Exec(rCtx, conn, "USE "+sqlbase.QuoteIdent(sqlbase.DialectClickHouse, defaultDB)); rErr != nil {
 			_ = conn.Raw(func(_ any) error { return stdsql_driver.ErrBadConn })
 		}
 		_ = conn.Close()
@@ -626,7 +624,7 @@ func (d *Driver) CreateTable(ctx context.Context, req driver.CreateTableRequest)
 	if req.PreviewOnly {
 		return ddl, nil
 	}
-	_, err = d.db.ExecContext(ctx, ddl)
+	err = sqlbase.Exec(ctx, d.db, ddl)
 	return ddl, err
 }
 
@@ -646,10 +644,10 @@ func buildClickHouseAlterTableSQLs(req driver.AlterTableRequest) ([]string, erro
 			if pName == "" || pQuery == "" {
 				return nil, errors.New("projection name and SELECT query are required")
 			}
-			if len(sqlbase.SplitStatements(pQuery)) != 1 {
+			if len(sqlbase.SplitStatementsForEngine("clickhouse", pQuery)) != 1 {
 				return nil, errors.New("projection query must be a single SELECT statement")
 			}
-			if err := sqlbase.ValidateReadOnlyScript(pQuery); err != nil {
+			if err := sqlbase.ValidateReadOnlyScriptForEngine("clickhouse", pQuery); err != nil {
 				return nil, fmt.Errorf("invalid projection query: %w", err)
 			}
 			stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s ADD PROJECTION %s (%s)",
@@ -696,10 +694,10 @@ func buildClickHouseAlterTableSQLs(req driver.AlterTableRequest) ([]string, erro
 			if sName == "" || sExpr == "" || sType == "" {
 				return nil, errors.New("skipping index name, expression, and type are required")
 			}
-			if err := sqlbase.ValidateSQLExpression("skipping index expression", sExpr); err != nil {
+			if err := sqlbase.ValidateSQLExpressionForEngine("clickhouse", "skipping index expression", sExpr); err != nil {
 				return nil, err
 			}
-			if err := sqlbase.ValidateSQLExpression("skipping index type", sType); err != nil {
+			if err := sqlbase.ValidateSQLExpressionForEngine("clickhouse", "skipping index type", sType); err != nil {
 				return nil, err
 			}
 			gran := sk.Granularity
@@ -743,7 +741,7 @@ func buildClickHouseAlterTableSQLs(req driver.AlterTableRequest) ([]string, erro
 				tbl, sqlbase.QuoteIdent(sqlbase.DialectClickHouse, sName)))
 
 		case "MODIFY_TTL":
-			if err := sqlbase.ValidateSQLExpression("table TTL expression", act.TTLExpr); err != nil {
+			if err := sqlbase.ValidateSQLExpressionForEngine("clickhouse", "table TTL expression", act.TTLExpr); err != nil {
 				return nil, err
 			}
 			stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s MODIFY TTL %s", tbl, strings.TrimSpace(act.TTLExpr)))
@@ -782,10 +780,8 @@ func (d *Driver) AlterTable(ctx context.Context, req driver.AlterTableRequest) (
 	if req.PreviewOnly {
 		return stmts, nil
 	}
-	for _, s := range stmts {
-		if _, err := d.db.ExecContext(ctx, s); err != nil {
-			return stmts, err
-		}
+	if err := sqlbase.ExecBatch(ctx, d.db, stmts); err != nil {
+		return stmts, err
 	}
 	return stmts, nil
 }
@@ -802,12 +798,7 @@ func (d *Driver) ManageObject(ctx context.Context, req driver.ObjectActionReques
 			}
 		}
 	}
-	for _, s := range sqls {
-		if _, err := d.db.ExecContext(ctx, s); err != nil {
-			return err
-		}
-	}
-	return nil
+	return sqlbase.ExecBatch(ctx, d.db, sqls)
 }
 
 func (d *Driver) ExecuteSQL(ctx context.Context, database, query string, maxRows int) ([]driver.QueryResult, error) {
@@ -822,9 +813,9 @@ func (d *Driver) ExecuteSQL(ctx context.Context, database, query string, maxRows
 			return nil, cErr
 		}
 		defer release()
-		return sqlbase.ExecuteMultiSQLConn(ctx, conn, query, maxRows)
+		return sqlbase.ExecuteMultiSQLConnForEngine(ctx, conn, "clickhouse", query, maxRows)
 	}
-	return sqlbase.ExecuteMultiSQL(ctx, d.db, query, maxRows)
+	return sqlbase.ExecuteMultiSQLForEngine(ctx, d.db, "clickhouse", query, maxRows)
 }
 
 func (d *Driver) StreamExport(ctx context.Context, req driver.ExportRequest, w io.Writer) error {
@@ -853,6 +844,14 @@ func (d *Driver) StreamExport(ctx context.Context, req driver.ExportRequest, w i
 				}
 			}
 			items = append(items, sqlbase.TableExportItem{Table: name, DDL: ddl})
+		}
+		if strings.TrimSpace(req.Database) != "" {
+			conn, release, cErr := d.acquireConnForDB(ctx, req.Database)
+			if cErr != nil {
+				return cErr
+			}
+			defer release()
+			return sqlbase.StreamMultiTableExportConn(ctx, conn, sqlbase.DialectClickHouse, req, items, w)
 		}
 		return sqlbase.StreamMultiTableExport(ctx, d.db, sqlbase.DialectClickHouse, req, items, w)
 	}
@@ -901,7 +900,8 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 	if database == "" {
 		database = "default"
 	}
-	rows, err := d.db.QueryContext(ctx, `SELECT table, name FROM system.columns WHERE database = ? ORDER BY table, position`, database)
+	const maxCHAutocompleteCols = 25000
+	rows, err := sqlbase.Query(ctx, d.db, `SELECT table, name FROM system.columns WHERE database = ? ORDER BY table, position LIMIT 25000`, database)
 	if err != nil {
 		if sqlbase.IsAuthError("clickhouse", err) {
 			return meta, err
@@ -909,10 +909,15 @@ func (d *Driver) GetAutocompleteMeta(ctx context.Context, database string) (driv
 		return meta, nil
 	}
 	defer rows.Close()
+	rowCount := 0
 	for rows.Next() {
+		if rowCount >= maxCHAutocompleteCols {
+			break
+		}
 		var t, c string
 		if rows.Scan(&t, &c) == nil {
 			meta.Tables[t] = append(meta.Tables[t], c)
+			rowCount++
 		}
 	}
 	return meta, nil
@@ -1025,7 +1030,7 @@ func (d *Driver) ManagePartition(ctx context.Context, req driver.PartitionAction
 	if req.PreviewOnly {
 		return stmt, nil
 	}
-	_, err := d.db.ExecContext(ctx, stmt)
+	err := sqlbase.Exec(ctx, d.db, stmt)
 	return stmt, err
 }
 

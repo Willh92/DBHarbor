@@ -1,9 +1,11 @@
 package dbprivs
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"dbharbor/backend/internal/driver"
 	"dbharbor/backend/internal/version"
 )
 
@@ -96,6 +98,84 @@ func TestEmbeddedLocalizedChangelogs(t *testing.T) {
 	}
 	if m["en-US"] == m["zh-CN"] || m["zh-CN"] == m["ja-JP"] {
 		t.Fatal("expected localized embedded changelogs to have distinct language contents")
+	}
+}
+
+type mockRedisKVDriver struct {
+	capturedArgs [][]any
+	listOutput   string
+}
+
+func (m *mockRedisKVDriver) Meta() driver.DriverMeta                        { return driver.DriverMeta{Type: "redis"} }
+func (m *mockRedisKVDriver) Ping(context.Context) (driver.ServerInfo, error) { return driver.ServerInfo{}, nil }
+func (m *mockRedisKVDriver) Close() error                                   { return nil }
+func (m *mockRedisKVDriver) ListDatabases(context.Context) ([]driver.DatabaseSummary, error) {
+	return nil, nil
+}
+func (m *mockRedisKVDriver) CreateDatabase(context.Context, string, string) error { return nil }
+func (m *mockRedisKVDriver) ScanKeys(context.Context, int, string, uint64, int64) (driver.KVScanResult, error) {
+	return driver.KVScanResult{}, nil
+}
+func (m *mockRedisKVDriver) GetKey(context.Context, int, string) (driver.KVEntryDetail, error) {
+	return driver.KVEntryDetail{}, nil
+}
+func (m *mockRedisKVDriver) SetKey(context.Context, int, driver.KVSetRequest) error { return nil }
+func (m *mockRedisKVDriver) MutateCollectionItem(context.Context, int, driver.KVItemMutationRequest) error {
+	return nil
+}
+func (m *mockRedisKVDriver) DeleteKeys(context.Context, int, []string) (int64, error) { return 0, nil }
+func (m *mockRedisKVDriver) SetTTL(context.Context, int, string, int64) error          { return nil }
+func (m *mockRedisKVDriver) ExecuteCommand(context.Context, int, string) (driver.KVCommandResult, error) {
+	return driver.KVCommandResult{}, nil
+}
+func (m *mockRedisKVDriver) ExecuteCommandArgs(_ context.Context, _ int, args ...any) (driver.KVCommandResult, error) {
+	cp := append([]any(nil), args...)
+	m.capturedArgs = append(m.capturedArgs, cp)
+	return driver.KVCommandResult{Output: m.listOutput}, nil
+}
+
+func TestRedisACLStructuredArgsPreservesSpecialPasswordChars(t *testing.T) {
+	specialPass := `p@"s's\w#o r d!`
+	req := ActionRequest{
+		Action:    "CREATE_USER",
+		Username:  "app_acl",
+		Password:  specialPass,
+		ACLPreset: "readonly",
+	}
+
+	// BuildRedactedStatements must mask password
+	redacted, err := BuildRedactedStatements("redis", req)
+	if err != nil || len(redacted) != 1 || !strings.Contains(redacted[0], ">********") {
+		t.Fatalf("unexpected redacted Redis ACL statement: %v, err=%v", redacted, err)
+	}
+	if strings.Contains(redacted[0], specialPass) {
+		t.Fatalf("redacted statement leaked password: %s", redacted[0])
+	}
+
+	// ExecuteAction must pass discrete RESP args verbatim without splitCommandArgs corruption
+	mockKV := &mockRedisKVDriver{}
+	stmts, err := ExecuteAction(context.Background(), "redis", mockKV, req)
+	if err != nil || len(stmts) != 1 {
+		t.Fatalf("ExecuteAction failed: err=%v stmts=%v", err, stmts)
+	}
+	if len(mockKV.capturedArgs) != 1 {
+		t.Fatalf("expected 1 ExecuteCommandArgs call, got %d", len(mockKV.capturedArgs))
+	}
+	gotArgs := mockKV.capturedArgs[0]
+	wantPassArg := ">" + specialPass
+	if len(gotArgs) < 6 || gotArgs[0] != "ACL" || gotArgs[1] != "SETUSER" || gotArgs[2] != "app_acl" || gotArgs[3] != "on" || gotArgs[4] != wantPassArg {
+		t.Fatalf("unexpected RESP args sent to ExecuteCommandArgs: %#v", gotArgs)
+	}
+
+	// Reject control characters in password
+	for _, bad := range []string{"bad\rpass", "bad\npass", "bad\x00pass"} {
+		if _, err := BuildStatements("redis", ActionRequest{
+			Action:   "ALTER_USER",
+			Username: "app_acl",
+			Password: bad,
+		}); err == nil {
+			t.Fatalf("expected control char password %q to be rejected", bad)
+		}
 	}
 }
 

@@ -805,6 +805,7 @@ type KeyValueDriver interface {
 	DeleteKeys(ctx context.Context, dbIndex int, keys []string) (int64, error)
 	SetTTL(ctx context.Context, dbIndex int, key string, ttlSeconds int64) error
 	ExecuteCommand(ctx context.Context, dbIndex int, cmdLine string) (KVCommandResult, error)
+	ExecuteCommandArgs(ctx context.Context, dbIndex int, args ...any) (KVCommandResult, error)
 }
 
 type DocumentDriver interface {

@@ -119,7 +119,7 @@ export const ServerMonitorTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
 
   const deferredFilter = useDeferredValue(sessionFilter);
   const maxStorageBytes = useMemo(
-    () => Math.max(1, ...(snapshot?.storage.map((s) => s.sizeBytes || s.rows) || [1])),
+    () => Math.max(1, ...(snapshot?.storage || []).map((s) => s.sizeBytes || s.rows)),
     [snapshot?.storage]
   );
   const filteredSessions = useMemo(() => {
@@ -128,9 +128,9 @@ export const ServerMonitorTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
     if (!q) return list;
     return list.filter(
       (s) =>
-        s.query.toLowerCase().includes(q) ||
-        s.user.toLowerCase().includes(q) ||
-        s.id.toLowerCase().includes(q)
+        (s.query || '').toLowerCase().includes(q) ||
+        (s.user || '').toLowerCase().includes(q) ||
+        (s.id || '').toLowerCase().includes(q)
     );
   }, [snapshot?.sessions, deferredFilter]);
 
@@ -232,7 +232,7 @@ export const ServerMonitorTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
 
         <Space wrap>
           <Select
-            size="small"
+            size={isMobile ? 'middle' : 'small'}
             value={pollSec}
             onChange={setPollSec}
             style={{ width: 155 }}
@@ -242,7 +242,14 @@ export const ServerMonitorTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
               { label: t('Refresh every 10s'), value: 10 },
             ]}
           />
-          <Button size="small" type="primary" icon={<ReloadOutlined />} loading={loading} onClick={() => void fetchMonitor(false)}>
+          <Button
+            size={isMobile ? 'middle' : 'small'}
+            className="dbharbor-touch-target"
+            type="primary"
+            icon={<ReloadOutlined />}
+            loading={loading}
+            onClick={() => void fetchMonitor(false)}
+          >
             {t('Refresh Now')}
           </Button>
         </Space>
@@ -259,7 +266,7 @@ export const ServerMonitorTab: React.FC<{ tab: WorkspaceTab }> = ({ tab }) => {
         ))}
         <Col xs={12} sm={8} md={6}>
           <Card size="small">
-            <Statistic title={t('Captured Sessions')} value={snapshot?.sessions.length || 0} valueStyle={{ fontSize: 20 }} />
+            <Statistic title={t('Captured Sessions')} value={snapshot?.sessions?.length || 0} valueStyle={{ fontSize: 20 }} />
           </Card>
         </Col>
       </Row>

@@ -81,6 +81,10 @@ func (s *Server) handleAdminCreateUser(c *Context) {
 		c.JSON(http.StatusBadRequest, H{"error": "Invalid user creation payload"})
 		return
 	}
+	if len(in.Password) < 8 {
+		c.JSON(http.StatusBadRequest, H{"error": "initial password must be at least 8 characters"})
+		return
+	}
 	created, err := s.store.CreateUser(in)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": err.Error()})

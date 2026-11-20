@@ -244,6 +244,8 @@ export const CreateTableModal: React.FC<Props> = ({
             size="small"
             type="text"
             danger
+            className="dbharbor-touch-target"
+            aria-label={t('Delete')}
             disabled={colCount <= 1}
             icon={<DeleteOutlined />}
             onClick={() => setColumns((prev) => prev.filter((___, i) => i !== idx))}
@@ -536,6 +538,8 @@ export const CreateTableModal: React.FC<Props> = ({
                     size="small"
                     type="text"
                     danger
+                    className="dbharbor-touch-target"
+                    aria-label={t('Delete')}
                     icon={<DeleteOutlined />}
                     onClick={() => setChecks((prev) => prev.filter((_, i) => i !== idx))}
                   />

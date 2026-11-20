@@ -6,6 +6,7 @@ import { api } from './api/client';
 import { useViewportPopupClamp } from './hooks/useViewportPopupClamp';
 import { useI18n } from './i18n/useI18n';
 import { useWorkbenchStore } from './store/useWorkbenchStore';
+import { hasSavedThemeOverride, resolveInitialDarkMode } from './utils/runtimeMode';
 
 const WorkbenchLayout = lazy(() =>
   import('./layouts/WorkbenchLayout').then((m) => ({ default: m.WorkbenchLayout }))
@@ -16,7 +17,7 @@ const LoginPage = lazy(() =>
 );
 
 export const App: React.FC = () => {
-  const { isDesktop, token, darkMode, logout } = useWorkbenchStore();
+  const { isDesktop, token, darkMode, logout, setDarkModeFromSystem } = useWorkbenchStore();
   const { locale, t } = useI18n();
   const [antdLocale, setAntdLocale] = useState<Locale>(enUS);
 
@@ -62,6 +63,37 @@ export const App: React.FC = () => {
   }, [darkMode, isDesktop, showWorkbench]);
 
   useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mql = window.matchMedia('(prefers-color-scheme: dark)');
+    const handleOsThemeChange = (e: MediaQueryListEvent) => {
+      if (!hasSavedThemeOverride()) {
+        setDarkModeFromSystem(e.matches);
+      }
+    };
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'dbharbor_theme') {
+        if (e.newValue === 'dark') setDarkModeFromSystem(true);
+        else if (e.newValue === 'light') setDarkModeFromSystem(false);
+        else setDarkModeFromSystem(resolveInitialDarkMode());
+      }
+    };
+    if (typeof mql.addEventListener === 'function') {
+      mql.addEventListener('change', handleOsThemeChange);
+    } else if (typeof (mql as any).addListener === 'function') {
+      (mql as any).addListener(handleOsThemeChange);
+    }
+    window.addEventListener('storage', handleStorageChange);
+    return () => {
+      if (typeof mql.removeEventListener === 'function') {
+        mql.removeEventListener('change', handleOsThemeChange);
+      } else if (typeof (mql as any).removeListener === 'function') {
+        (mql as any).removeListener(handleOsThemeChange);
+      }
+      window.removeEventListener('storage', handleStorageChange);
+    };
+  }, [setDarkModeFromSystem]);
+
+  useEffect(() => {
     let active = true;
     if (locale === 'en-US') {
       setAntdLocale(enUS);
@@ -86,7 +118,7 @@ export const App: React.FC = () => {
   }, [locale]);
 
   const loadingFallback = (
-    <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+    <div className="dbharbor-full-viewport-center">
       <Spin size="large" tip={isDesktop || token ? t('Loading DBHarbor Workbench...') : undefined} />
     </div>
   );

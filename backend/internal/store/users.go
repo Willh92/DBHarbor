@@ -365,13 +365,15 @@ func (s *Store) ListUsers() ([]User, error) {
 	return list, nil
 }
 
+const minUserPasswordLength = 8
+
 func (s *Store) CreateUser(in CreateUserInput) (User, error) {
 	uname := strings.TrimSpace(in.Username)
 	if !validUsernameRe.MatchString(uname) {
 		return User{}, errors.New("username must be 2-64 characters using letters, numbers, '.', '_', '-', or '@'")
 	}
-	if len(in.Password) < 6 {
-		return User{}, errors.New("initial password must be at least 6 characters")
+	if len(in.Password) < minUserPasswordLength {
+		return User{}, fmt.Errorf("initial password must be at least %d characters", minUserPasswordLength)
 	}
 	role := NormalizeRole(in.Role)
 	dname := strings.TrimSpace(in.DisplayName)
@@ -527,8 +529,8 @@ func (s *Store) UpdateUserProfile(userID, displayName string) error {
 }
 
 func (s *Store) AdminResetPassword(userID, newPass string, forceChange bool) ([]string, error) {
-	if len(newPass) < 6 {
-		return nil, errors.New("new password must be at least 6 characters")
+	if len(newPass) < minUserPasswordLength {
+		return nil, fmt.Errorf("new password must be at least %d characters", minUserPasswordLength)
 	}
 	var exists int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE id = ?`, userID).Scan(&exists); err != nil || exists == 0 {
@@ -978,7 +980,7 @@ func (s *Store) ImportConnections(profiles []ExportedConnectionProfile, p UserPr
 	}
 	defer stmt.Close()
 
-	now := time.Now().Unix()
+	now := time.Now().UTC().Format(time.RFC3339)
 	imported := 0
 	for _, item := range profiles {
 		name := strings.TrimSpace(item.Name)

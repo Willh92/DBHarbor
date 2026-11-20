@@ -89,61 +89,122 @@ var forbiddenClickHouseDictSources = map[string]struct{}{
 }
 
 var forbiddenDuckDBWebKeywordsAndFuncs = map[string]struct{}{
-	"READ_CSV":               {},
-	"READ_CSV_AUTO":          {},
-	"READ_PARQUET":           {},
-	"READ_JSON":              {},
-	"READ_JSON_AUTO":         {},
-	"READ_JSON_OBJECTS":      {},
-	"READ_TEXT":              {},
-	"READ_BLOB":              {},
-	"PARQUET_SCAN":           {},
-	"CSV_SCAN":               {},
-	"JSON_SCAN":              {},
-	"SQLITE_SCAN":            {},
-	"SQLITE_ATTACH":          {},
-	"POSTGRES_SCAN":          {},
-	"POSTGRES_ATTACH":        {},
-	"MYSQL_SCAN":             {},
-	"MYSQL_ATTACH":           {},
-	"ICEBERG_SCAN":           {},
-	"DELTA_SCAN":             {},
-	"READ_XLSX":              {},
-	"ST_READ":                {},
-	"GLOB":                   {},
-	"LS":                     {},
-	"COPY":                   {},
-	"ATTACH":                 {},
-	"DETACH":                 {},
-	"INSTALL":                {},
-	"LOAD":                   {},
-	"EXPORT":                 {},
-	"IMPORT":                 {},
-	"HTTPFS":                 {},
-	"GETENV":                 {},
-	"CURRENT_SETTING":        {},
-	"DUCKDB_SECRETS":         {},
-	"ENABLE_EXTERNAL_ACCESS": {},
-	"LOCK_CONFIGURATION":     {},
+	"READ_CSV":                     {},
+	"READ_CSV_AUTO":                {},
+	"READ_CSV_OBJECTS":             {},
+	"READ_PARQUET":                 {},
+	"READ_JSON":                    {},
+	"READ_JSON_AUTO":               {},
+	"READ_JSON_OBJECTS":            {},
+	"READ_NDJSON":                  {},
+	"READ_NDJSON_AUTO":             {},
+	"READ_NDJSON_OBJECTS":          {},
+	"READ_TEXT":                    {},
+	"READ_BLOB":                    {},
+	"PARQUET_SCAN":                 {},
+	"PARQUET_METADATA":             {},
+	"PARQUET_SCHEMA":               {},
+	"PARQUET_KV_METADATA":          {},
+	"PARQUET_FILE_METADATA":        {},
+	"CSV_SCAN":                     {},
+	"SNIFF_CSV":                    {},
+	"JSON_SCAN":                    {},
+	"SQLITE_SCAN":                  {},
+	"SQLITE_ATTACH":                {},
+	"POSTGRES_SCAN":                {},
+	"POSTGRES_ATTACH":              {},
+	"POSTGRES_QUERY":               {},
+	"MYSQL_SCAN":                   {},
+	"MYSQL_ATTACH":                 {},
+	"MYSQL_QUERY":                  {},
+	"ICEBERG_SCAN":                 {},
+	"ICEBERG_METADATA":             {},
+	"ICEBERG_SNAPSHOTS":            {},
+	"DELTA_SCAN":                   {},
+	"READ_XLSX":                    {},
+	"ST_READ":                      {},
+	"COPY":                         {},
+	"ATTACH":                       {},
+	"DETACH":                       {},
+	"INSTALL":                      {},
+	"LOAD":                         {},
+	"HTTPFS":                       {},
+	"GETENV":                       {},
+	"CURRENT_SETTING":              {},
+	"DUCKDB_SETTINGS":              {},
+	"DUCKDB_SECRETS":               {},
+	"WHICH_SECRET":                 {},
+	"DUCKDB_EXTENSIONS":            {},
+	"ENABLE_EXTERNAL_ACCESS":       {},
+	"LOCK_CONFIGURATION":           {},
+	"AUTOINSTALL_KNOWN_EXTENSIONS": {},
+	"AUTOLOAD_KNOWN_EXTENSIONS":    {},
+	"CUSTOM_EXTENSION_REPOSITORY":  {},
+	"EXTENSION_DIRECTORY":          {},
+	"ALLOWED_DIRECTORIES":          {},
+	"ALLOWED_PATHS":                {},
+	"DISABLED_FILESYSTEMS":         {},
+	"SECRET_DIRECTORY":             {},
+	"TEMP_DIRECTORY":               {},
+	"ALLOW_UNSIGNED_EXTENSIONS":    {},
+	"ALLOW_COMMUNITY_EXTENSIONS":   {},
+	"ALLOW_PERSISTENT_SECRETS":     {},
+}
+
+var callOnlyDuckDBWebFuncs = map[string]struct{}{
+	"GLOB": {},
+	"LS":   {},
 }
 
 // HasSQLDefinerClause lexes sqlText (stripping comments and unwrapping /*! ... */ / /*M! ... */)
 // and reports whether it contains a DEFINER = ... clause or [SQL] SECURITY DEFINER privilege escalation clause.
 func HasSQLDefinerClause(sqlText string) bool {
+	return HasSQLDefinerClauseForEngine("", sqlText)
+}
+
+// HasSQLDefinerClauseForEngine behaves like HasSQLDefinerClause using lexical rules for engine.
+func HasSQLDefinerClauseForEngine(engine, sqlText string) bool {
 	if strings.TrimSpace(sqlText) == "" {
 		return false
 	}
-	_, lexTokens, _ := lexSQLForReadOnlyGuard(sqlText)
-	for i := 0; i < len(lexTokens); i++ {
-		tok := lexTokens[i]
-		if tok.kind != roTokWord {
-			continue
-		}
-		if tok.val == "DEFINER" && i+1 < len(lexTokens) && lexTokens[i+1].kind == roTokEq {
+	opts := SyntaxOptionsForEngine(engine)
+	variants := []SQLSyntaxOptions{opts}
+	if hasExecCommentCandidate(sqlText, opts) {
+		var overflowed bool
+		variants, overflowed = execCommentOptsVariants(opts, sqlText)
+		if overflowed {
 			return true
 		}
-		if tok.val == "SECURITY" && i+1 < len(lexTokens) && lexTokens[i+1].kind == roTokWord && lexTokens[i+1].val == "DEFINER" {
-			return true
+	}
+	for _, variant := range variants {
+		_, lexTokens, _ := lexSQLForReadOnlyGuardWithOpts(sqlText, variant)
+		for i := 0; i < len(lexTokens); i++ {
+			tok := lexTokens[i]
+			if tok.kind != roTokWord {
+				continue
+			}
+			if tok.val == "DEFINER" && i+1 < len(lexTokens) && lexTokens[i+1].kind == roTokEq {
+				return true
+			}
+			if tok.val == "SECURITY" && i+1 < len(lexTokens) && lexTokens[i+1].kind == roTokWord && lexTokens[i+1].val == "DEFINER" {
+				return true
+			}
+		}
+		if variant.ExecComments || variant.MariaExecComments {
+			if _, found := hasMonotonicTokenPair(
+				lexTokens,
+				func(t roLexToken) bool { return t.kind == roTokWord && t.val == "DEFINER" },
+				func(t roLexToken) bool { return t.kind == roTokEq },
+			); found {
+				return true
+			}
+			if _, found := hasMonotonicTokenPair(
+				lexTokens,
+				func(t roLexToken) bool { return t.kind == roTokWord && t.val == "SECURITY" },
+				func(t roLexToken) bool { return t.kind == roTokWord && t.val == "DEFINER" },
+			); found {
+				return true
+			}
 		}
 	}
 	return false
@@ -153,7 +214,29 @@ func HasSQLDefinerClause(sqlText string) bool {
 // that stmt starts with one of allowedVerbs (e.g. CREATE, ALTER, REPLACE), followed only by benign
 // SQL DDL modifiers, and targets one of expectedObjects (e.g. "VIEW", "MATERIALIZED VIEW", "FUNCTION", "PROCEDURE").
 func ValidateExpectedDDLTarget(stmt string, allowedVerbs []string, expectedObjects ...string) error {
-	_, lexTokens, _ := lexSQLForReadOnlyGuard(stmt)
+	return ValidateExpectedDDLTargetForEngine("", stmt, allowedVerbs, expectedObjects...)
+}
+
+// ValidateExpectedDDLTargetForEngine behaves like ValidateExpectedDDLTarget using lexical rules for engine.
+func ValidateExpectedDDLTargetForEngine(engine, stmt string, allowedVerbs []string, expectedObjects ...string) error {
+	opts := SyntaxOptionsForEngine(engine)
+	if !hasExecCommentCandidate(stmt, opts) {
+		return validateExpectedDDLTargetWithOpts(stmt, opts, allowedVerbs, expectedObjects...)
+	}
+	variants, overflowed := execCommentOptsVariants(opts, stmt)
+	if overflowed {
+		return errors.New("statement exceeds executable-comment complexity limit")
+	}
+	for _, variant := range variants {
+		if err := validateExpectedDDLTargetWithOpts(stmt, variant, allowedVerbs, expectedObjects...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateExpectedDDLTargetWithOpts(stmt string, opts SQLSyntaxOptions, allowedVerbs []string, expectedObjects ...string) error {
+	_, lexTokens, _ := lexSQLForReadOnlyGuardWithOpts(stmt, opts)
 	if len(lexTokens) == 0 || lexTokens[0].kind != roTokWord {
 		return errors.New("DDL statement must begin with a valid SQL keyword")
 	}
@@ -250,7 +333,7 @@ func ValidateClickHouseWebEngineClause(engineClause string) error {
 	if trimmed == "" {
 		return nil
 	}
-	_, lexTokens, _ := lexSQLForReadOnlyGuard(trimmed)
+	_, lexTokens, _ := lexSQLForReadOnlyGuardWithOpts(trimmed, SyntaxOptionsForEngine("clickhouse"))
 	for i, tok := range lexTokens {
 		if tok.kind != roTokWord && tok.kind != roTokQuotedIdent {
 			continue
@@ -267,7 +350,7 @@ func ValidateClickHouseWebEngineClause(engineClause string) error {
 // ValidateClickHouseDictionaryDDL validates a ClickHouse DICTIONARY DDL statement in Web mode,
 // blocking external SOURCE(...) definitions (even with embedded SQL comments) for non-admin users.
 func ValidateClickHouseDictionaryDDL(stmt string, allowPrivIP bool) error {
-	_, lexTokens, _ := lexSQLForReadOnlyGuard(stmt)
+	_, lexTokens, _ := lexSQLForReadOnlyGuardWithOpts(stmt, SyntaxOptionsForEngine("clickhouse"))
 	for i := 0; i < len(lexTokens); i++ {
 		if lexTokens[i].kind == roTokWord && lexTokens[i].val == "SOURCE" &&
 			i+1 < len(lexTokens) && lexTokens[i+1].kind == roTokLParen {
@@ -288,7 +371,8 @@ func ValidateClickHouseDictionaryDDL(stmt string, allowPrivIP bool) error {
 // in restricted Web mode (`webMode && !allowPrivIP`), blocking external table engines, external table functions,
 // and external dictionary sources even with embedded SQL comments or quoted identifiers.
 func ValidateClickHouseRestrictedWebSQL(script string) error {
-	stmts := SplitStatements(script)
+	chOpts := SyntaxOptionsForEngine("clickhouse")
+	stmts := SplitStatementsForEngine("clickhouse", script)
 	if len(stmts) == 0 {
 		if strings.TrimSpace(script) == "" {
 			return nil
@@ -296,7 +380,7 @@ func ValidateClickHouseRestrictedWebSQL(script string) error {
 		stmts = []string{script}
 	}
 	for _, stmt := range stmts {
-		_, lexTokens, _ := lexSQLForReadOnlyGuard(stmt)
+		_, lexTokens, _ := lexSQLForReadOnlyGuardWithOpts(stmt, chOpts)
 		hasDict := false
 		for i, tok := range lexTokens {
 			if tok.kind == roTokWord && tok.val == "DICTIONARY" {
@@ -331,12 +415,13 @@ func ValidateClickHouseRestrictedWebSQL(script string) error {
 }
 
 // ValidateDuckDBRestrictedWebSQL lexically validates DuckDB SQL in Web mode, rejecting CLI dot-commands,
-// comment-obfuscated forbidden extensions/functions, and direct file path scans in FROM/JOIN clauses.
+// comment-obfuscated forbidden extensions/functions, PRAGMA/CALL/SECRET, and direct file path scans in FROM/JOIN/DESCRIBE/SUMMARIZE clauses.
 func ValidateDuckDBRestrictedWebSQL(script string) error {
-	if hasSQLDotCommandOutsideQuotes(script) {
+	duckOpts := SyntaxOptionsForEngine("duckdb")
+	if hasSQLDotCommandOutsideQuotesWithOpts(script, duckOpts) {
 		return errors.New("DuckDB CLI dot-commands are disabled in Web sandbox mode")
 	}
-	stmts := SplitStatements(script)
+	stmts := SplitStatementsForEngine("duckdb", script)
 	if len(stmts) == 0 {
 		if strings.TrimSpace(script) == "" {
 			return nil
@@ -344,19 +429,106 @@ func ValidateDuckDBRestrictedWebSQL(script string) error {
 		stmts = []string{script}
 	}
 	for _, stmt := range stmts {
-		if strings.HasPrefix(strings.TrimSpace(StripLeadingSQLComments(stmt)), ".") {
+		trimmed := strings.TrimSpace(StripLeadingSQLCommentsForEngine("duckdb", stmt))
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, ".") {
 			return errors.New("DuckDB CLI dot-commands are disabled in Web sandbox mode")
 		}
-		_, lexTokens, _ := lexSQLForReadOnlyGuard(stmt)
+		_, lexTokens, _ := lexSQLForReadOnlyGuardWithOpts(stmt, duckOpts)
+		if len(lexTokens) == 0 {
+			continue
+		}
+		if lexTokens[0].kind == roTokDot {
+			return errors.New("DuckDB CLI dot-commands are disabled in Web sandbox mode")
+		}
+		nextNonLParenIsString := func(start int) bool {
+			j := start
+			for j < len(lexTokens) && lexTokens[j].kind == roTokLParen {
+				j++
+			}
+			return j < len(lexTokens) && lexTokens[j].kind == roTokString
+		}
+
+		parenDepth := 0
+		fromDepths := map[int]bool{}
+		inValuesDepth := map[int]bool{}
+
 		for i, tok := range lexTokens {
+			if tok.kind == roTokLParen {
+				parenDepth++
+				continue
+			}
+			if tok.kind == roTokRParen {
+				delete(fromDepths, parenDepth)
+				delete(inValuesDepth, parenDepth)
+				if parenDepth > 0 {
+					parenDepth--
+				}
+				continue
+			}
+			if tok.kind == roTokSemi {
+				delete(fromDepths, parenDepth)
+				delete(inValuesDepth, parenDepth)
+				continue
+			}
+			if tok.kind == roTokComma {
+				if inValuesDepth[parenDepth] && i+1 < len(lexTokens) && lexTokens[i+1].kind == roTokLParen {
+					continue
+				}
+				if fromDepths[parenDepth] && nextNonLParenIsString(i+1) {
+					return errors.New("direct file path scans in FROM clauses are forbidden in DuckDB Web sandbox mode")
+				}
+				continue
+			}
 			if tok.kind == roTokWord || tok.kind == roTokQuotedIdent {
 				if _, bad := forbiddenDuckDBWebKeywordsAndFuncs[tok.val]; bad {
 					return fmt.Errorf("forbidden DuckDB keyword/function %q in Web sandbox mode", tok.val)
 				}
+				if _, callBad := callOnlyDuckDBWebFuncs[tok.val]; callBad &&
+					i+1 < len(lexTokens) && lexTokens[i+1].kind == roTokLParen {
+					return fmt.Errorf("forbidden DuckDB keyword/function %q in Web sandbox mode", tok.val)
+				}
+				if tok.kind != roTokWord || tok.val != "VALUES" {
+					delete(inValuesDepth, parenDepth)
+				}
 			}
-			if tok.kind == roTokWord && (tok.val == "FROM" || tok.val == "JOIN") &&
-				i+1 < len(lexTokens) && lexTokens[i+1].kind == roTokString {
-				return errors.New("direct file path scans in FROM clauses are forbidden in DuckDB Web sandbox mode")
+			if tok.kind == roTokWord {
+				switch tok.val {
+				case "PRAGMA", "CALL":
+					return fmt.Errorf("forbidden DuckDB keyword/function %q in Web sandbox mode", tok.val)
+				case "EXPORT", "IMPORT":
+					if i == 0 || (i+1 < len(lexTokens) && lexTokens[i+1].kind == roTokWord && lexTokens[i+1].val == "DATABASE") {
+						return fmt.Errorf("forbidden DuckDB keyword/function %q in Web sandbox mode", tok.val)
+					}
+				case "SECRET":
+					if i > 0 && lexTokens[i-1].kind == roTokWord {
+						switch lexTokens[i-1].val {
+						case "CREATE", "DROP", "REPLACE", "PERSISTENT", "TEMPORARY", "TEMP":
+							return fmt.Errorf("forbidden DuckDB keyword/function %q in Web sandbox mode", tok.val)
+						}
+					}
+				case "FROM", "JOIN":
+					if nextNonLParenIsString(i + 1) {
+						return errors.New("direct file path scans in FROM clauses are forbidden in DuckDB Web sandbox mode")
+					}
+					if tok.val == "FROM" {
+						fromDepths[parenDepth] = true
+					}
+				case "DESCRIBE", "DESC", "SUMMARIZE", "PIVOT", "UNPIVOT":
+					if nextNonLParenIsString(i + 1) {
+						return errors.New("direct file path scans in FROM clauses are forbidden in DuckDB Web sandbox mode")
+					}
+				case "VALUES":
+					if fromDepths[parenDepth] {
+						inValuesDepth[parenDepth] = true
+					}
+				case "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "QUALIFY", "WINDOW",
+					"UNION", "INTERSECT", "EXCEPT", "RETURNING", "SET":
+					delete(fromDepths, parenDepth)
+					delete(inValuesDepth, parenDepth)
+				}
 			}
 		}
 	}
@@ -364,101 +536,217 @@ func ValidateDuckDBRestrictedWebSQL(script string) error {
 }
 
 // HasSQLDotCommandOutsideQuotes reports whether s contains a CLI dot-command (e.g. .shell, .read)
-// at the start of any line outside SQL single/double-quoted literals and SQL comments.
+// at the start of any line outside SQL single/double/backtick/dollar-quoted literals and SQL comments.
 func HasSQLDotCommandOutsideQuotes(s string) bool {
 	return hasSQLDotCommandOutsideQuotes(s)
 }
 
+func matchSQLDollarTag(s string) (string, bool) {
+	if len(s) < 2 || s[0] != '$' {
+		return "", false
+	}
+	if s[1] == '$' {
+		return "$$", true
+	}
+	if !isDollarTagStartByte(s[1]) {
+		return "", false
+	}
+	for i := 2; i < len(s); i++ {
+		ch := s[i]
+		if ch == '$' {
+			return s[:i+1], true
+		}
+		if !isDollarTagContByte(ch) {
+			return "", false
+		}
+	}
+	return "", false
+}
+
 func hasSQLDotCommandOutsideQuotes(s string) bool {
-	trimmed := strings.TrimLeft(s, " \t\r\n")
-	if strings.HasPrefix(trimmed, ".") {
+	return hasSQLDotCommandOutsideQuotesWithOpts(s, SyntaxOptionsForEngine("duckdb"))
+}
+
+func hasSQLDotCommandOutsideQuotesWithOpts(s string, opts SQLSyntaxOptions) bool {
+	if strings.HasPrefix(strings.TrimSpace(s), ".") {
 		return true
 	}
-	inSingle := false
-	inDouble := false
-	inLineComment := false
-	inBlockComment := false
 	atLineStart := true
+	prevIsIdentChar := false
+	isIdentByte := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '$' || b >= 0x80 || (opts.AlternativeQuotes && b == '#')
+	}
 	n := len(s)
 	for i := 0; i < n; i++ {
-		c := s[i]
-		if inLineComment {
-			if c == '\n' {
-				inLineComment = false
-				atLineStart = true
-			}
-			continue
-		}
-		if inBlockComment {
-			if c == '*' && i+1 < n && s[i+1] == '/' {
-				inBlockComment = false
+		ch := s[i]
+		if (opts.HashComments && ch == '#') || isDashLineCommentAt(s, i, opts) {
+			if ch == '-' {
+				i += 2
+			} else {
 				i++
-				continue
 			}
-			if c == '\n' || c == '\r' {
-				atLineStart = true
-				continue
+			for i < n && s[i] != '\n' {
+				i++
 			}
-			if atLineStart {
-				if c == ' ' || c == '\t' {
-					continue
-				}
-				if c == '.' {
-					return true
-				}
-				atLineStart = false
-			}
-			continue
-		}
-		if inSingle {
-			if c == '\'' {
-				if i+1 < n && s[i+1] == '\'' {
-					i++
-					continue
-				}
-				inSingle = false
-			}
-			continue
-		}
-		if inDouble {
-			if c == '"' {
-				if i+1 < n && s[i+1] == '"' {
-					i++
-					continue
-				}
-				inDouble = false
-			}
-			continue
-		}
-		if c == '\n' || c == '\r' {
 			atLineStart = true
+			prevIsIdentChar = false
 			continue
 		}
-		if c == ' ' || c == '\t' {
+		if ch == '/' && i+1 < n && s[i+1] == '*' {
+			wasAtLineStart := atLineStart
+			sawNewline := false
+			commentLineStart := false
+			depth := 1
+			i += 2
+			for i < n && depth > 0 {
+				if opts.NestedBlockComments && i+1 < n && s[i] == '/' && s[i+1] == '*' {
+					commentLineStart = false
+					depth++
+					i += 2
+					continue
+				}
+				if i+1 < n && s[i] == '*' && s[i+1] == '/' {
+					depth--
+					i += 2
+					continue
+				}
+				if s[i] == '\n' || s[i] == '\r' {
+					sawNewline = true
+					commentLineStart = true
+					i++
+					continue
+				}
+				if commentLineStart {
+					if s[i] == ' ' || s[i] == '\t' {
+						i++
+						continue
+					}
+					if s[i] == '.' {
+						return true
+					}
+					commentLineStart = false
+				}
+				i++
+			}
+			if sawNewline {
+				atLineStart = commentLineStart
+			} else {
+				atLineStart = wasAtLineStart
+			}
+			prevIsIdentChar = false
+			i--
 			continue
 		}
-		if atLineStart && c == '.' {
-			return true
+		if ch == '\'' || (opts.EscapeStringPrefix && !prevIsIdentChar && (ch == 'E' || ch == 'e') && i+1 < n && s[i+1] == '\'') {
+			atLineStart = false
+			prevIsIdentChar = false
+			escMode := opts.BackslashEscapes
+			if ch != '\'' {
+				escMode = true
+				i++ // consume E/e
+			}
+			i++ // consume opening '
+			for i < n {
+				if escMode && s[i] == '\\' {
+					if i+1 < n {
+						i += 2
+					} else {
+						i++
+					}
+					continue
+				}
+				if s[i] == '\'' {
+					if i+1 < n && s[i+1] == '\'' {
+						i += 2
+						continue
+					}
+					break
+				}
+				i++
+			}
+			continue
 		}
-		atLineStart = false
-		if c == '-' && i+1 < n && s[i+1] == '-' {
-			inLineComment = true
+		if ch == '"' || (opts.BacktickIdentifiers && ch == '`') {
+			atLineStart = false
+			prevIsIdentChar = false
+			q := ch
 			i++
+			for i < n {
+				if opts.BackslashEscapes && q == '"' && s[i] == '\\' {
+					if i+1 < n {
+						i += 2
+					} else {
+						i++
+					}
+					continue
+				}
+				if s[i] == q {
+					if i+1 < n && s[i+1] == q {
+						i += 2
+						continue
+					}
+					break
+				}
+				i++
+			}
 			continue
 		}
-		if c == '/' && i+1 < n && s[i+1] == '*' {
-			inBlockComment = true
+		if opts.BracketIdentifiers && ch == '[' {
+			atLineStart = false
+			prevIsIdentChar = false
 			i++
+			for i < n {
+				if s[i] == ']' {
+					if opts.BracketDoubleEscape && i+1 < n && s[i+1] == ']' {
+						i += 2
+						continue
+					}
+					break
+				}
+				i++
+			}
 			continue
 		}
-		if c == '\'' {
-			inSingle = true
+		if opts.AlternativeQuotes && !prevIsIdentChar && (ch == 'q' || ch == 'Q' || ch == 'n' || ch == 'N') {
+			if prefixLen, closeSeq, ok := matchAltQuoteOpen(s[i:]); ok {
+				atLineStart = false
+				prevIsIdentChar = false
+				endIdx := strings.Index(s[i+prefixLen:], closeSeq)
+				if endIdx < 0 {
+					return false
+				}
+				i = i + prefixLen + endIdx + len(closeSeq) - 1
+				continue
+			}
+		}
+		if opts.DollarQuotes && !prevIsIdentChar && ch == '$' {
+			if tag, ok := matchSQLDollarTag(s[i:]); ok {
+				atLineStart = false
+				prevIsIdentChar = false
+				endIdx := strings.Index(s[i+len(tag):], tag)
+				if endIdx < 0 {
+					return false
+				}
+				i = i + len(tag) + endIdx + len(tag) - 1
+				continue
+			}
+		}
+		if ch == '\n' || ch == '\r' {
+			atLineStart = true
+			prevIsIdentChar = false
 			continue
 		}
-		if c == '"' {
-			inDouble = true
-			continue
+		if atLineStart {
+			if ch == ' ' || ch == '\t' {
+				prevIsIdentChar = false
+				continue
+			}
+			if ch == '.' {
+				return true
+			}
+			atLineStart = false
 		}
+		prevIsIdentChar = isIdentByte(ch)
 	}
 	return false
 }

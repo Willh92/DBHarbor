@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"dbharbor/backend/internal/driver"
+	"dbharbor/backend/internal/driver/sqlbase"
 )
 
 func TestMain(m *testing.M) {
@@ -32,6 +33,34 @@ func TestMain(m *testing.M) {
 		if strings.Contains(trimmed, "FAIL_SECOND_STMT") {
 			fmt.Fprintln(os.Stderr, "Error: simulated constraint violation")
 			os.Exit(1)
+		}
+		if os.Getenv("DBHARBOR_MOCK_DUCKDB_LARGE_STREAM") == "1" && strings.Contains(strings.ToUpper(trimmed), "LARGE_EXPORT_TEST") {
+			bigChunk := strings.Repeat("A", 200*1024) // 200 KiB per row -> 200 rows = ~40 MiB > 32 MiB
+			_, _ = os.Stdout.WriteString("[")
+			for i := 0; i < 200; i++ {
+				if i > 0 {
+					_, _ = os.Stdout.WriteString(",")
+				}
+				fmt.Fprintf(os.Stdout, `{"id":%d,"payload":%q}`, i+1, bigChunk)
+			}
+			_, _ = os.Stdout.WriteString("]\n")
+			os.Exit(0)
+		}
+		if strings.Contains(strings.ToLower(trimmed), "information_schema.tables") {
+			fmt.Println(`[{"table_name":"t1","table_type":"BASE TABLE","estimated_size":2},{"table_name":"t2","table_type":"BASE TABLE","estimated_size":2}]`)
+			os.Exit(0)
+		}
+		if strings.Contains(strings.ToLower(trimmed), "duckdb_tables()") {
+			fmt.Println(`[{"sql":"CREATE TABLE \"main\".\"t1\" (\"id\" INT, \"name\" VARCHAR)"}]`)
+			os.Exit(0)
+		}
+		if strings.Contains(strings.ToLower(trimmed), "information_schema.columns") {
+			fmt.Println(`[{"column_name":"id","data_type":"INTEGER","is_nullable":"NO","column_default":null},{"column_name":"name","data_type":"VARCHAR","is_nullable":"YES","column_default":null}]`)
+			os.Exit(0)
+		}
+		if strings.Contains(strings.ToLower(trimmed), "duckdb_constraints()") {
+			fmt.Println(`[]`)
+			os.Exit(0)
 		}
 		if strings.HasPrefix(strings.ToUpper(trimmed), "SELECT") {
 			fmt.Println(`[{"id":1,"name":"alpha"},{"id":2,"name":"beta"}]`)
@@ -111,6 +140,22 @@ func TestSingleFileWebSandboxesAndExporters(t *testing.T) {
 		"SELECT * FROM read_parquet('secret.parquet')",
 		"SELECT * FROM read_text('/etc/hosts')",
 		"SELECT * FROM '/etc/passwd'",
+		"SELECT * FROM ('/etc/passwd')",
+		"SELECT * FROM ((('/etc/passwd')))",
+		"SELECT * FROM orders JOIN ('/etc/passwd') ON true",
+		"SELECT * FROM orders, '/etc/passwd'",
+		"SELECT * FROM orders, ('/etc/passwd')",
+		"DESCRIBE '/etc/passwd'",
+		"WITH c AS (SELECT * FROM ('/etc/passwd')) SELECT * FROM c",
+		"SELECT * FROM read_xlsx('a.xlsx')",
+		"SELECT * FROM st_read('a.geojson')",
+		"SELECT * FROM glob('*')",
+		"SELECT * FROM ls('.')",
+		"SELECT * FROM main.glob('*')",
+		"SELECT * FROM read_ndjson('a.json')",
+		"PRAGMA threads=4",
+		"CALL duckdb_secrets()",
+		"/* c */ CALL duckdb_secrets()",
 		"SET enable_external_access = true",
 		"SET/*x*/autoinstall_known_extensions = true",
 		"SELECT getenv('AWS_SECRET_ACCESS_KEY')",
@@ -124,8 +169,41 @@ func TestSingleFileWebSandboxesAndExporters(t *testing.T) {
 			t.Fatalf("expected validateDuckDBWebSandbox to reject %q", badDuck)
 		}
 	}
-	if err := validateDuckDBWebSandbox("SELECT id, name, 'line1\n.not_a_dot_cmd' AS note FROM orders WHERE price > 10.5 ORDER BY id DESC;"); err != nil {
-		t.Fatalf("expected normal DuckDB SELECT to pass sandbox check, got %v", err)
+	for _, safeDuck := range []string{
+		"SELECT id, name, 'line1\n.not_a_dot_cmd' AS note FROM orders WHERE price > 10.5 ORDER BY id DESC;",
+		"SELECT * FROM (SELECT 1) AS sub",
+		"SELECT * FROM orders AS o WHERE o.name GLOB 'a*'",
+		"SELECT export, import FROM jobs",
+		"SELECT $$line1\n.not_a_cmd$$ AS txt",
+		"SELECT $é$hello; world$é$ AS txt",
+		"SELECT $" + strings.Repeat("a", 80) + "$hello; world$" + strings.Repeat("a", 80) + "$ AS txt",
+	} {
+		if err := validateDuckDBWebSandbox(safeDuck); err != nil {
+			t.Fatalf("expected normal DuckDB SELECT %q to pass sandbox check, got %v", safeDuck, err)
+		}
+	}
+
+	// Iteration 12 regressions: SQLite '[' stops at first ']' in sandbox lexer; DuckDB UTF-8 & >64-byte dollar tags
+	if err := validateSQLiteWebSandbox("SELECT [a]] || load_extension('evil.so') || [b]"); err == nil {
+		t.Fatal("expected validateSQLiteWebSandbox to stop '[' at first ']' and reject load_extension('evil.so')")
+	}
+	for _, badDuckDollar := range []string{
+		"SELECT $é$'$é$; CALL duckdb_secrets(); -- '",
+		"SELECT $" + strings.Repeat("a", 65) + "$'$" + strings.Repeat("a", 65) + "$; CALL duckdb_secrets(); -- '",
+		"SELECT $" + strings.Repeat("a", 200) + "$'$" + strings.Repeat("a", 200) + "$; CALL duckdb_secrets(); -- '",
+	} {
+		if err := validateDuckDBWebSandbox(badDuckDollar); err == nil {
+			t.Fatalf("expected validateDuckDBWebSandbox to reject %q", badDuckDollar)
+		}
+	}
+	if _, ok := matchDuckDollarTag("$é$"); !ok {
+		t.Fatal("expected matchDuckDollarTag to match UTF-8 tag $é$")
+	}
+	if _, ok := matchDuckDollarTag("$" + strings.Repeat("a", 200) + "$"); !ok {
+		t.Fatal("expected matchDuckDollarTag to match 200-byte tag")
+	}
+	if toks := lexDuckDBTokens("SELECT col$é$'$é$"); len(toks) < 3 {
+		t.Fatalf("expected col$é$'$é$ not to enter dollar-quote at non-boundary '$', got %+v", toks)
 	}
 
 	// 3. SQLite ExportDatabaseFile via VACUUM INTO
@@ -279,6 +357,17 @@ func TestSQLiteGeneratedColumnsChecksPragmasAndRebuild(t *testing.T) {
 	}); err == nil {
 		t.Fatal("expected disallowed SET_PRAGMA writable_schema to be rejected")
 	}
+
+	// Table rebuild ADD_CHECK must reject SQLite ']]' bracket-escape smuggles early via ValidateSQLExpressionForEngine("sqlite", ...)
+	if _, err := sqlDrv.AlterTable(ctx, driver.AlterTableRequest{
+		Table:       "items_rebuild",
+		PreviewOnly: true,
+		Actions: []driver.AlterAction{
+			{Action: "ADD_CHECK", Check: driver.CheckConstraintDef{Name: "chk_bad_br", Expression: "[a]] ); DROP TABLE users; -- ]"}},
+		},
+	}); err == nil {
+		t.Fatal("expected SQLite rebuild ADD_CHECK to reject ']]' bracket-escape injection")
+	}
 }
 
 func TestSQLiteVirtualTablesShadowHidingAndWebSandbox(t *testing.T) {
@@ -302,6 +391,17 @@ func TestSQLiteVirtualTablesShadowHidingAndWebSandbox(t *testing.T) {
 		Columns:       []driver.ColumnDef{{Name: "body", Type: "TEXT"}},
 	}); err == nil {
 		t.Fatal("expected unapproved virtual module to be rejected")
+	}
+
+	// VirtualArgs must validate with SQLite lexical rules (BracketDoubleEscape: false) even on previewOnly
+	if _, err := sqlDrv.CreateTable(ctx, driver.CreateTableRequest{
+		Table:         "bad_vt_args",
+		VirtualModule: "fts5",
+		Columns:       []driver.ColumnDef{{Name: "body"}},
+		VirtualArgs:   "[a]] ); DROP TABLE users; -- ]",
+		PreviewOnly:   true,
+	}); err == nil {
+		t.Fatal("expected virtualArgs ']]' bracket-escape payload to be rejected")
 	}
 
 	if _, err := sqlDrv.CreateTable(ctx, driver.CreateTableRequest{
@@ -491,5 +591,165 @@ func TestDuckDBStdinExecutionAtomicMutationsAndStreamExport(t *testing.T) {
 	var exported []map[string]any
 	if err := json.Unmarshal(jsonBuf.Bytes(), &exported); err != nil || len(exported) != 2 {
 		t.Fatalf("unexpected StreamExport JSON output (err=%v): %s", err, jsonBuf.String())
+	}
+}
+
+func TestDuckDBStreamExportStreamingMaxRowsAndMultiTableFormats(t *testing.T) {
+	tmpDir := t.TempDir()
+	capFile := filepath.Join(tmpDir, "duck_stream_cap.json")
+	dbPath := filepath.Join(tmpDir, "stream_test.duckdb")
+
+	t.Setenv("DBHARBOR_MOCK_DUCKDB_CLI", "1")
+	t.Setenv("DBHARBOR_MOCK_DUCKDB_CAPTURE", capFile)
+	t.Setenv("DBHARBOR_MOCK_DUCKDB_LARGE_STREAM", "1")
+
+	duck := &DuckDBDriver{
+		filePath: dbPath,
+		cliBin:   os.Args[0],
+		webMode:  true,
+	}
+
+	// 1. Streaming >32 MiB payload without hitting maxDuckDBJSONBytes (32 MiB) cap
+	var largeOut bytes.Buffer
+	if err := duck.StreamExport(context.Background(), driver.ExportRequest{
+		Schema:    "main",
+		CustomSQL: "SELECT id, payload FROM LARGE_EXPORT_TEST",
+		Format:    "jsonl",
+	}, &largeOut); err != nil {
+		t.Fatalf("StreamExport >32 MiB failed: %v", err)
+	}
+	if largeOut.Len() <= 32<<20 {
+		t.Fatalf("expected streamed output >32 MiB, got %d bytes", largeOut.Len())
+	}
+
+	// 2. Single-table export pushes LIMIT 5 into stdin SQL
+	var csvBomOut bytes.Buffer
+	if err := duck.StreamExport(context.Background(), driver.ExportRequest{
+		Schema:  "main",
+		Table:   "orders",
+		Format:  "csv_bom",
+		MaxRows: 5,
+	}, &csvBomOut); err != nil {
+		t.Fatalf("StreamExport single-table csv_bom failed: %v", err)
+	}
+	rawCSV := csvBomOut.Bytes()
+	if !bytes.HasPrefix(rawCSV, []byte{0xEF, 0xBB, 0xBF}) {
+		t.Fatalf("expected UTF-8 BOM in csv_bom output")
+	}
+	if !strings.Contains(string(rawCSV[3:]), "id,name\n1,alpha\n2,beta\n") {
+		t.Fatalf("unexpected csv_bom column order/content: %q", string(rawCSV[3:]))
+	}
+	rawCap, _ := os.ReadFile(capFile)
+	if !strings.Contains(string(rawCap), "LIMIT 5") {
+		t.Fatalf("expected single-table StreamExport with MaxRows=5 to push LIMIT 5, got: %s", string(rawCap))
+	}
+
+	// 3. CustomSQL StreamExport stops early at MaxRows=1
+	var customOut bytes.Buffer
+	if err := duck.StreamExport(context.Background(), driver.ExportRequest{
+		Schema:    "main",
+		CustomSQL: "SELECT id, name FROM orders",
+		Format:    "json",
+		MaxRows:   1,
+	}, &customOut); err != nil {
+		t.Fatalf("StreamExport CustomSQL MaxRows=1 failed: %v", err)
+	}
+	var customRows []map[string]any
+	if err := json.Unmarshal(customOut.Bytes(), &customRows); err != nil || len(customRows) != 1 {
+		t.Fatalf("expected exactly 1 row for CustomSQL MaxRows=1, got %d (%s), err=%v", len(customRows), customOut.String(), err)
+	}
+
+	// 4. Multi-table StreamExport supports sql, json, jsonl and rejects csv/csv_bom/markdown
+	var multiSQL bytes.Buffer
+	if err := duck.StreamExport(context.Background(), driver.ExportRequest{
+		Schema:     "main",
+		Tables:     []string{"t1", "t2"},
+		Format:     "sql",
+		IncludeDDL: true,
+	}, &multiSQL); err != nil {
+		t.Fatalf("multi-table SQL export failed: %v", err)
+	}
+	if !strings.Contains(multiSQL.String(), `INSERT INTO "main"."t1" ("id", "name") VALUES (1, 'alpha');`) ||
+		!strings.Contains(multiSQL.String(), `INSERT INTO "main"."t2"`) {
+		t.Fatalf("unexpected multi-table SQL output:\n%s", multiSQL.String())
+	}
+
+	var multiJSON bytes.Buffer
+	if err := duck.StreamExport(context.Background(), driver.ExportRequest{
+		Schema: "main",
+		Format: "json",
+	}, &multiJSON); err != nil {
+		t.Fatalf("multi-table JSON export failed: %v", err)
+	}
+	var parsedMulti map[string]any
+	if err := json.Unmarshal(multiJSON.Bytes(), &parsedMulti); err != nil {
+		t.Fatalf("invalid multi-table JSON: %v\n%s", err, multiJSON.String())
+	}
+
+	var multiJSONL bytes.Buffer
+	if err := duck.StreamExport(context.Background(), driver.ExportRequest{
+		Schema: "main",
+		Tables: []string{"t1"},
+		Format: "jsonl",
+	}, &multiJSONL); err != nil {
+		t.Fatalf("multi-table JSONL export failed: %v", err)
+	}
+	if !strings.Contains(multiJSONL.String(), `"__table__":"t1"`) {
+		t.Fatalf("expected __table__ in multi-table JSONL, got: %s", multiJSONL.String())
+	}
+
+	for _, badFmt := range []string{"csv", "csv_bom", "markdown"} {
+		if err := duck.StreamExport(context.Background(), driver.ExportRequest{
+			Schema: "main",
+			Tables: []string{"t1", "t2"},
+			Format: badFmt,
+		}, &bytes.Buffer{}); err == nil {
+			t.Fatalf("expected multi-table StreamExport to reject format %q", badFmt)
+		}
+	}
+
+	// 5. Restricted web context rejects forbidden CustomSQL in StreamExport even when webMode=false
+	nonWebDuck := &DuckDBDriver{filePath: dbPath, cliBin: os.Args[0], webMode: false}
+	restrictedCtx := sqlbase.WithRestrictedWebContext(context.Background())
+	if err := nonWebDuck.StreamExport(restrictedCtx, driver.ExportRequest{
+		CustomSQL: "SELECT * FROM ('/etc/passwd')",
+		Format:    "json",
+	}, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected restricted web context to reject forbidden CustomSQL in StreamExport")
+	}
+
+	// 6. Single-quote backslash smuggle and sandbox gaps rejected in both ExecuteSQL and StreamExport
+	sandboxPayloads := []string{
+		"SELECT '\\'; CALL duckdb_secrets(); SELECT ''",
+		"SELECT '\\'; ATTACH '/etc/passwd' AS p; SELECT ''",
+		"SELECT '\\'; SELECT * FROM read_csv('/etc/passwd'); SELECT ''",
+		"SELECT * FROM (SELECT * FROM safe_tbl) AS sub, '/etc/passwd'",
+		"EXPLAIN DESCRIBE '/etc/passwd'",
+		"EXPLAIN DESC '/etc/passwd'",
+		"CREATE TABLE t AS DESC '/etc/passwd'",
+		"CREATE SECRET s1 (TYPE S3, KEY_ID 'a', SECRET 'b')",
+		"SELECT /* /* */ ' */ ; CALL duckdb_secrets(); -- '",
+		"SELECT /* /* */ ' */ ; ATTACH '/etc/passwd' AS p; -- '",
+		"SELECT #1 FROM (SELECT 42); CALL duckdb_secrets()",
+		"PIVOT '/etc/passwd' ON col USING SUM(val)",
+		"UNPIVOT '/etc/passwd' ON col",
+		"SELECT * FROM VALUES (1) AS t(a), '/etc/passwd'",
+	}
+	for _, payload := range sandboxPayloads {
+		if _, err := duck.ExecuteSQL(context.Background(), "", payload, 100); err == nil {
+			t.Fatalf("expected DuckDBDriver.ExecuteSQL to reject %q", payload)
+		}
+		if err := duck.StreamExport(context.Background(), driver.ExportRequest{
+			CustomSQL: payload,
+			Format:    "json",
+		}, &bytes.Buffer{}); err == nil {
+			t.Fatalf("expected DuckDBDriver.StreamExport to reject %q", payload)
+		}
+		if err := nonWebDuck.StreamExport(restrictedCtx, driver.ExportRequest{
+			CustomSQL: payload,
+			Format:    "json",
+		}, &bytes.Buffer{}); err == nil {
+			t.Fatalf("expected restrictedCtx DuckDBDriver.StreamExport to reject %q", payload)
+		}
 	}
 }
